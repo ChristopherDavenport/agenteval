@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/ChristopherDavenport/agenteval/replay"
 	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agentsession/export"
 	"github.com/ChristopherDavenport/agentturn"
@@ -313,35 +314,25 @@ func (r *Runner) answer(ctx context.Context, a *agentturn.Agent, end *agentturn.
 var ErrUnreplayable = errors.New("agenteval: the run cannot be replayed strictly")
 
 // replayable reports whether the record rebuilds every request the run
-// made. The recorder writes a response without a request hash when the
-// path it wrote does not rebuild that request's input: what a
-// compacting configuration whose folds were never reported produces,
-// and what a hook that edits the input produces. A strict replay of
-// such a session serves that call by position, because an absent hash
-// is nothing to check against, so the one property strict mode is
-// asked for is silently missing at it, weeks later and with nothing at
-// write time having said why; naming it on the result is that missing
-// word.
+// made. Whether it does is [replay.Unverifiable]'s question and is
+// asked there rather than answered again here: a strict replay of a
+// session it rejects cannot be built at all, and naming that on the
+// result is the word missing at write time, weeks before anyone tries.
+// What this adds is the runner's own diagnosis, which replay cannot
+// make because it never sees the configuration: a session with no fold
+// at all is most often one whose compacting configuration never bound
+// compact.WithOnFold, and that is a seam this package owns.
 func replayable(s *agentsession.Session, leaf string) error {
-	unhashed, responses, folds := 0, 0, 0
-	for _, e := range s.Path(leaf) {
-		switch v := e.(type) {
-		case *agentsession.ResponseEntry:
-			responses++
-			if v.RequestHash == "" {
-				unhashed++
-			}
-		case *agentsession.CompactionEntry:
-			folds++
-		}
-	}
-	if unhashed == 0 {
+	err := replay.Unverifiable(s, leaf)
+	if err == nil {
 		return nil
 	}
-	if folds == 0 {
-		return fmt.Errorf("%w: %d of %d responses carry no request hash and the session records no fold; a configuration that compacts binds compact.WithOnFold(rec.Fold) through Runner.ConfigWith, and a transform or a hook that edits the input is a change the record cannot describe at all", ErrUnreplayable, unhashed, responses)
+	for _, e := range s.Path(leaf) {
+		if _, ok := e.(*agentsession.CompactionEntry); ok {
+			return fmt.Errorf("%w: %w", ErrUnreplayable, err)
+		}
 	}
-	return fmt.Errorf("%w: %d of %d responses carry no request hash, so the record does not rebuild what was sent", ErrUnreplayable, unhashed, responses)
+	return fmt.Errorf("%w: %w; the session records no fold, and a configuration that compacts binds compact.WithOnFold(rec.Fold) through Runner.ConfigWith, while a transform or a hook that edits the input is a change the record cannot describe at all", ErrUnreplayable, err)
 }
 
 // describe writes what the session is a run of: an info entry naming

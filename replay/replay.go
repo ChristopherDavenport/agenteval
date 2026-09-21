@@ -8,10 +8,12 @@
 // request whose hash differs from the one recorded on the entry about
 // to be served is refused with [ErrDiverged], a fold's own request
 // included, so a summary prompt, a budget or a filter that changed is
-// not signed off as neutral; in lenient mode the calls are served by
-// position and the hashes are reported through the observer. [Tools]
-// wraps a tool list so that a call matching a recorded function call
-// returns its recorded output instead of running.
+// not signed off as neutral; a call the record carries no hash for is
+// refused with [ErrUnverifiable] rather than served unchecked, unless
+// [AllowUnhashed] says to serve it. In lenient mode the calls are
+// served by position and the hashes are reported through the observer.
+// [Tools] wraps a tool list so that a call matching a recorded
+// function call returns its recorded output instead of running.
 //
 // A model and its tools are not the whole of what a call was made
 // under. [Model.BeforeModelCall] serves back the instructions and the
@@ -45,6 +47,15 @@ import (
 // handed does not hash to the value recorded on the entry it would
 // serve, and by strict tools for a call with no recorded output.
 var ErrDiverged = errors.New("replay: diverged from the recording")
+
+// ErrUnverifiable is returned when the record carries no hash for a
+// call a strict replay would serve, so nothing can be checked against
+// what the recording sent. It is not [ErrDiverged]: nothing was
+// measured to differ, and the record simply does not say. [NewModel]
+// returns it for a path whose responses are not all hashed, and a
+// strict fold whose compaction entry recorded no fold hash returns it
+// at the call; [AllowUnhashed] serves both unchecked instead.
+var ErrUnverifiable = errors.New("replay: the record cannot say what was sent")
 
 // ErrExhausted is returned when the path holds no further recorded
 // call of the kind requested.
@@ -80,7 +91,11 @@ type Served struct {
 	// hashes, an entry written before agentturn v0.0.6 carries no fold
 	// member at all, and a response entry carries no hash when the path
 	// does not rebuild that request's input; all three leave the two
-	// empty and Match false. Match reports whether the two agree.
+	// empty and Match false, which a strict model reports only under
+	// [AllowUnhashed], having otherwise refused the call. Match reports
+	// whether the two agree, and is false when there was nothing to
+	// compare: it is not on its own a statement that the call was
+	// checked.
 	Recorded, Got string
 	Match         bool
 	// CallID and Name describe a served tool call, and ByID reports
@@ -90,10 +105,11 @@ type Served struct {
 }
 
 type options struct {
-	strict   bool
-	leaf     string
-	observer func(Served)
-	foldText func(openresponses.Item) string
+	strict        bool
+	allowUnhashed bool
+	leaf          string
+	observer      func(Served)
+	foldText      func(openresponses.Item) string
 }
 
 // Option configures a [Model] or [Tools].
@@ -102,15 +118,37 @@ type Option func(*options)
 // Strict makes a model refuse a request whose hash differs from the
 // recorded one, and tools refuse a call with no recorded output. A
 // fold is checked against the hash its compaction entry recorded for
-// it, and one recorded before agentturn v0.0.6, which wrote no fold
-// member, is checked only for the shape of a fold's request. An entry
-// that recorded no hash at all is served by position, because there is
-// nothing to check it against; agenteval's runner refuses such a
-// session before the replay starts rather than serve it unchecked. The
-// default is lenient: the model serves by position and reports the
+// it as a response is against its own.
+//
+// An entry that recorded no hash is refused rather than served
+// unchecked, with [ErrUnverifiable]: [NewModel] refuses the whole
+// session when a response on the path carries no request hash, before
+// a call is served, and a fold whose compaction entry recorded no fold
+// hash is refused at the call, because whether that matters depends on
+// the compactor the replay is run with. [AllowUnhashed] serves them
+// instead, which is how a recording made before agentturn v0.0.6
+// replays.
+//
+// The default is lenient: the model serves by position and reports the
 // hashes through the observer, and an unmatched call runs the real
 // tool.
 func Strict() Option { return func(o *options) { o.strict = true } }
+
+// AllowUnhashed lets a strict model serve a call whose entry recorded
+// no hash: by position, and unchecked. It turns the guarantee off for
+// those calls rather than relaxing it. What the caller gives up is the
+// whole of what [Strict] is for — that every served call was checked
+// against the request the recording made — for every call the record
+// is silent about, and nothing in the replay's result distinguishes a
+// call that was checked and matched from one that was never checked.
+// Only [Model.Settings] and an observer subscribing to [Served] can
+// tell them apart afterwards.
+//
+// It exists for recordings the format cannot describe: one made before
+// agentturn v0.0.6, which wrote no fold member, and one whose requests
+// a transform or a hook edited. Reach for it to replay an old session
+// at all, not to quiet a failure on a current one.
+func AllowUnhashed() Option { return func(o *options) { o.allowUnhashed = true } }
 
 // WithLeaf names the path to serve. The default is the session's
 // current leaf, which after judging is an outcome entry rather than a
@@ -183,12 +221,20 @@ type Model struct {
 }
 
 // NewModel builds a model over the path from the root to the leaf
-// named by [WithLeaf], or to the session's current leaf.
+// named by [WithLeaf], or to the session's current leaf. A strict
+// model over a path a strict replay could not check is refused here
+// with [ErrUnverifiable], rather than at the call it could not check:
+// see [Unverifiable], and [AllowUnhashed] to serve it anyway.
 func NewModel(s *agentsession.Session, opts ...Option) (*Model, error) {
 	o := apply(opts)
 	path, err := pathTo(s, o.leaf)
 	if err != nil {
 		return nil, err
+	}
+	if o.strict && !o.allowUnhashed {
+		if err := unverifiable(path); err != nil {
+			return nil, err
+		}
 	}
 	m := &Model{opts: o}
 	// The settings in force at each step are the config entries on the
@@ -268,6 +314,53 @@ func pathTo(s *agentsession.Session, leaf string) ([]agentsession.Entry, error) 
 		return nil, fmt.Errorf("replay: %w: %s", agentsession.ErrNoEntry, leaf)
 	}
 	return path, nil
+}
+
+// Unverifiable reports whether a strict replay of the path to leaf, or
+// to the session's current leaf when leaf is empty, could check every
+// call it serves. It returns nil when it could, and an error wrapping
+// [ErrUnverifiable] naming how many responses are unhashed when it
+// could not.
+//
+// The recorder writes a response without a request hash when the path
+// it wrote does not rebuild that request's input: what a compacting
+// configuration whose folds were never reported produces, and what a
+// transform or a hook that edits the request produces. There is
+// nothing to check such a call against, so a strict replay either
+// refuses it or serves it unchecked, and which of those it does is
+// [AllowUnhashed].
+//
+// This is the rule [NewModel] applies to the path it builds, exported
+// so a caller can ask before building a model or running a suite
+// rather than find out at the call.
+func Unverifiable(s *agentsession.Session, leaf string) error {
+	path, err := pathTo(s, leaf)
+	if err != nil {
+		return err
+	}
+	return unverifiable(path)
+}
+
+// unverifiable is [Unverifiable] over a path already in hand. Folds
+// are not counted here: a compaction entry with no fold hash matters
+// only if the replay folds locally, which is not known until the call,
+// so serveFold decides that one.
+func unverifiable(path []agentsession.Entry) error {
+	unhashed, responses := 0, 0
+	for _, e := range path {
+		r, ok := e.(*agentsession.ResponseEntry)
+		if !ok {
+			continue
+		}
+		responses++
+		if r.RequestHash == "" {
+			unhashed++
+		}
+	}
+	if unhashed == 0 {
+		return nil
+	}
+	return fmt.Errorf("%w: %d of %d responses on the path carry no request hash", ErrUnverifiable, unhashed, responses)
 }
 
 // Steps returns how many recorded calls, responses and folds, the path
@@ -401,13 +494,12 @@ func (m *Model) CreateStream(_ context.Context, req openresponses.Request, sink 
 		sv.Got, sv.Match = got, got == st.resp.RequestHash
 	}
 	m.observe(sv)
-	// An entry that recorded no request hash is served by position, as
-	// a compaction entry that recorded no fold hash is. The record does
-	// not say what was sent, which is not the same as saying that what
-	// was sent differs, and refusing here reports a divergence that was
-	// never measured. A session whose record is short of a hash is
-	// named unreplayable by agenteval's runner before a replay of it
-	// reaches here.
+	// An entry that recorded no request hash is served by position: the
+	// record does not say what was sent, which is not the same as
+	// saying that what was sent differs, and refusing here would report
+	// a divergence that was never measured. A strict model reaches this
+	// only under AllowUnhashed, because NewModel refuses such a path
+	// outright.
 	if m.opts.strict && sv.Recorded != "" && !sv.Match {
 		return fmt.Errorf("%w: response %s (step %d): recorded %s, received %s", ErrDiverged, st.resp.ID, n, sv.Recorded, sv.Got)
 	}
@@ -502,8 +594,16 @@ func (m *Model) serveFold(st step, n int, req openresponses.Request, sink openre
 		sv.Got, sv.Match = got, got == st.foldHash
 	}
 	m.observe(sv)
-	// An entry that recorded no fold hash keeps the shape-only check,
-	// so a recording made before agentturn v0.0.6 still replays.
+	// An entry that recorded no fold hash leaves the shape of a fold's
+	// request as the only check there is, which is no check at all
+	// against what the recording sent. NewModel cannot refuse it,
+	// because a compaction entry recorded through the endpoint carries
+	// no fold hash and replays through Compact without ever reaching
+	// here; so it is refused at the call, and AllowUnhashed is how a
+	// recording made before agentturn v0.0.6 replays.
+	if m.opts.strict && sv.Recorded == "" && !m.opts.allowUnhashed {
+		return fmt.Errorf("%w: compaction %s (step %d): the entry records no hash for the fold's own request", ErrUnverifiable, st.comp.ID, n)
+	}
 	if m.opts.strict && sv.Recorded != "" && !sv.Match {
 		return fmt.Errorf("%w: compaction %s (step %d): the fold's request: recorded %s, received %s", ErrDiverged, st.comp.ID, n, sv.Recorded, sv.Got)
 	}
