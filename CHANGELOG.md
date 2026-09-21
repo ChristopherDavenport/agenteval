@@ -26,7 +26,6 @@ versions may break the API.
   cannot be replayed strictly because a response on its path carries
   no request hash. The runner reports it when the run is written
   rather than leaving it to a replay weeks later (#1).
-
 - `replay.Model.BeforeModelCall`, an `agentturn` `BeforeModelCall`
   hook that serves the instructions and the tool list in force at each
   recorded call, and `Model.Settings` and `Model.SettingsAt`, the
@@ -44,17 +43,18 @@ versions may break the API.
   in both tables lost one of the two values, and which one it lost
   depended on Go's map iteration order. A consumer reading `Meta`
   updates its keys (#3).
-
-- `replay.Strict()` checks a local fold's own request against the hash
-  its compaction entry records, and refuses a mismatch with
+- **Breaking.** `replay.Strict()` checks a local fold's own request
+  against the hash its compaction entry records, and refuses a
+  mismatch with
   `ErrDiverged` as it does for a response, so a summary prompt, a
   budget or a filter that changed is no longer answered with the
   recorded summary and reported as neutral. `Served` carries both
   hashes for a fold. A compaction entry with no recorded fold hash, a
   fold through the compaction endpoint or a recording made before
-  agentturn v0.0.6, keeps the shape-only check (#2).
-
-- `judge.Render` strips the raw item passthrough through
+  agentturn v0.0.6, keeps the shape-only check. A replay that passed
+  while folding differently from the recording now fails, which is the
+  point (#2).
+- **Breaking.** `judge.Render` strips the raw item passthrough through
   `export.NoPassthrough`, so a judged document keeps the root's
   payload profile name and says which wire profile produced it.
   `judge.StripRaw` is that function under this package's name and is
