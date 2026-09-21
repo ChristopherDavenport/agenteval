@@ -224,12 +224,17 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task) Result {
 	if res.Target == "" {
 		return res
 	}
+	// replayable and trajectoryAt are this package's own, and their
+	// errors already name it. Wrapping those with the package again
+	// puts it twice in front of one message; the sites below wrap
+	// another package's error, or one with no name of its own, and
+	// name this one because nothing else would.
 	if err := replayable(s, res.Target); err != nil {
-		res.Err = errors.Join(res.Err, fmt.Errorf("agenteval: task %s: %w", task.ID, err))
+		res.Err = errors.Join(res.Err, fmt.Errorf("task %s: %w", task.ID, err))
 	}
 	t, err := trajectoryAt(s, res.Target)
 	if err != nil {
-		res.Err = errors.Join(res.Err, fmt.Errorf("agenteval: task %s: %w", task.ID, err))
+		res.Err = errors.Join(res.Err, fmt.Errorf("task %s: %w", task.ID, err))
 		return res
 	}
 	for _, j := range r.Judges {
@@ -311,12 +316,7 @@ func (r *Runner) answer(ctx context.Context, a *agentturn.Agent, end *agentturn.
 // ErrUnreplayable is joined onto the result of a run whose session
 // cannot be replayed strictly, because the record does not rebuild
 // every request the run sent.
-//
-// Its text carries no "agenteval: " prefix, alone among this package's
-// sentinels: it is only ever returned through Run, which wraps it with
-// the package and the task already, and three prefixes before a word
-// of content is what the reader of a failed result actually sees.
-var ErrUnreplayable = errors.New("the run cannot be replayed strictly")
+var ErrUnreplayable = errors.New("agenteval: the run cannot be replayed strictly")
 
 // replayable reports whether the record rebuilds every request the run
 // made. Whether it does is [replay.Unverifiable]'s question and is

@@ -25,10 +25,7 @@ versions may break the API.
 - `ErrUnreplayable`, joined onto the result of a run whose session
   cannot be replayed strictly because a response on its path carries
   no request hash. The runner reports it when the run is written
-  rather than leaving it to a replay weeks later. Its text carries no
-  `agenteval: ` prefix, alone among this package's sentinels, because
-  it is only ever returned through `Run`, which adds the package and
-  the task itself (#1).
+  rather than leaving it to a replay weeks later (#1).
 - `replay.ErrUnverifiable`, `replay.AllowUnhashed()` and
   `replay.Unverifiable`. A strict replay refuses a call the record
   carries no hash for rather than serve it unchecked: `NewModel`
@@ -101,6 +98,13 @@ versions may break the API.
 
 ### Fixed
 
+- A task result no longer names this package twice in front of one
+  message. `Run` wraps each failure with `agenteval: task <id>: `, and
+  the two errors on that path that come from this package —
+  `ErrUnreplayable` and the one `trajectoryAt` returns — already began
+  with `agenteval: `. Those two sites now wrap with `task <id>: ` and
+  leave the naming to the error, and the sites that wrap another
+  package's error, or one with no name of its own, are unchanged.
 - `replay` serves a recorded item's own bytes. It streamed each item
   through `openresponses.Emitter`, which promotes an unset status to
   `completed` as it closes an item, so a recording from a server that
