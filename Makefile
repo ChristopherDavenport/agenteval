@@ -56,11 +56,14 @@ vuln:
 # when the module is the main one, and ../go.mod is not in the zip. A
 # consumer is unaffected, because a replace in a dependency is ignored,
 # but nothing otherwise compiles the released pair against each other.
-# This builds a copy with the replace dropped, which is that pair.
+# This builds a copy with the replace dropped, which is that pair. It
+# runs with -mod=mod because the checkout's go.sum has no entry for the
+# root module: under the replace nothing ever fetches it.
 published:
 	@for m in $(SUBMODULES); do ( \
 	  d=$$(mktemp -d) && cp -R $$m/. $$d && cd $$d && \
-	  $(GO) mod edit -dropreplace=$(MODULE) && $(GO) build ./... ; \
+	  $(GO) mod edit -dropreplace=$(MODULE) && \
+	  GOFLAGS=-mod=mod $(GO) build ./... ; \
 	  code=$$?; rm -rf $$d; exit $$code ) || exit 1; done
 
 # Everything CI runs.
