@@ -1,0 +1,4 @@
+{
+  "gpt-5": {"input": 1.25, "cached": 0.125, "output": 10},
+  "acme/small": {"input": 0.1, "cached": 0.01, "output": 0.4}
+}

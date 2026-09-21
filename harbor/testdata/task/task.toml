@@ -1,0 +1,30 @@
+schema_version = "1.4"
+multi_step_reward_strategy = "mean"
+
+[task]
+name = "hello-miniturn"
+description = "The smallest task."
+keywords = ["smoke", "hello"]
+authors = ["a", "b"]
+
+[metadata]
+difficulty = "easy"
+category = "smoke"
+
+[environment]
+dockerfile = "environment/Dockerfile"
+network_mode = "none"
+cpus = 2
+memory_mb = 1024
+allowed_hosts = []
+
+[[environment.mcp_servers]]
+name = "fs"
+transport = "stdio"
+
+[agent]
+timeout_sec = 300.5
+
+[verifier]
+timeout_sec = 60
+environment_mode = "shared"

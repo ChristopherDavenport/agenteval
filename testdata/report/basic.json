@@ -1,0 +1,153 @@
+{
+  "suite": "basic",
+  "manifest": {
+    "location": "basic",
+    "files": {
+      "basic/greet.json": "sha256:9760af5564c34bc774836091fa71d33e26071f904e7093275379b47e69e843d9",
+      "basic/plain.json": "sha256:cb51010d44cd68d725d9ac15837da42bd3300a44a8bd39d110eeb13344a88f8b",
+      "basic/suite.json": "sha256:ed5a17378f0769e22190bcb1be9a0d04c5558c5810599249f6d14a1cf3a4ebdc"
+    }
+  },
+  "results": [
+    {
+      "task": {
+        "id": "greet",
+        "instruction": "hello world",
+        "expect": {
+          "contains": [
+            "Tool result",
+            "HELLO WORLD"
+          ]
+        },
+        "meta": {
+          "kind": "tool"
+        }
+      },
+      "session_id": "01995b2a-0000-7000-8000-000000000001",
+      "target": "e0000013",
+      "reason": "done",
+      "runs": 1,
+      "usage": {
+        "input_tokens": 8,
+        "output_tokens": 6,
+        "total_tokens": 14,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "cost_usd": 20,
+      "scores": [
+        {
+          "judge": "contains",
+          "value": 1,
+          "pass": true,
+          "reason": "final text contains 2 expected string(s)"
+        },
+        {
+          "judge": "exact",
+          "value": 0,
+          "pass": false,
+          "reason": "task has no expected text"
+        },
+        {
+          "judge": "tool_called:upper",
+          "value": 1,
+          "pass": true,
+          "reason": "upper was called 1 time(s)"
+        }
+      ]
+    },
+    {
+      "task": {
+        "id": "plain",
+        "prompts": [
+          {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "first"
+              }
+            ]
+          },
+          {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "second"
+              }
+            ]
+          }
+        ],
+        "setup": {
+          "tools": "none"
+        },
+        "expect": {
+          "text": "second"
+        }
+      },
+      "session_id": "01995b2a-0000-7000-8000-000000000002",
+      "target": "e0000014",
+      "reason": "done",
+      "runs": 2,
+      "usage": {
+        "input_tokens": 4,
+        "output_tokens": 2,
+        "total_tokens": 6,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "cost_usd": 8,
+      "scores": [
+        {
+          "judge": "contains",
+          "value": 0,
+          "pass": false,
+          "reason": "task has no expected strings"
+        },
+        {
+          "judge": "exact",
+          "value": 1,
+          "pass": true,
+          "reason": "final text equals the expected text"
+        },
+        {
+          "judge": "tool_called:upper",
+          "value": 0,
+          "pass": false,
+          "reason": "upper was not called"
+        }
+      ]
+    }
+  ],
+  "by_judge": {
+    "contains": {
+      "count": 2,
+      "mean": 0.5,
+      "passed": 1,
+      "pass_rate": 0.5
+    },
+    "exact": {
+      "count": 2,
+      "mean": 0.5,
+      "passed": 1,
+      "pass_rate": 0.5
+    },
+    "tool_called:upper": {
+      "count": 2,
+      "mean": 0.5,
+      "passed": 1,
+      "pass_rate": 0.5
+    }
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "instruction": "hello world",
+  "expect": {"contains": ["Tool result", "HELLO WORLD"]},
+  "meta": {"kind": "tool"}
+}

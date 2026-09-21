@@ -1,0 +1,9 @@
+{
+  "id": "plain",
+  "prompts": [
+    {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "first"}]},
+    {"type": "message", "role": "user", "content": "second"}
+  ],
+  "setup": {"tools": "none"},
+  "expect": {"text": "second"}
+}
