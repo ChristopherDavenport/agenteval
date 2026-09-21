@@ -13,9 +13,18 @@
 // wraps a tool list so that a call matching a recorded function call
 // returns its recorded output instead of running.
 //
+// A model and its tools are not the whole of what a call was made
+// under. [Model.BeforeModelCall] serves back the instructions and the
+// tool list in force at each recorded call, so a product whose layers
+// rebuild them every turn from a store, a skill set or a memory block
+// is replayed against the run rather than against what those layers
+// would build today; [Model.Settings] holds the rest of what each
+// call was made under.
+//
 //	s, _ := store.Open(ctx, id)
 //	model, _ := replay.NewModel(s, replay.Strict())
 //	cfg.Model = model
+//	cfg.BeforeModelCall = model.BeforeModelCall
 //	cfg.Tools = replay.Tools(s, cfg.Tools, replay.Strict())
 package replay
 
@@ -147,6 +156,9 @@ type step struct {
 	output  openresponses.Items
 	comp    *agentsession.CompactionEntry
 	summary openresponses.Item
+	// settings are the settings in force at this step: what the config
+	// entries on the path up to it say the request was made under.
+	settings agentsession.Settings
 	// foldHash is the hash of the request the recorded fold sent, from
 	// the compaction entry's fold member. It is empty for a fold
 	// through the compaction endpoint, which sends no request the
@@ -175,10 +187,18 @@ func NewModel(s *agentsession.Session, opts ...Option) (*Model, error) {
 		return nil, err
 	}
 	m := &Model{opts: o}
+	// The settings in force at each step are the config entries on the
+	// path applied in order, which is what a product whose layers
+	// re-read state each turn must send to replay strictly: the
+	// recording's instructions, not the ones those layers would build
+	// again today.
+	var settings agentsession.Settings
 	for i, e := range path {
 		switch v := e.(type) {
+		case *agentsession.ConfigEntry:
+			settings = settings.Apply(v)
 		case *agentsession.ResponseEntry:
-			st := step{resp: v}
+			st := step{resp: v, settings: settings}
 			// The response's own output is the item entries directly
 			// before it that name its response ID, the rule
 			// Session.RequestContext uses to drop them.
@@ -194,7 +214,7 @@ func NewModel(s *agentsession.Session, opts ...Option) (*Model, error) {
 			st.output = st.output.Clone()
 			m.steps = append(m.steps, st)
 		case *agentsession.CompactionEntry:
-			m.steps = append(m.steps, step{comp: v, summary: openresponses.Items{v.Summary}.Clone()[0], foldHash: foldHash(v)})
+			m.steps = append(m.steps, step{comp: v, summary: openresponses.Items{v.Summary}.Clone()[0], foldHash: foldHash(v), settings: settings})
 		}
 	}
 	return m, nil
@@ -235,6 +255,74 @@ func pathTo(s *agentsession.Session, leaf string) ([]agentsession.Entry, error) 
 // Steps returns how many recorded calls, responses and folds, the path
 // holds.
 func (m *Model) Steps() int { return len(m.steps) }
+
+// Settings returns the settings in force at each recorded step, in
+// path order and indexed as [Served.N] less one: the model,
+// instructions, reasoning, text format, tools and passthrough members
+// the config entries on the path say that call was made under. A
+// judge, or a product checking what it sent, reads them here rather
+// than replaying the config entries itself.
+func (m *Model) Settings() []agentsession.Settings {
+	out := make([]agentsession.Settings, len(m.steps))
+	for i, st := range m.steps {
+		out[i] = st.settings
+	}
+	return out
+}
+
+// SettingsAt returns the settings of step n, numbered as [Served.N]
+// is. It reports false for a step the path does not hold.
+func (m *Model) SettingsAt(n int) (agentsession.Settings, bool) {
+	if n < 1 || n > len(m.steps) {
+		return agentsession.Settings{}, false
+	}
+	return m.steps[n-1].settings, true
+}
+
+// BeforeModelCall serves the recorded settings of the call about to be
+// served: it replaces the request's instructions and tool list with
+// the ones in force at that response on the path. Chain it from the
+// configuration under test, last, so the hook order stays the
+// product's:
+//
+//	inner := cfg.BeforeModelCall
+//	cfg.BeforeModelCall = func(ctx context.Context, req *openresponses.Request) error {
+//		if inner != nil {
+//			if err := inner(ctx, req); err != nil {
+//				return err
+//			}
+//		}
+//		return model.BeforeModelCall(ctx, req)
+//	}
+//
+// Without it a strict replay measures the layers as they are today
+// rather than the run: a product whose instructions are rebuilt each
+// turn from a store, a skill set or a memory block diverges at the
+// first call, and the error names two hashes and no layer. The other
+// recorded settings are left alone, and [Model.Settings] holds them
+// for a caller that wants to serve more.
+func (m *Model) BeforeModelCall(_ context.Context, req *openresponses.Request) error {
+	st, ok := m.peek()
+	if !ok {
+		return nil
+	}
+	req.Instructions = st.settings.Instructions
+	req.Tools = append(openresponses.Tools(nil), st.settings.Tools...)
+	return nil
+}
+
+// peek returns the next response step to be served, skipping the folds
+// before it, which are served by the transform and not by the loop.
+func (m *Model) peek() (step, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := m.next; i < len(m.steps); i++ {
+		if m.steps[i].resp != nil {
+			return m.steps[i], true
+		}
+	}
+	return step{}, false
+}
 
 // Served returns how many of them have been served.
 func (m *Model) Served() int {

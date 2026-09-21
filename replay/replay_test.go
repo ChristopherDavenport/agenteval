@@ -3,6 +3,7 @@ package replay_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -484,5 +485,121 @@ func TestStrictChecksTheFold(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// layerInstructions is what the layers fixture's product renders from
+// the state it has written so far, the same string the fixture was
+// recorded with.
+func layerInstructions(notes int) string {
+	if notes == 0 {
+		return "Be brief."
+	}
+	return fmt.Sprintf("Be brief. Notes: %d", notes)
+}
+
+// layeredConfig is that product: its instructions are rebuilt before
+// every call from state the run itself writes, as a memory block or a
+// skill set is rebuilt. notes says how far that state had already
+// moved on when the replay started, freeze holds the instructions at
+// one string for the whole run instead of re-rendering them, and
+// chain hands the request on to the model's own hook.
+func layeredConfig(model *replay.Model, notes int, freeze, chain bool) agentturn.Config {
+	cfg := fixtureConfig(model)
+	cfg.BeforeModelCall = func(ctx context.Context, req *openresponses.Request) error {
+		req.Instructions = layerInstructions(notes)
+		if chain {
+			return model.BeforeModelCall(ctx, req)
+		}
+		return nil
+	}
+	if !freeze {
+		cfg.AfterToolCall = func(context.Context, agentturn.ToolResultInfo) (*agentturn.ToolOverride, error) {
+			notes++
+			return nil, nil
+		}
+	}
+	return cfg
+}
+
+// TestReplayServesTheRecordedSettings is issue 5: a product whose
+// layers re-read state each turn replays strictly only when the
+// settings in force at each recorded call are served back to it.
+func TestReplayServesTheRecordedSettings(t *testing.T) {
+	tests := []struct {
+		name   string
+		notes  int
+		freeze bool
+		chain  bool
+		step   int // the step it diverges at; 0 when it replays whole
+	}{
+		{"the layer as it stands, its state moved on", 1, false, false, 1},
+		{"the instructions frozen from the first config entry", 0, true, false, 2},
+		{"the settings in force at each recorded call", 1, false, true, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			orig := loadFixture(t, "layers")
+			var seen []replay.Served
+			model, err := replay.NewModel(orig, replay.Strict(), replay.WithObserver(func(sv replay.Served) { seen = append(seen, sv) }))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ran := 0
+			cfg := layeredConfig(model, tt.notes, tt.freeze, tt.chain)
+			cfg.Tools = replay.Tools(orig, []agenttool.Tool{upperTool(&ran)}, replay.Strict())
+			_, end, err := rerun(t, cfg, "hello world")
+			if tt.step == 0 {
+				if err != nil {
+					t.Fatalf("replay: %v", err)
+				}
+				if end.Reason != agentturn.ReasonDone {
+					t.Errorf("reason = %s", end.Reason)
+				}
+				if model.Served() != model.Steps() {
+					t.Errorf("served %d of %d steps", model.Served(), model.Steps())
+				}
+				for _, sv := range seen {
+					if !sv.Match {
+						t.Errorf("step %d: recorded %s, got %s", sv.N, sv.Recorded, sv.Got)
+					}
+				}
+				return
+			}
+			if !errors.Is(err, replay.ErrDiverged) {
+				t.Fatalf("err = %v, want ErrDiverged", err)
+			}
+			if len(seen) != tt.step || !strings.Contains(err.Error(), fmt.Sprintf("step %d", tt.step)) {
+				t.Errorf("diverged at step %d of %d served: %v", tt.step, len(seen), err)
+			}
+		})
+	}
+}
+
+// TestModelSettings is what a judge reads: the settings in force at
+// each recorded call, in step order.
+func TestModelSettings(t *testing.T) {
+	model, err := replay.NewModel(loadFixture(t, "layers"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := model.Settings()
+	if len(settings) != model.Steps() || model.Steps() != 2 {
+		t.Fatalf("%d settings for %d steps", len(settings), model.Steps())
+	}
+	for i, want := range []string{layerInstructions(0), layerInstructions(1)} {
+		if settings[i].Instructions != want {
+			t.Errorf("step %d instructions = %q, want %q", i+1, settings[i].Instructions, want)
+		}
+		at, ok := model.SettingsAt(i + 1)
+		if !ok || at.Instructions != want || at.Model != "echo/echo-1" || len(at.Tools) != 1 {
+			t.Errorf("SettingsAt(%d) = %+v %v", i+1, at, ok)
+		}
+	}
+	if _, ok := model.SettingsAt(0); ok {
+		t.Error("SettingsAt(0) reported a step")
+	}
+	if _, ok := model.SettingsAt(model.Steps() + 1); ok {
+		t.Error("SettingsAt past the end reported a step")
 	}
 }

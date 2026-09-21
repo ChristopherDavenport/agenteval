@@ -27,6 +27,14 @@ versions may break the API.
   no request hash. The runner reports it when the run is written
   rather than leaving it to a replay weeks later (#1).
 
+- `replay.Model.BeforeModelCall`, an `agentturn` `BeforeModelCall`
+  hook that serves the instructions and the tool list in force at each
+  recorded call, and `Model.Settings` and `Model.SettingsAt`, the
+  settings every recorded step was made under. A product whose layers
+  rebuild the instructions each turn from a store, a skill set or a
+  memory block replays strictly with the hook chained and diverges at
+  its first call without it (#5).
+
 ### Changed
 
 - `replay.Strict()` checks a local fold's own request against the hash

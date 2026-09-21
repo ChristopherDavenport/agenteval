@@ -74,8 +74,17 @@ the world.
 s, _ := store.Open(ctx, id)
 model, _ := replay.NewModel(s, replay.Strict())
 cfg.Model = model
+cfg.BeforeModelCall = model.BeforeModelCall
 cfg.Tools = replay.Tools(s, cfg.Tools, replay.Strict())
 ```
+
+`Model.BeforeModelCall` serves the instructions and the tool list
+recorded for each call. A product whose layers rebuild those every
+turn, from a memory store, a skill set or an AGENTS.md, otherwise
+replays against what the layers say today and diverges at the first
+call with an error naming two hashes and no layer. `Model.Settings`
+is the rest of what each recorded call was made under, for a judge or
+a check that wants to read it.
 
 ## Judges
 

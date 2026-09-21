@@ -2,6 +2,7 @@ package agenteval_test
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -46,6 +47,24 @@ var fixtures = map[string]func(t *testing.T) *agentsession.Session{
 			cfg.Transform = c.Transform
 		}, "one", "two", "three")
 	},
+	// layers: a configuration whose instructions are rebuilt before
+	// every call from state the run itself writes, as a memory block
+	// or a skill set is rebuilt. The session carries a config delta
+	// mid-run, and a replay that serves the model from the record and
+	// not the settings sends what those layers say today.
+	"layers": func(t *testing.T) *agentsession.Session {
+		notes := 0
+		cfg := echoConfig()
+		cfg.BeforeModelCall = func(_ context.Context, req *openresponses.Request) error {
+			req.Instructions = layerInstructions(notes)
+			return nil
+		}
+		cfg.AfterToolCall = func(context.Context, agentturn.ToolResultInfo) (*agentturn.ToolOverride, error) {
+			notes++
+			return nil, nil
+		}
+		return record(t, cfg, nil, "hello world")
+	},
 	// roots: two roots in one session, so the session has two leaves
 	// and a replay must name the one it wants.
 	"roots": func(t *testing.T) *agentsession.Session {
@@ -70,6 +89,17 @@ var fixtures = map[string]func(t *testing.T) *agentsession.Session{
 		}
 		return s
 	},
+}
+
+// layerInstructions is what the layers fixture's product renders from
+// the state it has written so far. The replay package's test builds
+// the same string, because a replay of that session is the product
+// running again against state that has moved on.
+func layerInstructions(notes int) string {
+	if notes == 0 {
+		return "Be brief."
+	}
+	return fmt.Sprintf("Be brief. Notes: %d", notes)
 }
 
 // record runs prompts through cfg with a recorder attached and returns

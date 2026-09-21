@@ -100,6 +100,15 @@ func NewModel(s *agentsession.Session, opts ...Option) (*Model, error)
 // fold through the compaction endpoint, and one recorded before that
 // member existed, is checked for the shape of a fold's request only.
 func Strict() Option
+// BeforeModelCall is an agentturn Config.BeforeModelCall that replaces
+// the request's instructions and tool list with the ones in force at
+// the recorded call about to be served, rebuilt from the config
+// entries on the path. A product whose layers re-read state each turn
+// chains it last, and Settings holds every step's settings for a
+// reader.
+func (m *Model) BeforeModelCall(ctx context.Context, req *openresponses.Request) error
+func (m *Model) Settings() []agentsession.Settings
+func (m *Model) SettingsAt(n int) (agentsession.Settings, bool)
 // WithLeaf names the path. A session that was branched has several
 // leaves, and its current leaf, after judging, is an outcome entry
 // rather than a model output, so a replay of a judged session names
@@ -126,7 +135,12 @@ comparison on `stream`.
 
 Strict mode is the fidelity test: a hook, a transform or a front that
 changes what the model would have been sent fails loudly against real
-traffic. Lenient mode is the fixture: a TUI or a session recorder is
+traffic. What the model was sent is not the model and the tools alone,
+which is why the settings come out of `NewModel` too: the composition
+study's product diverged at its first call because a layer rebuilt the
+instructions from a store the recorded run itself had written to, and
+replayed strictly only once the instructions in force at each recorded
+response were served back to it. Lenient mode is the fixture: a TUI or a session recorder is
 exercised by a real run with no model behind it.
 
 ### Tasks and suites
