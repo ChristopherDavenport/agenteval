@@ -34,6 +34,26 @@ report, _ := r.Run(ctx, suite)
 report.WriteJSON(os.Stdout)
 ```
 
+A configuration that needs the run's recorder takes `ConfigWith`
+instead: a compacting configuration binds `compact.WithOnFold` there,
+without which its folds reach no session and the run cannot be
+replayed, and a layer that annotates the run it is in keeps the same
+recorder. `Answer` answers the calls a run left pending when it ended
+`input_required` and resumes it, so a product whose policy asks is
+measured over the whole run rather than the part before its first ask.
+
+```go
+r := &agenteval.Runner{
+	Store: store,
+	ConfigWith: func(t agenteval.Task, rec *session.Recorder) agentturn.Config {
+		cfg := product.Config(t)
+		cfg.Transform = compact.NewLocal(cfg.Model, compact.WithOnFold(rec.Fold)).Transform
+		return cfg
+	},
+	Answer: engine.Answers,
+}
+```
+
 A task file is JSON: an `instruction`, or `prompts` for several
 turns, with `expect` for the judges and `setup` and `meta` for the
 product. The suite's manifest, the hash of every file loaded, is

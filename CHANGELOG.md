@@ -5,6 +5,28 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+### Added
+
+- `Runner.ConfigWith`, the configuration function with the recorder
+  that writes the run's session, preferred over `Config` when set. A
+  compacting configuration binds `compact.WithOnFold(rec.Fold)` here,
+  without which its folds reach no session and the run cannot be
+  replayed strictly; a layer that wants to annotate the run it is in
+  keeps the same recorder for `Recorder.Annotate` (#1, #7).
+- `Runner.Answer` and `Runner.MaxResumes`: a run that ends
+  `input_required` is resumed with the answers `Answer` returns, up to
+  `DefaultMaxResumes` times, and every resume is recorded, so an
+  evaluation of a product whose policy asks measures the whole run and
+  not the part before its first ask. `agentpolicy.Engine.Answers`
+  satisfies the signature as written, and `Result.Resumes` counts the
+  resumes (#7).
+- `ErrUnreplayable`, joined onto the result of a run whose session
+  cannot be replayed strictly because a response on its path carries
+  no request hash. The runner reports it when the run is written
+  rather than leaving it to a replay weeks later (#1).
+
 ## v0.0.1 - 2026-09-20
 
 - Initial release: `replay.Model` and `replay.Tools` serve a recorded

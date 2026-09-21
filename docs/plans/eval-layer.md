@@ -193,6 +193,18 @@ judge that normalises keeps the raw number in `Details`.
 type Runner struct {
     Store    agentsession.Store                      // where each run's session is created
     Config   func(Task) agentturn.Config             // the configuration under test, per task
+    // ConfigWith is Config with the recorder that writes the run, and
+    // wins over Config. It is where a compacting configuration binds
+    // compact.WithOnFold(rec.Fold), without which the folds reach no
+    // session and the run cannot be replayed strictly, and where a
+    // layer keeps the recorder to Annotate the run it is in.
+    ConfigWith func(Task, *session.Recorder) agentturn.Config
+    // Answer answers the calls a run left pending when it ended
+    // input_required; the run is resumed with them, up to MaxResumes
+    // times, and every resume is recorded. agentpolicy.Engine.Answers
+    // satisfies it as written.
+    Answer     func(context.Context, *agentturn.RunEnd) ([]agentturn.Answer, error)
+    MaxResumes int
     Judges   []Judge
     Parallel int
     Header   func(Task) agentsession.Header          // optional: harness, cwd, a fixed ID
@@ -204,7 +216,8 @@ type Result struct {
     SessionID string
     Target    string             // the entry every score of this result targets
     Reason    agentturn.Reason   // how the last run ended
-    Runs      int
+    Runs      int                // one per prompt sent and one per resume
+    Resumes   int                // how many of them were resumes through Answer
     Usage     openresponses.Usage
     CostUSD   *float64           // when Cost is set and priced every call
     Scores    []Score
@@ -216,6 +229,11 @@ func (r *Runner) Run(ctx context.Context, suite *Suite) (*Report, error)
 ```
 
 Each task runs in a fresh session recorded through `agentturn/session`.
+The recorder is made before the configuration, so `ConfigWith` can hand
+it to the configuration under test; a run whose session ends with a
+response carrying no request hash is reported on the result as
+`ErrUnreplayable`, because that is exactly the session a strict replay
+will refuse and nothing else says so at write time.
 Before the run the session holds an `info` entry naming the task, an
 `env` entry whose `files.read` is the suite manifest, and a `custom`
 entry in the `agenteval:task` namespace carrying the suite name, its
