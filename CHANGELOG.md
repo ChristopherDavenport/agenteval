@@ -45,7 +45,9 @@ versions may break the API.
 - `Served.Recorded` is set for a fold served through `Model.Compact`
   when the compaction entry records a fold hash. The endpoint cannot
   check it, so it is reported rather than compared, and `Got` stays
-  empty: a call was checked exactly when both are set.
+  empty: a model call was checked exactly when both are set. A tool
+  call is reported only when a recorded output was found, so its
+  `Match` is always true and its hashes are always empty.
 - `replay.Model.BeforeModelCall`, an `agentturn` `BeforeModelCall`
   hook that serves the instructions and the tool list in force at each
   recorded call, and `Model.Settings` and `Model.SettingsAt`, the

@@ -102,10 +102,16 @@ type Served struct {
 	// the format hashes, so that fold is served unchecked in every
 	// mode, and Got is always empty there whatever Recorded holds.
 	//
+	// Both are empty for a tool call, which is matched on its call ID
+	// or its arguments rather than on a hash.
+	//
 	// Match reports whether the two agree, and is false when there was
-	// nothing to compare. A call was checked exactly when Recorded and
-	// Got are both set, so Match on its own is not a statement that it
-	// was.
+	// nothing to compare. A model call — [KindResponse] or [KindFold] —
+	// was checked exactly when Recorded and Got are both set, so Match
+	// on its own is not a statement that it was. A tool call is the
+	// other way round: it is reported only when a recorded output was
+	// found, so its Match is always true and its hashes are never
+	// consulted.
 	Recorded, Got string
 	Match         bool
 	// CallID and Name describe a served tool call, and ByID reports
@@ -158,7 +164,8 @@ func Strict() Option { return func(o *options) { o.strict = true } }
 // without [ErrDiverged] — no longer distinguishes a call that was
 // checked and matched from one that was never checked. Only an
 // observer subscribing to [Served] can tell them apart afterwards: a
-// call was checked exactly when its Recorded and Got are both set.
+// model call was checked exactly when its Recorded and Got are both
+// set.
 //
 // It exists for recordings the format cannot describe: one made before
 // agentturn v0.0.6, which wrote no fold member, and one whose requests
