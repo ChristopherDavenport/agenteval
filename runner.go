@@ -311,7 +311,12 @@ func (r *Runner) answer(ctx context.Context, a *agentturn.Agent, end *agentturn.
 // ErrUnreplayable is joined onto the result of a run whose session
 // cannot be replayed strictly, because the record does not rebuild
 // every request the run sent.
-var ErrUnreplayable = errors.New("agenteval: the run cannot be replayed strictly")
+//
+// Its text carries no "agenteval: " prefix, alone among this package's
+// sentinels: it is only ever returned through Run, which wraps it with
+// the package and the task already, and three prefixes before a word
+// of content is what the reader of a failed result actually sees.
+var ErrUnreplayable = errors.New("the run cannot be replayed strictly")
 
 // replayable reports whether the record rebuilds every request the run
 // made. Whether it does is [replay.Unverifiable]'s question and is
@@ -327,12 +332,21 @@ func replayable(s *agentsession.Session, leaf string) error {
 	if err == nil {
 		return nil
 	}
+	// Unverifiable also reports a leaf it could not resolve, which is a
+	// different failure and gets none of the diagnosis below: a session
+	// with no entries has no seam to have gone unbound.
+	if !errors.Is(err, replay.ErrUnverifiable) {
+		return err
+	}
+	if leaf == "" {
+		leaf = s.Leaf()
+	}
 	for _, e := range s.Path(leaf) {
 		if _, ok := e.(*agentsession.CompactionEntry); ok {
 			return fmt.Errorf("%w: %w", ErrUnreplayable, err)
 		}
 	}
-	return fmt.Errorf("%w: %w; the session records no fold, and a configuration that compacts binds compact.WithOnFold(rec.Fold) through Runner.ConfigWith, while a transform or a hook that edits the input is a change the record cannot describe at all", ErrUnreplayable, err)
+	return fmt.Errorf("%w: %w and the session records no fold; a configuration that compacts binds compact.WithOnFold(rec.Fold) through Runner.ConfigWith, and a transform or a hook that edits the input is a change the record cannot describe at all", ErrUnreplayable, err)
 }
 
 // describe writes what the session is a run of: an info entry naming

@@ -301,14 +301,127 @@ func TestAllowUnhashedServesByPosition(t *testing.T) {
 	}
 	for _, sv := range seen {
 		if sv.EntryID == blanked {
-			if sv.Recorded != "" || sv.Got != "" || sv.Match {
-				t.Errorf("the unhashed call reports %+v, want both hashes empty and Match false", sv)
+			// Nothing was compared, so Recorded is empty and Match is
+			// false -- but Got still reports what this replay sent,
+			// which for a call the record is silent about is the only
+			// account of it there is.
+			if sv.Recorded != "" || sv.Match {
+				t.Errorf("the unhashed call reports %+v, want no recorded hash and Match false", sv)
+			}
+			if sv.Got == "" {
+				t.Errorf("the unhashed call reports no hash for the request received: %+v", sv)
 			}
 			continue
 		}
 		if !sv.Match {
 			t.Errorf("step %d: recorded %s, got %s", sv.N, sv.Recorded, sv.Got)
 		}
+	}
+}
+
+// A fold through the compaction endpoint is the one call no mode
+// checks: the endpoint sends a CompactRequest, not a request the
+// format hashes, so there is nothing to compare and its absence is not
+// ErrUnverifiable. Strict() does not refuse it and AllowUnhashed is
+// not needed to serve it. Asserted because two doc sentences and a
+// README paragraph promise the opposite guarantee, and because
+// TestCompactedRunReplays counts the fold's Match and discards it.
+func TestEndpointFoldIsServedUnchecked(t *testing.T) {
+	// The second case is a fold the entry does have a hash for, which
+	// an endpoint replay still cannot check: it is reported on Served
+	// and not compared.
+	for _, hashed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("recorded_hash=%t", hashed), func(t *testing.T) {
+			orig := loadFixture(t, "endpoint")
+			if hashed {
+				setFoldHashes(t, orig, "sha256:notthehashofanyrequest")
+			}
+			var folds []replay.Served
+			model, err := replay.NewModel(orig, replay.Strict(), replay.WithObserver(func(sv replay.Served) {
+				if sv.Kind == replay.KindFold {
+					folds = append(folds, sv)
+				}
+			}))
+			if err != nil {
+				t.Fatalf("NewModel: %v", err)
+			}
+			ran := 0
+			cfg := fixtureConfig(model, replay.Tools(orig, []agenttool.Tool{upperTool(&ran)}, replay.Strict())...)
+			_, _, err = rerunWith(t, cfg, func(cfg *agentturn.Config, rec *session.Recorder) {
+				cfg.Transform = compact.New(model, compact.WithBudget(1), compact.WithKeepLast(2), compact.WithOnFold(rec.Fold)).Transform
+			}, "one", "two", "three")
+			if err != nil {
+				t.Fatalf("a strict replay through the endpoint was refused: %v", err)
+			}
+			if len(folds) == 0 {
+				t.Fatal("no fold was served")
+			}
+			for _, sv := range folds {
+				if sv.Got != "" || sv.Match {
+					t.Errorf("a fold through the endpoint reports a check it cannot have made: %+v", sv)
+				}
+				if want := foldHashOf(t, orig, sv.EntryID); sv.Recorded != want {
+					t.Errorf("Recorded = %q, want the entry's fold hash %q", sv.Recorded, want)
+				}
+			}
+		})
+	}
+}
+
+// foldHashOf is the request hash on a compaction entry's fold member,
+// or "" when the entry has no member or no hash on it.
+func foldHashOf(t *testing.T, s *agentsession.Session, entryID string) string {
+	t.Helper()
+	e, ok := s.Entry(entryID)
+	if !ok {
+		t.Fatalf("no entry %s", entryID)
+	}
+	c, ok := e.(*agentsession.CompactionEntry)
+	if !ok {
+		t.Fatalf("entry %s is not a compaction", entryID)
+	}
+	raw, ok := c.Unknown[session.FoldMember]
+	if !ok {
+		return ""
+	}
+	var call session.FoldCall
+	if err := json.Unmarshal(raw, &call); err != nil {
+		t.Fatal(err)
+	}
+	return call.RequestHash
+}
+
+// setFoldHashes writes hash as the request hash of every compaction
+// entry's fold member on the path, which is what an entry recorded
+// through a local fold carries and one recorded through the endpoint
+// does not.
+func setFoldHashes(t *testing.T, s *agentsession.Session, hash string) {
+	t.Helper()
+	n := 0
+	for _, e := range s.Path(s.Leaf()) {
+		c, ok := e.(*agentsession.CompactionEntry)
+		if !ok {
+			continue
+		}
+		var call session.FoldCall
+		if raw, ok := c.Unknown[session.FoldMember]; ok {
+			if err := json.Unmarshal(raw, &call); err != nil {
+				t.Fatal(err)
+			}
+		}
+		call.RequestHash = hash
+		raw, err := json.Marshal(call)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Unknown == nil {
+			c.Unknown = map[string]json.RawMessage{}
+		}
+		c.Unknown[session.FoldMember] = raw
+		n++
+	}
+	if n == 0 {
+		t.Fatal("the fixture records no fold")
 	}
 }
 

@@ -25,7 +25,10 @@ versions may break the API.
 - `ErrUnreplayable`, joined onto the result of a run whose session
   cannot be replayed strictly because a response on its path carries
   no request hash. The runner reports it when the run is written
-  rather than leaving it to a replay weeks later (#1).
+  rather than leaving it to a replay weeks later. Its text carries no
+  `agenteval: ` prefix, alone among this package's sentinels, because
+  it is only ever returned through `Run`, which adds the package and
+  the task itself (#1).
 - `replay.ErrUnverifiable`, `replay.AllowUnhashed()` and
   `replay.Unverifiable`. A strict replay refuses a call the record
   carries no hash for rather than serve it unchecked: `NewModel`
@@ -37,7 +40,15 @@ versions may break the API.
   before agentturn v0.0.6 replays, and its doc says what it turns off.
   `Unverifiable` is the rule `NewModel` applies, exported so a caller
   can ask before building a model; `ErrUnreplayable` is now that rule
-  plus the runner's diagnosis rather than a second copy of it (#2).
+  plus the runner's diagnosis rather than a second copy of it. A fold
+  through the compaction endpoint is the one call none of this governs
+  — it sends no request the format hashes, so `Model.Compact` serves it
+  unchecked in every mode, which the package doc, `Strict`, `Served`
+  and the README now say (#2).
+- `Served.Recorded` is set for a fold served through `Model.Compact`
+  when the compaction entry records a fold hash. The endpoint cannot
+  check it, so it is reported rather than compared, and `Got` stays
+  empty: a call was checked exactly when both are set.
 - `replay.Model.BeforeModelCall`, an `agentturn` `BeforeModelCall`
   hook that serves the instructions and the tool list in force at each
   recorded call, and `Model.Settings` and `Model.SettingsAt`, the

@@ -10,10 +10,13 @@
 // included, so a summary prompt, a budget or a filter that changed is
 // not signed off as neutral; a call the record carries no hash for is
 // refused with [ErrUnverifiable] rather than served unchecked, unless
-// [AllowUnhashed] says to serve it. In lenient mode the calls are
-// served by position and the hashes are reported through the observer.
-// [Tools] wraps a tool list so that a call matching a recorded
-// function call returns its recorded output instead of running.
+// [AllowUnhashed] says to serve it. The exception is a fold through
+// the compaction endpoint, which sends no request the format hashes
+// and so is served unchecked in every mode: see [Model.Compact]. In
+// lenient mode the calls are served by position and the hashes are
+// reported through the observer. [Tools] wraps a tool list so that a
+// call matching a recorded function call returns its recorded output
+// instead of running.
 //
 // A model and its tools are not the whole of what a call was made
 // under. [Model.BeforeModelCall] serves back the instructions and the
@@ -86,16 +89,23 @@ type Served struct {
 	EntryID string
 	// Recorded and Got are the hash recorded for the call and the hash
 	// of the request received: the response entry's own hash, or, for
-	// a fold, the one on its compaction entry's fold member. A fold
-	// through the compaction endpoint sends no request the format
-	// hashes, an entry written before agentturn v0.0.6 carries no fold
-	// member at all, and a response entry carries no hash when the path
-	// does not rebuild that request's input; all three leave the two
-	// empty and Match false, which a strict model reports only under
-	// [AllowUnhashed], having otherwise refused the call. Match reports
-	// whether the two agree, and is false when there was nothing to
-	// compare: it is not on its own a statement that the call was
-	// checked.
+	// a fold, the one on its compaction entry's fold member. An entry
+	// written before agentturn v0.0.6 carries no fold member at all,
+	// and a response entry carries no hash when the path does not
+	// rebuild that request's input; both leave Recorded empty, and a
+	// strict model reports them only under [AllowUnhashed], having
+	// otherwise refused the call.
+	//
+	// A fold served through [Model.Compact] is the exception, and the
+	// one case where an empty Recorded on a strict replay does not mean
+	// the caller opted out: the compaction endpoint sends no request
+	// the format hashes, so that fold is served unchecked in every
+	// mode, and Got is always empty there whatever Recorded holds.
+	//
+	// Match reports whether the two agree, and is false when there was
+	// nothing to compare. A call was checked exactly when Recorded and
+	// Got are both set, so Match on its own is not a statement that it
+	// was.
 	Recorded, Got string
 	Match         bool
 	// CallID and Name describe a served tool call, and ByID reports
@@ -129,6 +139,11 @@ type Option func(*options)
 // instead, which is how a recording made before agentturn v0.0.6
 // replays.
 //
+// One call is served unchecked whatever is set: a fold through the
+// compaction endpoint, which sends no request the format hashes, so
+// there is nothing for strict mode to check and nothing for
+// [AllowUnhashed] to allow. See [Model.Compact].
+//
 // The default is lenient: the model serves by position and reports the
 // hashes through the observer, and an unmatched call runs the real
 // tool.
@@ -139,10 +154,11 @@ func Strict() Option { return func(o *options) { o.strict = true } }
 // those calls rather than relaxing it. What the caller gives up is the
 // whole of what [Strict] is for — that every served call was checked
 // against the request the recording made — for every call the record
-// is silent about, and nothing in the replay's result distinguishes a
-// call that was checked and matched from one that was never checked.
-// Only [Model.Settings] and an observer subscribing to [Served] can
-// tell them apart afterwards.
+// is silent about, and the replay's own result — that it finished
+// without [ErrDiverged] — no longer distinguishes a call that was
+// checked and matched from one that was never checked. Only an
+// observer subscribing to [Served] can tell them apart afterwards: a
+// call was checked exactly when its Recorded and Got are both set.
 //
 // It exists for recordings the format cannot describe: one made before
 // agentturn v0.0.6, which wrote no fold member, and one whose requests
@@ -320,7 +336,9 @@ func pathTo(s *agentsession.Session, leaf string) ([]agentsession.Entry, error) 
 // to the session's current leaf when leaf is empty, could check every
 // call it serves. It returns nil when it could, and an error wrapping
 // [ErrUnverifiable] naming how many responses are unhashed when it
-// could not.
+// could not. An error that does not wrap [ErrUnverifiable] is the
+// failure to resolve leaf to a path at all, which says nothing either
+// way about the record.
 //
 // The recorder writes a response without a request hash when the path
 // it wrote does not rebuild that request's input: what a compacting
@@ -485,14 +503,16 @@ func (m *Model) CreateStream(_ context.Context, req openresponses.Request, sink 
 		// recording folded.
 		return fmt.Errorf("%w: compaction %s (step %d): the recording folded here and the request did not", ErrDiverged, st.comp.ID, n)
 	}
-	sv := Served{Kind: KindResponse, N: n, EntryID: st.resp.ID, Recorded: st.resp.RequestHash}
-	if st.resp.RequestHash != "" {
-		got, err := agentsession.RequestHash(session.Canonical(req))
-		if err != nil {
-			return err
-		}
-		sv.Got, sv.Match = got, got == st.resp.RequestHash
+	// Got is computed whether or not the entry recorded a hash to
+	// compare it against: it is what this replay sent, and for a call
+	// the record is silent about it is the only account of that there
+	// is. Only the comparison needs a recorded hash.
+	got, err := agentsession.RequestHash(session.Canonical(req))
+	if err != nil {
+		return err
 	}
+	sv := Served{Kind: KindResponse, N: n, EntryID: st.resp.ID, Recorded: st.resp.RequestHash, Got: got}
+	sv.Match = sv.Recorded != "" && got == sv.Recorded
 	m.observe(sv)
 	// An entry that recorded no request hash is served by position: the
 	// record does not say what was sent, which is not the same as
@@ -513,6 +533,17 @@ func (m *Model) Create(ctx context.Context, req openresponses.Request) (*openres
 
 // Compact serves the next fold, which must be next on the path, as a
 // compaction response carrying the recorded summary item.
+//
+// A fold through the compaction endpoint is served unchecked, in every
+// mode, [AllowUnhashed] or not. It is the one call a strict model does
+// not check and cannot: the endpoint takes a
+// [openresponses.CompactRequest] rather than a request the format
+// hashes, so the record holds nothing to compare it against and its
+// absence is not [ErrUnverifiable] but the shape of the endpoint. The
+// step order is still enforced. [Served.Recorded] carries the fold
+// hash when the entry has one, which is a session recorded through a
+// local fold and replayed through the endpoint; it is reported rather
+// than checked, for the same reason.
 func (m *Model) Compact(_ context.Context, req openresponses.CompactRequest) (*openresponses.CompactResponse, error) {
 	st, n, err := m.take()
 	if err != nil {
@@ -521,7 +552,7 @@ func (m *Model) Compact(_ context.Context, req openresponses.CompactRequest) (*o
 	if st.comp == nil {
 		return nil, fmt.Errorf("%w: response %s (step %d): the recording made a model call here and the request is a compaction", ErrDiverged, st.resp.ID, n)
 	}
-	m.observe(Served{Kind: KindFold, N: n, EntryID: st.comp.ID})
+	m.observe(Served{Kind: KindFold, N: n, EntryID: st.comp.ID, Recorded: st.foldHash})
 	return &openresponses.CompactResponse{
 		ID:     openresponses.NewID("resp"),
 		Object: openresponses.ObjectCompaction,
@@ -585,21 +616,28 @@ func serveResponse(st step, req openresponses.Request, sink openresponses.EventS
 // entry's summary text, after checking the fold's own request against
 // the hash the entry recorded for it.
 func (m *Model) serveFold(st step, n int, req openresponses.Request, sink openresponses.EventSink) error {
-	sv := Served{Kind: KindFold, N: n, EntryID: st.comp.ID, Recorded: st.foldHash}
-	if st.foldHash != "" {
-		got, err := agentsession.RequestHash(session.Canonical(req))
-		if err != nil {
-			return err
-		}
-		sv.Got, sv.Match = got, got == st.foldHash
+	// As in CreateStream, Got is what this replay sent and is reported
+	// whether or not there is a recorded hash to compare it against.
+	got, err := agentsession.RequestHash(session.Canonical(req))
+	if err != nil {
+		return err
 	}
+	sv := Served{Kind: KindFold, N: n, EntryID: st.comp.ID, Recorded: st.foldHash, Got: got}
+	sv.Match = sv.Recorded != "" && got == sv.Recorded
 	m.observe(sv)
 	// An entry that recorded no fold hash leaves the shape of a fold's
 	// request as the only check there is, which is no check at all
-	// against what the recording sent. NewModel cannot refuse it,
-	// because a compaction entry recorded through the endpoint carries
-	// no fold hash and replays through Compact without ever reaching
-	// here; so it is refused at the call, and AllowUnhashed is how a
+	// against what the recording sent. It is refused here and not in
+	// NewModel because reaching here is what makes the absence matter:
+	// a compaction entry recorded through the endpoint also carries no
+	// fold hash, and replays through Compact, which has nothing to
+	// check by construction. The two are not quite indistinguishable on
+	// the path — an endpoint fold recorded by agentturn v0.0.6 or later
+	// writes the fold member and omits only request_hash, where a
+	// recording older than that writes no member at all — but foldHash
+	// reads both as "", the signal rests on a response ID the endpoint
+	// is not obliged to return, and neither says which compactor this
+	// replay will use. Arriving here does. AllowUnhashed is how a
 	// recording made before agentturn v0.0.6 replays.
 	if m.opts.strict && sv.Recorded == "" && !m.opts.allowUnhashed {
 		return fmt.Errorf("%w: compaction %s (step %d): the entry records no hash for the fold's own request", ErrUnverifiable, st.comp.ID, n)
