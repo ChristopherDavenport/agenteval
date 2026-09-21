@@ -2,6 +2,7 @@ package replay_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -601,5 +602,76 @@ func TestModelSettings(t *testing.T) {
 	}
 	if _, ok := model.SettingsAt(model.Steps() + 1); ok {
 		t.Error("SettingsAt past the end reported a step")
+	}
+}
+
+// itemJSON is an item as the wire carries it, which is what a
+// recording holds and what a replay must serve back.
+func itemJSON(t *testing.T, item openresponses.Item) string {
+	t.Helper()
+	data, err := json.Marshal(item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+// TestReplayServesItemsVerbatim is issue 6: a recorded item is served
+// as it was recorded. The emitter promotes an unset status to
+// completed, and a server that leaves one unset, as Ollama does on a
+// reasoning item, would otherwise record a session that can never
+// replay: the added field changes every later request.
+func TestReplayServesItemsVerbatim(t *testing.T) {
+	tests := []struct {
+		name string
+		item openresponses.Item
+	}{
+		{"a reasoning item the server sent no status for", &openresponses.ReasoningItem{
+			ID: "rs_1", Summary: openresponses.Contents{&openresponses.SummaryText{Text: "thinking"}},
+		}},
+		{"a message with the status the server sent", &openresponses.Message{
+			ID: "msg_1", Status: openresponses.StatusCompleted, Role: openresponses.RoleAssistant,
+			Content: openresponses.Contents{&openresponses.OutputText{Text: "hello"}},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := agentsession.New(agentsession.Header{})
+			req := openresponses.Request{Model: "m", Instructions: "be brief", Input: openresponses.Items{openresponses.UserText("hello")}}
+			cfg, err := agentsession.ConfigFromRequest(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range []agentsession.Entry{cfg, agentsession.NewItemEntry(openresponses.UserText("hello"))} {
+				if _, err := s.Append(e); err != nil {
+					t.Fatal(err)
+				}
+			}
+			item := agentsession.NewItemEntry(tt.item)
+			item.ResponseID = "resp_1"
+			if _, err := s.Append(item); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Append(&agentsession.ResponseEntry{ResponseID: "resp_1", Model: "m", Status: openresponses.ResponseStatusCompleted}); err != nil {
+				t.Fatal(err)
+			}
+			model, err := replay.NewModel(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := model.Create(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got.Output) != 1 {
+				t.Fatalf("served %d items", len(got.Output))
+			}
+			if want, served := itemJSON(t, tt.item), itemJSON(t, got.Output[0]); served != want {
+				t.Errorf("served\n got %s\nwant %s", served, want)
+			}
+			if got.Status != openresponses.ResponseStatusCompleted {
+				t.Errorf("response status = %s", got.Status)
+			}
+		})
 	}
 }

@@ -46,6 +46,17 @@ versions may break the API.
   fold through the compaction endpoint or a recording made before
   agentturn v0.0.6, keeps the shape-only check (#2).
 
+### Fixed
+
+- `replay` serves a recorded item's own bytes. It streamed each item
+  through `openresponses.Emitter`, which promotes an unset status to
+  `completed` as it closes an item, so a recording from a server that
+  leaves an optional field unset, as Ollama does the status of a
+  reasoning item, could never replay: the added field changed every
+  later request and the divergence named two hashes and no field. The
+  two item events are sent directly and the emitter keeps the output
+  indices, the response snapshot and the terminal event (#6).
+
 ## v0.0.1 - 2026-09-20
 
 - Initial release: `replay.Model` and `replay.Tools` serve a recorded

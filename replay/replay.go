@@ -209,8 +209,10 @@ func NewModel(s *agentsession.Session, opts ...Option) (*Model, error) {
 				}
 				st.output = append(openresponses.Items{item.Item}, st.output...)
 			}
-			// Served items are cloned: the emitter promotes an item's
-			// status on close, and entries must not be modified.
+			// Served items are cloned: what is served reaches the
+			// replayed run's transcript and its recorder, and the
+			// entries of the session being replayed must not be
+			// reachable from there.
 			st.output = st.output.Clone()
 			m.steps = append(m.steps, st)
 		case *agentsession.CompactionEntry:
@@ -432,8 +434,26 @@ func serveResponse(st step, req openresponses.Request, sink openresponses.EventS
 		return errors.New("replay: recorded response failed")
 	}
 	em := openresponses.NewEmitter(sink, resp)
+	if err := em.Start(); err != nil {
+		return err
+	}
+	// The items are sent as the two events Emitter.Item would send,
+	// and not through it, because it promotes an unset status to
+	// completed as it closes an item. A server that leaves an optional
+	// field unset, as Ollama does the status of a reasoning item, is
+	// recorded without it, and an item served with a field the server
+	// never sent changes every later request of the replayed run: the
+	// diff of the two canonical requests is one line, and the
+	// divergence names two hashes and no field. The emitter still owns
+	// the output indices, the response snapshot and the terminal
+	// event.
 	for _, item := range st.output {
-		if err := em.Item(item); err != nil {
+		idx := len(resp.Output)
+		resp.Output = append(resp.Output, item)
+		if err := sink.Send(&openresponses.OutputItemAddedEvent{OutputIndex: idx, Item: item}); err != nil {
+			return err
+		}
+		if err := sink.Send(&openresponses.OutputItemDoneEvent{OutputIndex: idx, Item: item}); err != nil {
 			return err
 		}
 	}
