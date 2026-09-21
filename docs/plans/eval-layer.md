@@ -369,9 +369,13 @@ the record.
 func Reward(fsys fs.FS, dir string) ([]agenteval.Score, error)
 
 // Load reads a Harbor task directory: instruction.md as Instruction,
-// [task].name as ID, and task.toml copied into Setup and Meta. It is
-// the prompt only; running the task faithfully means running it under
-// Harbor.
+// [task].name as ID, and task.toml copied into Setup and Meta, every
+// table under its own name, so [task] and [metadata], which are a
+// package description and a free-form dict that invite the same
+// words, cannot lose each other's keys. It is the prompt only;
+// running the task faithfully means running it under Harbor, and
+// every real task ID holds a slash, because Harbor validates a name
+// as org/name.
 func Load(fsys fs.FS, dir string) (agenteval.Task, error)
 ```
 

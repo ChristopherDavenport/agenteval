@@ -107,6 +107,9 @@ report and the exported document agree on one number.
 The `harbor` nested module reads a Harbor task directory as a `Task`
 (the prompt only; the environment and the verifier stay with Harbor)
 and a finished trial's `reward.json` or `reward.txt` as scores.
+`Task.Meta` carries `[task]` and `[metadata]` under `task.` and
+`metadata.`, because the second table is free-form and invites the
+first table's words.
 
 ## Design
 

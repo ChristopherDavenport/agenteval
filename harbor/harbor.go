@@ -138,11 +138,18 @@ func score(label string, v float64, file string, o rewardOptions) agenteval.Scor
 
 // Load reads a Harbor task directory into a Task: instruction.md as
 // Instruction, task.toml's [task].name as ID, [task] and [metadata]
-// into Meta, and every other table of task.toml into Setup, keys
-// flattened with dots and values rendered as strings, lists and tables
-// of tables as JSON. A missing task.toml names the task after the
-// directory. What Setup holds is recorded with the run and honoured by
-// nothing here.
+// into Meta under the keys task.* and metadata.*, and every other
+// table of task.toml into Setup under its own name, keys flattened
+// with dots and values rendered as strings, lists and tables of
+// tables as JSON. A missing task.toml names the task after the
+// directory. What Setup holds is recorded with the run and honoured
+// by nothing here.
+//
+// Both tables are prefixed because [task] is a package description
+// with name, version, authors and keywords, while [metadata] is a
+// free-form dict[str, Any] that invites the same words: unprefixed,
+// a task carrying either key in both tables lost one of the two, and
+// which one it lost depended on Go's map iteration order.
 func Load(fsys fs.FS, dir string) (agenteval.Task, error) {
 	instruction, err := fs.ReadFile(fsys, path.Join(dir, InstructionFile))
 	if err != nil {
@@ -172,11 +179,11 @@ func Load(fsys fs.FS, dir string) (agenteval.Task, error) {
 				if name, _ := t["name"].(string); name != "" {
 					task.ID = name
 				}
-				flatten(task.Meta, "", t)
+				flatten(task.Meta, "task", t)
 			}
 		case "metadata":
 			if m, ok := value.(map[string]any); ok {
-				flatten(task.Meta, "", m)
+				flatten(task.Meta, "metadata", m)
 			}
 		default:
 			flatten(task.Setup, key, value)

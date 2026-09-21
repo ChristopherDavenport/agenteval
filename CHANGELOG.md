@@ -37,6 +37,14 @@ versions may break the API.
 
 ### Changed
 
+- **Breaking.** `harbor.Load` prefixes `[task]` and `[metadata]` with
+  their own table's name in `Task.Meta`, as `Setup` already prefixes
+  every other table: the keys are now `task.name` and
+  `metadata.name`. Flattened unprefixed, a task carrying the same key
+  in both tables lost one of the two values, and which one it lost
+  depended on Go's map iteration order. A consumer reading `Meta`
+  updates its keys (#3).
+
 - `replay.Strict()` checks a local fold's own request against the hash
   its compaction entry records, and refuses a mismatch with
   `ErrDiverged` as it does for a response, so a summary prompt, a
