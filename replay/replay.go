@@ -6,11 +6,12 @@
 // each response entry on the path is one call, and each compaction
 // entry is the fold that preceded the call after it. In strict mode a
 // request whose hash differs from the one recorded on the entry about
-// to be served is refused with [ErrDiverged]; in lenient mode the
-// responses are served by position and the hashes are reported through
-// the observer. [Tools] wraps a tool list so that a call matching a
-// recorded function call returns its recorded output instead of
-// running.
+// to be served is refused with [ErrDiverged], a fold's own request
+// included, so a summary prompt, a budget or a filter that changed is
+// not signed off as neutral; in lenient mode the calls are served by
+// position and the hashes are reported through the observer. [Tools]
+// wraps a tool list so that a call matching a recorded function call
+// returns its recorded output instead of running.
 //
 //	s, _ := store.Open(ctx, id)
 //	model, _ := replay.NewModel(s, replay.Strict())
@@ -20,6 +21,7 @@ package replay
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -62,9 +64,13 @@ type Served struct {
 	// EntryID is the entry served: the response or compaction entry
 	// for the model, the output's item entry for a tool call.
 	EntryID string
-	// Recorded and Got are the request hash on the response entry and
-	// the hash of the request received; a fold records no hash and
-	// leaves both empty. Match reports whether they agree.
+	// Recorded and Got are the hash recorded for the call and the hash
+	// of the request received: the response entry's own hash, or, for
+	// a fold, the one on its compaction entry's fold member. A fold
+	// through the compaction endpoint sends no request the format
+	// hashes, and an entry written before agentturn v0.0.6 carries no
+	// fold member at all; both leave the two empty and Match false.
+	// Match reports whether the two agree.
 	Recorded, Got string
 	Match         bool
 	// CallID and Name describe a served tool call, and ByID reports
@@ -84,7 +90,10 @@ type options struct {
 type Option func(*options)
 
 // Strict makes a model refuse a request whose hash differs from the
-// recorded one, and tools refuse a call with no recorded output. The
+// recorded one, and tools refuse a call with no recorded output. A
+// fold is checked against the hash its compaction entry recorded for
+// it, and one recorded before agentturn v0.0.6, which wrote no fold
+// member, is checked only for the shape of a fold's request. The
 // default is lenient: the model serves by position and reports the
 // hashes through the observer, and an unmatched call runs the real
 // tool.
@@ -138,6 +147,12 @@ type step struct {
 	output  openresponses.Items
 	comp    *agentsession.CompactionEntry
 	summary openresponses.Item
+	// foldHash is the hash of the request the recorded fold sent, from
+	// the compaction entry's fold member. It is empty for a fold
+	// through the compaction endpoint, which sends no request the
+	// format hashes, and for an entry written before agentturn
+	// v0.0.6, which recorded no fold member at all.
+	foldHash string
 }
 
 // Model is an openresponses.Streamer, and a compact.Compactor, served
@@ -179,10 +194,26 @@ func NewModel(s *agentsession.Session, opts ...Option) (*Model, error) {
 			st.output = st.output.Clone()
 			m.steps = append(m.steps, st)
 		case *agentsession.CompactionEntry:
-			m.steps = append(m.steps, step{comp: v, summary: openresponses.Items{v.Summary}.Clone()[0]})
+			m.steps = append(m.steps, step{comp: v, summary: openresponses.Items{v.Summary}.Clone()[0], foldHash: foldHash(v)})
 		}
 	}
 	return m, nil
+}
+
+// foldHash reads the request hash of the fold a compaction entry
+// records, from the member agentturn writes beyond those the format
+// defines. An entry without the member, or without a hash on it,
+// yields "".
+func foldHash(c *agentsession.CompactionEntry) string {
+	raw, ok := c.Unknown[session.FoldMember]
+	if !ok {
+		return ""
+	}
+	var call session.FoldCall
+	if err := json.Unmarshal(raw, &call); err != nil {
+		return ""
+	}
+	return call.RequestHash
 }
 
 // pathTo returns the root-first path to leaf, or to the current leaf
@@ -325,9 +356,23 @@ func serveResponse(st step, req openresponses.Request, sink openresponses.EventS
 }
 
 // serveFold answers a local fold's summary call with the compaction
-// entry's summary text.
+// entry's summary text, after checking the fold's own request against
+// the hash the entry recorded for it.
 func (m *Model) serveFold(st step, n int, req openresponses.Request, sink openresponses.EventSink) error {
-	m.observe(Served{Kind: KindFold, N: n, EntryID: st.comp.ID})
+	sv := Served{Kind: KindFold, N: n, EntryID: st.comp.ID, Recorded: st.foldHash}
+	if st.foldHash != "" {
+		got, err := agentsession.RequestHash(session.Canonical(req))
+		if err != nil {
+			return err
+		}
+		sv.Got, sv.Match = got, got == st.foldHash
+	}
+	m.observe(sv)
+	// An entry that recorded no fold hash keeps the shape-only check,
+	// so a recording made before agentturn v0.0.6 still replays.
+	if m.opts.strict && sv.Recorded != "" && !sv.Match {
+		return fmt.Errorf("%w: compaction %s (step %d): the fold's request: recorded %s, received %s", ErrDiverged, st.comp.ID, n, sv.Recorded, sv.Got)
+	}
 	resp := openresponses.NewResponse(req)
 	resp.Usage = st.comp.Usage
 	em := openresponses.NewEmitter(sink, resp)

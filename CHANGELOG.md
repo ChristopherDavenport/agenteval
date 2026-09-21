@@ -27,6 +27,17 @@ versions may break the API.
   no request hash. The runner reports it when the run is written
   rather than leaving it to a replay weeks later (#1).
 
+### Changed
+
+- `replay.Strict()` checks a local fold's own request against the hash
+  its compaction entry records, and refuses a mismatch with
+  `ErrDiverged` as it does for a response, so a summary prompt, a
+  budget or a filter that changed is no longer answered with the
+  recorded summary and reported as neutral. `Served` carries both
+  hashes for a fold. A compaction entry with no recorded fold hash, a
+  fold through the compaction endpoint or a recording made before
+  agentturn v0.0.6, keeps the shape-only check (#2).
+
 ## v0.0.1 - 2026-09-20
 
 - Initial release: `replay.Model` and `replay.Tools` serve a recorded

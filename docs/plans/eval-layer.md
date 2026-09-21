@@ -95,8 +95,10 @@ func NewModel(s *agentsession.Session, opts ...Option) (*Model, error)
 // with the hash recorded on the response entry it is about to serve.
 // A mismatch returns ErrDiverged naming the entry and both hashes. The
 // default is lenient: responses are served by position and the hashes
-// are reported through the observer. A fold records no request hash
-// and is never a divergence.
+// are reported through the observer. A local fold is checked the same
+// way against the hash its compaction entry's fold member records; a
+// fold through the compaction endpoint, and one recorded before that
+// member existed, is checked for the shape of a fold's request only.
 func Strict() Option
 // WithLeaf names the path. A session that was branched has several
 // leaves, and its current leaf, after judging, is an outcome entry
@@ -422,13 +424,16 @@ directory and a trial directory.
 - Where a judgement of a human-labelled trajectory goes: the same
   `outcome` entry with `kind: "feedback"` and `label: "human"` is the
   obvious answer, and the export's preference already reads it.
-- Whether the fold served from a compaction entry should also verify
-  something about the fold request, given it records no hash. The
-  request's shape, no tools and the summary prompt last, is the
-  candidate.
 
 ## Resolved
 
+- The fold is checked like any other call. `agentturn/session` v0.0.6
+  records `FoldCall.RequestHash` on every compaction entry a local
+  fold produces, so strict mode hashes the fold's own request and
+  refuses a summary prompt, a budget or a filter that changed. The
+  shape test, no tools and no instructions, decides only whether the
+  request is a fold at all, and is the whole check for a fold through
+  the compaction endpoint, which sends no request the format hashes.
 - `Tools` matches arguments canonically: `agentsession` already has
   RFC 8785 in its request hash, the same bytes decide both, and byte
   comparison makes a replay fail when a serialiser reorders a map.

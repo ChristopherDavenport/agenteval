@@ -401,3 +401,88 @@ func TestDefaultFoldText(t *testing.T) {
 		})
 	}
 }
+
+// TestStrictChecksTheFold is issue 2: a configuration whose fold
+// differs from the recorded one is refused, rather than answered with
+// the recorded summary and signed off as having changed nothing.
+func TestStrictChecksTheFold(t *testing.T) {
+	const haiku = "Write a haiku about the conversation so far."
+	tests := []struct {
+		name     string
+		prompt   string
+		strict   bool
+		diverges bool
+	}{
+		{"the recorded fold", "", true, false},
+		{"another summary prompt, strict", haiku, true, true},
+		{"another summary prompt, lenient", haiku, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			orig := loadFixture(t, "compaction")
+			var seen []replay.Served
+			opts := []replay.Option{replay.WithObserver(func(sv replay.Served) { seen = append(seen, sv) })}
+			if tt.strict {
+				opts = append(opts, replay.Strict())
+			}
+			model, err := replay.NewModel(orig, opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ran := 0
+			cfg := fixtureConfig(model, replay.Tools(orig, []agenttool.Tool{upperTool(&ran)})...)
+			_, _, err = rerunWith(t, cfg, func(cfg *agentturn.Config, rec *session.Recorder) {
+				copts := []compact.Option{compact.WithBudget(1), compact.WithKeepLast(2), compact.WithOnFold(rec.Fold)}
+				if tt.prompt != "" {
+					copts = append(copts, compact.WithSummaryPrompt(tt.prompt))
+				}
+				cfg.Transform = compact.NewLocal(model, copts...).Transform
+			}, "one", "two", "three")
+
+			var folds, mismatched int
+			var first replay.Served
+			for _, sv := range seen {
+				if sv.Kind != replay.KindFold {
+					continue
+				}
+				folds++
+				if sv.Recorded == "" {
+					t.Errorf("fold at step %d reports no recorded hash", sv.N)
+				}
+				if !sv.Match {
+					mismatched++
+					if first.Recorded == "" {
+						first = sv
+					}
+				}
+			}
+			if folds == 0 {
+				t.Fatal("no fold was served")
+			}
+			if !tt.diverges {
+				if err != nil {
+					t.Fatalf("replay: %v", err)
+				}
+				if tt.prompt == "" && mismatched != 0 {
+					t.Errorf("%d of %d folds mismatched under the recorded prompt", mismatched, folds)
+				}
+				if tt.prompt != "" && mismatched == 0 {
+					t.Error("a lenient replay reported no mismatch although the fold's prompt changed")
+				}
+				return
+			}
+			if !errors.Is(err, replay.ErrDiverged) {
+				t.Fatalf("err = %v, want ErrDiverged", err)
+			}
+			if first.Got == "" || first.Got == first.Recorded {
+				t.Errorf("the observer did not report both hashes: %+v", first)
+			}
+			msg := err.Error()
+			for _, want := range []string{"compaction", "fold", first.EntryID, first.Recorded, first.Got} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("the error does not name %q: %s", want, msg)
+				}
+			}
+		})
+	}
+}
