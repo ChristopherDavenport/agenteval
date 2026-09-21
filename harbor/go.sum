@@ -1,5 +1,7 @@
 github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
+github.com/ChristopherDavenport/agenteval v0.0.1 h1:cQTOy3Rpt1FXO3nAEbEiFOJbWu4uu1X5jDHvt6GdNgI=
+github.com/ChristopherDavenport/agenteval v0.0.1/go.mod h1:QkcFBIu7U4ySQo+4wZXoKSjUzvx316uK53xdiP/LNJM=
 github.com/ChristopherDavenport/agentsession v0.0.5 h1:d52KQysQ+JVfbu3BROw+KPEu/3tl/K7fCq3VeSvuBO8=
 github.com/ChristopherDavenport/agentsession v0.0.5/go.mod h1:w2r/2W6ic4PmJRkRw9vGQGTtqJi+ilmKPsO9sPqzITE=
 github.com/ChristopherDavenport/agenttool v0.0.5 h1:osZw54L1J3f/Awe94Se5XLCLWMIdd2+L1JTqfgnP0yo=
