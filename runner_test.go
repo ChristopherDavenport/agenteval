@@ -656,3 +656,50 @@ func TestRunnerAnswers(t *testing.T) {
 		})
 	}
 }
+
+// TestRunnerConfigWithAnnotates is the other half of issue 7: the
+// configuration is handed the recorder, so a layer can annotate the
+// run it is in and its provenance reaches the session a judge reads.
+// Before it, the only route to the session ID was a store wrapper that
+// captured it from Create, and that told a layer nothing about which
+// run it was in.
+func TestRunnerConfigWithAnnotates(t *testing.T) {
+	const ns = "product:memory"
+	store := newStableStore()
+	r := &agenteval.Runner{
+		Store: store,
+		ConfigWith: func(_ agenteval.Task, rec *session.Recorder) agentturn.Config {
+			cfg := echoConfig()
+			cfg.BeforeTurn = func(ctx context.Context, _ agentturn.TurnStartInfo) (openresponses.Items, error) {
+				return nil, rec.Annotate(ctx, ns, map[string]string{"block": "go-version"})
+			}
+			return cfg
+		},
+		Judges: []agenteval.Judge{judge.ToolCalled("upper")},
+	}
+	report, err := r.Run(context.Background(), &agenteval.Suite{Name: "s", Tasks: []agenteval.Task{{ID: "one", Instruction: "hello"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := report.Results[0]
+	if res.Err != nil {
+		t.Fatalf("err = %v", res.Err)
+	}
+	s, err := store.Open(context.Background(), res.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	annotations := 0
+	for _, e := range s.Path(res.Target) {
+		if c, ok := e.(*agentsession.CustomEntry); ok && c.NS == ns {
+			annotations++
+		}
+	}
+	if annotations == 0 {
+		t.Errorf("no %s entry on the run: %s", ns, entryTypes(s))
+	}
+	// The layer's annotations did not cost the run its replayability.
+	if _, _, unhashed := countPath(s, res.Target); unhashed != 0 {
+		t.Errorf("%d responses carry no request hash", unhashed)
+	}
+}
