@@ -150,3 +150,56 @@ func TestDiffSettings(t *testing.T) {
 		})
 	}
 }
+
+// TestCompareSeesBeyondTheSettings is one of issue 4's frictions: two
+// configurations that differ only in a transform have the same
+// settings, and a comparison that can diff settings alone reported
+// that nothing about them differed, which is worse than reporting
+// nothing.
+func TestCompareSeesBeyondTheSettings(t *testing.T) {
+	suite := basicSuite(t)
+	tests := []struct {
+		name   string
+		config func(agenteval.Task) agentturn.Config
+		want   bool
+	}{
+		{"the same configuration twice", basicConfig, false},
+		{"a context strategy on one side", func(task agenteval.Task) agentturn.Config {
+			cfg := basicConfig(task)
+			// One note prepended to every call: not a setting, not an
+			// item the record holds, and the whole difference between
+			// the two runs.
+			cfg.Transform = func(_ context.Context, items agentturn.Transcript) (agentturn.Transcript, error) {
+				return append(openresponses.Items{openresponses.UserText("Remember: be terse.")}, items...), nil
+			}
+			return cfg
+		}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := basicRunner(newStableStore())
+			b := basicRunner(newStableStore())
+			b.Config = tt.config
+			c, err := agenteval.Compare(context.Background(), suite, a, b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !c.Uniform {
+				t.Fatalf("the pairs differ from each other: %+v", c.Config)
+			}
+			if c.Config.BeyondSettings != tt.want || c.Config.Empty() == tt.want {
+				t.Errorf("beyond_settings = %v, empty = %v, want %v", c.Config.BeyondSettings, c.Config.Empty(), tt.want)
+			}
+			if c.Config.Instructions != nil || c.Config.Model != nil || len(c.Config.ToolsChanged) != 0 {
+				t.Errorf("the settings themselves differ: %+v", c.Config)
+			}
+			var buf bytes.Buffer
+			if err := c.WriteJSON(&buf); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(buf.String(), "beyond_settings") != tt.want {
+				t.Errorf("written comparison: %s", buf.String())
+			}
+		})
+	}
+}

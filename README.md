@@ -98,9 +98,17 @@ one it judged, so a judgement is as replayable as the run.
 
 `Compare` runs a suite under two configurations, pairs the results by
 task, and names how the two configurations differed, read back from
-the sessions. `price` loads a table of rates and prices a run with
-ATIF's formula; the same hook feeds the runner and the exporter, so the
-report and the exported document agree on one number.
+the sessions. The difference it names is the settings the record
+describes; when those are the same and the two first requests are not,
+it says so with `beyond_settings`, because a transform, a hook and an
+injected item are not settings.
+
+`price` loads a table of rates and prices a run with ATIF's formula,
+and the runner and the exporter take the same hook, so the two agree
+on the rate. They do not agree on the total: a result's `usage` is
+every response on the run's path, while the exported document's final
+metrics cover the context after the last compaction, so a run that
+folded is counted twice over on two different scopes.
 
 ## Harbor
 

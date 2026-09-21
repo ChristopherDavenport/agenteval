@@ -9,7 +9,6 @@ import (
 
 	"github.com/ChristopherDavenport/agenteval"
 	"github.com/ChristopherDavenport/agentsession"
-	"github.com/ChristopherDavenport/agentsession/atif"
 	"github.com/ChristopherDavenport/agentsession/export"
 	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/agentturn/session"
@@ -126,9 +125,12 @@ func (r *rubric) Judge(ctx context.Context, t export.Trajectory, task agenteval.
 }
 
 // Render is the default input of a rubric judge: the trajectory's ATIF
-// document with the raw item passthrough stripped, indented.
+// document with the raw item passthrough stripped by
+// [export.NoPassthrough], indented. The passthrough is about half a
+// document and says nothing the declared fields do not, and a judge's
+// context is better spent once.
 func Render(t export.Trajectory) (string, error) {
-	doc, err := export.ToATIF(t, export.Options{Redactors: []export.Redactor{StripRaw()}})
+	doc, err := export.ToATIF(t, export.Options{Redactors: []export.Redactor{export.NoPassthrough()}})
 	if err != nil {
 		return "", err
 	}
@@ -139,28 +141,13 @@ func Render(t export.Trajectory) (string, error) {
 	return string(data), nil
 }
 
-// StripRaw is a redactor that drops the raw Open Responses items the
-// exporter carries under extra.openresponses on the root, on every
-// step and on every observation result. The document then holds each
-// item once, as ATIF renders it, which the design study measured at
-// about half its size.
-func StripRaw() export.Redactor {
-	return export.RedactorFunc(func(doc *atif.Trajectory) error {
-		delete(doc.Extra, export.ExtraOpenResponses)
-		for i := range doc.Steps {
-			step := &doc.Steps[i]
-			delete(step.Extra, export.ExtraOpenResponses)
-			if step.Observation != nil {
-				for j := range step.Observation.Results {
-					delete(step.Observation.Results[j].Extra, export.ExtraOpenResponses)
-				}
-			}
-		}
-		for _, sub := range doc.SubagentTrajectories {
-			if err := StripRaw().Redact(sub); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-}
+// StripRaw drops the raw Open Responses items the exporter carries
+// under extra.openresponses, which the design study measured at about
+// half a document and which a judge's context is better spent once.
+//
+// Deprecated: it is [export.NoPassthrough], which does the same work
+// and keeps the root's payload profile name, so a judged document
+// still says which wire profile produced it. This is that function
+// under the name this package gave it; [Render] calls NoPassthrough
+// directly.
+func StripRaw() export.Redactor { return export.NoPassthrough() }

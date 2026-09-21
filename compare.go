@@ -66,11 +66,26 @@ type ConfigDiff struct {
 	// Extra holds passthrough members that differ, by wire name; a
 	// side that lacks the member has nil.
 	Extra map[string]Change `json:"extra,omitempty"`
+	// BeyondSettings says the two runs' first calls sent different
+	// requests although their settings were the same: a transform, a
+	// BeforeTurn or BeforeModelCall hook, or items one side injected.
+	// None of those is a setting, so no field above can name it, and a
+	// comparison of two configurations that differ only there would
+	// otherwise report that nothing differed, which is worse than
+	// reporting nothing. It is read from the request hashes the two
+	// first responses recorded: two that differ say so, and one hash
+	// against none says the other run sent something the record does
+	// not rebuild, which is a transform or a hook by definition. It
+	// compares the first call of each run, so a transform that
+	// changes nothing until later, as a compaction transform does not
+	// fold before it has anything to fold, is not visible here; the
+	// compaction entries of the two sessions are.
+	BeyondSettings bool `json:"beyond_settings,omitempty"`
 }
 
 // Empty reports whether nothing differed.
 func (d ConfigDiff) Empty() bool {
-	return d.Model == nil && d.Instructions == nil && d.Reasoning == nil && d.Text == nil &&
+	return !d.BeyondSettings && d.Model == nil && d.Instructions == nil && d.Reasoning == nil && d.Text == nil &&
 		len(d.ToolsAdded) == 0 && len(d.ToolsRemoved) == 0 && len(d.ToolsChanged) == 0 && len(d.Extra) == 0
 }
 
@@ -114,10 +129,16 @@ func Compare(ctx context.Context, suite *Suite, a, b *Runner) (*Comparison, erro
 				counts[s.Judge]++
 			}
 		}
-		sa, errA := initialSettings(ctx, a.Store, pa.SessionID)
-		sb, errB := initialSettings(ctx, b.Store, pb.SessionID)
+		sa, ha, errA := initialCall(ctx, a.Store, pa.SessionID)
+		sb, hb, errB := initialCall(ctx, b.Store, pb.SessionID)
 		if errA == nil && errB == nil {
 			pair.Config = DiffSettings(sa, sb)
+			// The same settings and a different request is something
+			// the settings cannot describe: a transform, a hook or an
+			// injected item.
+			if pair.Config.Empty() && differentFirstCall(ha, hb) {
+				pair.Config.BeyondSettings = true
+			}
 		}
 		if i == 0 {
 			c.Config = pair.Config
@@ -135,28 +156,48 @@ func Compare(ctx context.Context, suite *Suite, a, b *Runner) (*Comparison, erro
 	return c, nil
 }
 
-// initialSettings replays the settings the session's first model call
-// was made under: the config entries on the path to the first response
-// entry, or to the leaf when there is none.
-func initialSettings(ctx context.Context, store agentsession.Store, sessionID string) (agentsession.Settings, error) {
+// initialCall replays the settings the session's first model call was
+// made under, the config entries on the path to the first response
+// entry, and returns the hash that response recorded for its request.
+// A session with no response yields the settings at its leaf and no
+// hash.
+func initialCall(ctx context.Context, store agentsession.Store, sessionID string) (agentsession.Settings, string, error) {
 	if sessionID == "" {
-		return agentsession.Settings{}, errors.New("agenteval: no session")
+		return agentsession.Settings{}, "", errors.New("agenteval: no session")
 	}
 	s, err := store.Open(ctx, sessionID)
 	if err != nil {
-		return agentsession.Settings{}, err
+		return agentsession.Settings{}, "", err
 	}
 	for _, e := range s.Path(s.Leaf()) {
-		if _, ok := e.(*agentsession.ResponseEntry); ok {
-			cx, err := s.RequestContext(e.Base().ID)
-			return cx.Settings, err
+		if resp, ok := e.(*agentsession.ResponseEntry); ok {
+			cx, err := s.RequestContext(resp.ID)
+			return cx.Settings, resp.RequestHash, err
 		}
 	}
 	cx, err := s.Context()
-	return cx.Settings, err
+	return cx.Settings, "", err
 }
 
-// DiffSettings returns what differs between a and b.
+// differentFirstCall reports whether two runs' first calls sent
+// different requests, from the hashes their responses recorded. Two
+// hashes that differ say so. One hash and none says the other run
+// sent something the record does not rebuild, which is a transform, a
+// hook or an injected item by definition. Two runs that both sent
+// something the record cannot rebuild cannot be told apart this way.
+func differentFirstCall(a, b string) bool {
+	if a == "" && b == "" {
+		return false
+	}
+	return a != b
+}
+
+// DiffSettings returns what differs between a and b. It covers the
+// settings the record describes, which is the model, the instructions,
+// the reasoning and text configuration, the tools and the passthrough
+// members, and nothing else: a transform, a hook and an injected item
+// are not settings. [Compare] reports one of those through
+// [ConfigDiff.BeyondSettings].
 func DiffSettings(a, b agentsession.Settings) ConfigDiff {
 	var d ConfigDiff
 	if a.Model != b.Model {

@@ -34,6 +34,8 @@ jobs:
         run: make vet
       - name: Test (library and nested modules)
         run: make test
+      - name: Nested modules build as published, without the replace to the tree
+        run: make published
 
   lint:
     name: Lint

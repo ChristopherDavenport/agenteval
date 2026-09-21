@@ -356,9 +356,12 @@ func Hook(t Table) func(model string, usage openresponses.Usage) (float64, bool)
 
 The cost formula is ATIF's: `(prompt - cached) x input + cached x cached
 + completion x output`. The runner and the exporter take the same hook,
-so the report and the exported document agree on one number. Prices
-belong with the thing that compares runs, not in the wire package or
-the record.
+so the two agree on the rate. They do not agree on the total, and the
+invariant below says so: `Result.Usage` sums every response on the
+run's path, and the document's final metrics sum the context after the
+last compaction, which on one seven-fold run was 539 prompt tokens
+against 301. Prices belong with the thing that compares runs, not in
+the wire package or the record.
 
 ### `harbor`
 
@@ -405,7 +408,10 @@ of what it copies.
 - A run's session, exported, contains everything the report says
   about it; the report holds no fact the session lacks. Cost is the
   one derived number, and it names its source: the runner's price
-  hook, which the export takes too.
+  hook, which the export takes too. The two price the same calls at
+  the same rates over different scopes, the whole path against the
+  context after the last compaction, so they agree on the rate and
+  not on the total.
 - Scores are appended, never rewritten; a second judgement is a
   second `outcome` entry.
 - The runner never mutates a suite's `fs.FS`.

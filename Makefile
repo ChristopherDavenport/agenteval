@@ -1,11 +1,13 @@
 GO ?= go
+MODULE := $(shell $(GO) list -m)
+NOTES := $(shell mktemp)
 STATICCHECK ?= $(GO) run honnef.co/go/tools/cmd/staticcheck@latest
 GOVULNCHECK ?= $(GO) run golang.org/x/vuln/cmd/govulncheck@latest
 # Nested modules that are tested alongside the library but keep their own
 # dependencies out of it.
 SUBMODULES = harbor
 
-.PHONY: build deps test vet fmt tidy tidy-check lint vuln check release clean
+.PHONY: build deps test vet fmt tidy tidy-check lint vuln published check release clean
 
 build:
 	$(GO) build ./...
@@ -48,11 +50,21 @@ vuln:
 	$(GOVULNCHECK) ./...
 	@for m in $(SUBMODULES); do (cd $$m && $(GOVULNCHECK) ./...) || exit 1; done
 
+# Build each nested module as it is published. The replace to the tree
+# is what keeps the checkout building against the working copy, and it
+# is also why the module's own zip does not build: Go reads a replace
+# when the module is the main one, and ../go.mod is not in the zip. A
+# consumer is unaffected, because a replace in a dependency is ignored,
+# but nothing otherwise compiles the released pair against each other.
+# This builds a copy with the replace dropped, which is that pair.
+published:
+	@for m in $(SUBMODULES); do ( \
+	  d=$$(mktemp -d) && cp -R $$m/. $$d && cd $$d && \
+	  $(GO) mod edit -dropreplace=$(MODULE) && $(GO) build ./... ; \
+	  code=$$?; rm -rf $$d; exit $$code ) || exit 1; done
+
 # Everything CI runs.
 check: fmt tidy-check vet deps lint vuln test
-
-MODULE := $(shell $(GO) list -m)
-NOTES := $(shell mktemp)
 
 # Cut a release. Every module in the repository shares one version and
 # one commit: each nested module's requirement on the root is set to

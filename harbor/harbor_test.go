@@ -1,8 +1,10 @@
 package harbor_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"strings"
 	"testing"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/ChristopherDavenport/agenteval"
 	"github.com/ChristopherDavenport/agenteval/harbor"
+	"github.com/ChristopherDavenport/agentsession/export"
 )
 
 func TestReward(t *testing.T) {
@@ -222,5 +225,53 @@ func TestLoadErrors(t *testing.T) {
 	}
 	if task.ID != "d" || task.Meta["task.description"] != "d" || task.Setup != nil {
 		t.Errorf("task = %+v", task)
+	}
+}
+
+// verifierJudge is the judge harbor's package comment shows, kept here
+// so the example compiles and is exercised: a Harbor task's notion of
+// success is a script someone else runs after the agent stops, so the
+// judge that fits wraps Reward over the trial's verifier directory
+// rather than comparing an expectation against the trajectory.
+func verifierJudge(fsys fs.FS, dir string) agenteval.Judge {
+	return agenteval.JudgeFunc{
+		JudgeName: "harbor",
+		Fn: func(context.Context, export.Trajectory, agenteval.Task) (agenteval.Score, error) {
+			scores, err := harbor.Reward(fsys, dir)
+			if err != nil {
+				return agenteval.Score{}, err
+			}
+			return scores[0], nil
+		},
+	}
+}
+
+func TestVerifierJudge(t *testing.T) {
+	tests := []struct {
+		dir  string
+		pass bool
+		err  bool
+	}{
+		{dir: "trial-json", pass: true},
+		{dir: "trial-txt"},
+		{dir: "trial-none", err: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.dir, func(t *testing.T) {
+			j := verifierJudge(os.DirFS("testdata"), tt.dir)
+			score, err := j.Judge(context.Background(), export.Trajectory{}, agenteval.Task{ID: "harbor/hello-world"})
+			if tt.err {
+				if !errors.Is(err, harbor.ErrNoReward) {
+					t.Fatalf("err = %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if score.Judge != "reward" || score.Pass != tt.pass {
+				t.Errorf("score = %+v", score)
+			}
+		})
 	}
 }

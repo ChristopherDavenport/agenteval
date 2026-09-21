@@ -54,6 +54,27 @@ versions may break the API.
   fold through the compaction endpoint or a recording made before
   agentturn v0.0.6, keeps the shape-only check (#2).
 
+- `judge.Render` strips the raw item passthrough through
+  `export.NoPassthrough`, so a judged document keeps the root's
+  payload profile name and says which wire profile produced it.
+  `judge.StripRaw` is that function under this package's name and is
+  deprecated; the two did one job twice and disagreed about that one
+  member (#4).
+- `Compare` reports `ConfigDiff.BeyondSettings` when two runs' first
+  calls sent different requests although their settings were the same,
+  which is a transform, a hook or an injected item. A comparison of
+  two context strategies reported that nothing differed (#4).
+- `harbor`'s package comment holds the Harbor verifier judge, twelve
+  lines wrapping `Reward`, and `Load` says that every real Harbor task
+  ID holds a slash, since Harbor validates a name as `org/name` (#4).
+- `make published` builds each nested module with its `replace` to the
+  tree dropped, against the released root, which is the pair a
+  consumer gets and which nothing compiled before. CI runs it (#4).
+- The README and `Result.Usage` say that the runner and the exported
+  document price the same calls over different scopes, the whole path
+  against the context after the last compaction, so the two agree on
+  the rate and not on the total (#4).
+
 ### Fixed
 
 - `replay` serves a recorded item's own bytes. It streamed each item

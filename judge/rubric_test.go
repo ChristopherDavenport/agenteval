@@ -122,7 +122,11 @@ func TestRubricNoVerdict(t *testing.T) {
 	}
 }
 
-func TestRenderStripsRaw(t *testing.T) {
+// TestRenderStripsPassthrough is one of issue 4's frictions: Render
+// strips the raw item passthrough through export.NoPassthrough, which
+// keeps the root's payload profile name, so a judged document still
+// says which wire profile produced it.
+func TestRenderStripsPassthrough(t *testing.T) {
 	tr := mainTrajectory(t, loadFixture(t, "basic"))
 	full, err := export.ToATIF(tr, export.Options{})
 	if err != nil {
@@ -133,9 +137,6 @@ func TestRenderStripsRaw(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(text, `"`+export.ExtraOpenResponses+`"`) {
-		t.Error("rendered document still carries extra.openresponses")
-	}
 	if !strings.Contains(text, "HELLO WORLD") || !strings.Contains(text, `"upper"`) {
 		t.Error("rendered document lost the tool call or its result")
 	}
@@ -145,6 +146,21 @@ func TestRenderStripsRaw(t *testing.T) {
 	}
 	if steps, _ := doc["steps"].([]any); len(steps) != len(full.Steps) {
 		t.Errorf("rendered %d steps, want %d", len(steps), len(full.Steps))
+	}
+	// The root keeps the payload profile name and no step keeps its
+	// items, which is the one place StripRaw and NoPassthrough
+	// disagreed.
+	extra, _ := doc["extra"].(map[string]any)
+	or, _ := extra[export.ExtraOpenResponses].(map[string]any)
+	if or["payload"] == nil {
+		t.Errorf("the document does not say which wire profile produced it: %v", extra)
+	}
+	for _, raw := range doc["steps"].([]any) {
+		step, _ := raw.(map[string]any)
+		stepExtra, _ := step["extra"].(map[string]any)
+		if _, ok := stepExtra[export.ExtraOpenResponses]; ok {
+			t.Errorf("step %v still carries its raw items", step["step_id"])
+		}
 	}
 	compact, _ := json.Marshal(doc)
 	if len(compact) >= len(fullJSON) {

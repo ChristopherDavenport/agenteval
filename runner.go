@@ -337,7 +337,7 @@ func replayable(s *agentsession.Session, leaf string) error {
 		return nil
 	}
 	if folds == 0 {
-		return fmt.Errorf("%w: %d of %d responses carry no request hash and the session records no fold; a configuration that compacts binds compact.WithOnFold(rec.Fold) through Runner.ConfigWith", ErrUnreplayable, unhashed, responses)
+		return fmt.Errorf("%w: %d of %d responses carry no request hash and the session records no fold; a configuration that compacts binds compact.WithOnFold(rec.Fold) through Runner.ConfigWith, and a transform or a hook that edits the input is a change the record cannot describe at all", ErrUnreplayable, unhashed, responses)
 	}
 	return fmt.Errorf("%w: %d of %d responses carry no request hash, so the record does not rebuild what was sent", ErrUnreplayable, unhashed, responses)
 }

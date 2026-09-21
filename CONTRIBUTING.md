@@ -26,7 +26,7 @@ make check        # gofmt, tidy, vet, deps, staticcheck, govulncheck, race tests
 ```
 
 The individual targets are `fmt`, `tidy-check`, `vet`, `deps`, `lint`,
-`vuln`, `test` and `tidy`.
+`vuln`, `test`, `tidy` and `published`.
 
 The repository has two modules: the library at the root and `harbor`,
 nested so its TOML decoder stays out of the library's dependency graph.
@@ -37,6 +37,13 @@ standard library; anything that needs another dependency is a nested
 module listed in `SUBMODULES` in the Makefile. `lint` and `vuln` run
 staticcheck and govulncheck through `go run`, which may download a
 newer Go toolchain the first time.
+
+`harbor`'s `go.mod` requires the released root next to a `replace` to
+the tree, so a consumer fetches the version and the checkout builds
+against the working copy. Go reads that `replace` when the module is
+the main one, which is why the published module cannot be built from
+its own zip; `make published` builds a copy of each nested module with
+the `replace` dropped, against the released root, and CI runs it.
 
 Tests are table-driven and offline. The replay fixtures under
 `testdata/sessions/` are sessions recorded from the `echo` adapter and

@@ -12,6 +12,28 @@
 // MCP servers, the steps and the test script do not. A task loaded
 // this way is the prompt only; running it faithfully means running it
 // under Harbor, and Load honours nothing it copies into Setup.
+//
+// The two halves meet in a judge. A Harbor task's notion of success is
+// a script someone else runs after the agent stops, so the judge that
+// fits is not an expectation compared against the trajectory but a
+// wrapper around Reward over the trial's verifier directory:
+//
+//	func verifier(fsys fs.FS, dir string) agenteval.Judge {
+//		return agenteval.JudgeFunc{
+//			JudgeName: "harbor",
+//			Fn: func(context.Context, export.Trajectory, agenteval.Task) (agenteval.Score, error) {
+//				scores, err := harbor.Reward(fsys, dir)
+//				if err != nil {
+//					return agenteval.Score{}, err
+//				}
+//				return scores[0], nil
+//			},
+//		}
+//	}
+//
+// A run judged that way records Harbor's own number as an outcome
+// entry on its session, and a report over the suite is a pass rate
+// Harbor would recognise.
 package harbor
 
 import (
@@ -144,6 +166,10 @@ func score(label string, v float64, file string, o rewardOptions) agenteval.Scor
 // tables as JSON. A missing task.toml names the task after the
 // directory. What Setup holds is recorded with the run and honoured
 // by nothing here.
+//
+// Harbor validates [task].name as org/name, so the ID of every real
+// Harbor task holds a slash: a product that writes one file per task
+// ID wants to know that before it tries.
 //
 // Both tables are prefixed because [task] is a package description
 // with name, version, authors and keywords, while [metadata] is a
