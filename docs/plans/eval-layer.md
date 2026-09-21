@@ -88,7 +88,9 @@ implementations.
 // through the same model. A fold made through compact.NewLocal is an
 // ordinary call whose answer the session holds only as the summary
 // item, and it is served from the compaction entry when that entry is
-// next on the path.
+// next on the path. A strict model over a path whose responses are not
+// all hashed is refused here, with ErrUnverifiable, rather than at the
+// call that could not be checked.
 func NewModel(s *agentsession.Session, opts ...Option) (*Model, error)
 
 // Strict makes the model compare the hash of each request it receives
@@ -96,10 +98,23 @@ func NewModel(s *agentsession.Session, opts ...Option) (*Model, error)
 // A mismatch returns ErrDiverged naming the entry and both hashes. The
 // default is lenient: responses are served by position and the hashes
 // are reported through the observer. A local fold is checked the same
-// way against the hash its compaction entry's fold member records; a
-// fold through the compaction endpoint, and one recorded before that
-// member existed, is checked for the shape of a fold's request only.
+// way against the hash its compaction entry's fold member records. A
+// call the record carries no hash for is refused as ErrUnverifiable --
+// at NewModel for a response, at the call for a fold, since only there
+// is the compactor known -- unless AllowUnhashed says to serve it by
+// position, which is how a recording made before that member existed
+// replays. A fold through the compaction endpoint sends no request the
+// format hashes and is served unchecked in every mode.
 func Strict() Option
+
+// AllowUnhashed serves a call whose entry recorded no hash instead of
+// refusing it, unchecked and by position, and says so in its doc: it
+// turns the guarantee off for those calls rather than relaxing it.
+func AllowUnhashed() Option
+
+// Unverifiable is the rule NewModel applies, exported so the runner
+// and any other caller ask it rather than keep a second copy.
+func Unverifiable(s *agentsession.Session, leaf string) error
 // BeforeModelCall is an agentturn Config.BeforeModelCall that replaces
 // the request's instructions and tool list with the ones in force at
 // the recorded call about to be served, rebuilt from the config

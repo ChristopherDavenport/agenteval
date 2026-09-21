@@ -195,6 +195,269 @@ func TestStrictDivergesAtTheChangedCall(t *testing.T) {
 	}
 }
 
+// unhashedAfterTheFold is the record shape a compacting configuration
+// writes when its folds reach no session, and the one compact.WithPin
+// writes for the rest of a run: hashed up to the first fold, unhashed
+// after it. The responses are real and so is the path; only the hashes
+// the recorder would have withheld are removed.
+func unhashedAfterTheFold(t *testing.T) (*agentsession.Session, int) {
+	t.Helper()
+	s := loadFixture(t, "compaction")
+	folded, blanked := false, 0
+	for _, e := range s.Path(s.Leaf()) {
+		switch v := e.(type) {
+		case *agentsession.CompactionEntry:
+			folded = true
+		case *agentsession.ResponseEntry:
+			if folded && v.RequestHash != "" {
+				v.RequestHash = ""
+				blanked++
+			}
+		}
+	}
+	if blanked == 0 {
+		t.Fatal("the compaction fixture records no hashed response after a fold")
+	}
+	return s, blanked
+}
+
+// A record that cannot say what was sent is refused before a call is
+// served, and not reported as a divergence. This is MEMO.md's probe 2:
+// a strict replay of such a session once failed at the call with
+// "recorded , received sha256:...", which reads as a mismatch that
+// never happened, and then briefly passed it in silence. Neither is
+// right -- there is nothing to check, and strict mode's whole promise
+// is that everything it serves was checked.
+func TestStrictRefusesAnUnverifiableRecord(t *testing.T) {
+	orig, blanked := unhashedAfterTheFold(t)
+
+	model, err := replay.NewModel(orig, replay.Strict())
+	if !errors.Is(err, replay.ErrUnverifiable) {
+		t.Fatalf("err = %v, want ErrUnverifiable", err)
+	}
+	if model != nil {
+		t.Error("a model was returned for a record that cannot be checked")
+	}
+	// It is not a divergence: nothing was measured to differ.
+	if errors.Is(err, replay.ErrDiverged) {
+		t.Errorf("the refusal reads as a divergence: %v", err)
+	}
+	if msg := err.Error(); !strings.Contains(msg, fmt.Sprint(blanked)) {
+		t.Errorf("the error does not say how many responses are unhashed: %s", msg)
+	}
+
+	// The exported rule answers the same question without building a
+	// model, which is what the runner asks it.
+	if err := replay.Unverifiable(orig, ""); !errors.Is(err, replay.ErrUnverifiable) {
+		t.Errorf("Unverifiable = %v, want ErrUnverifiable", err)
+	}
+	if err := replay.Unverifiable(loadFixture(t, "compaction"), ""); err != nil {
+		t.Errorf("Unverifiable on the unmodified fixture = %v", err)
+	}
+
+	// Lenient replay never promised a check and is unaffected.
+	if _, err := replay.NewModel(orig); err != nil {
+		t.Errorf("lenient: %v", err)
+	}
+	// AllowUnhashed is the way through.
+	if _, err := replay.NewModel(orig, replay.Strict(), replay.AllowUnhashed()); err != nil {
+		t.Errorf("AllowUnhashed: %v", err)
+	}
+}
+
+// AllowUnhashed serves the call the record is silent about, by
+// position and unchecked, and reports it as a fold with no fold hash
+// is reported: both hashes empty and Match false.
+func TestAllowUnhashedServesByPosition(t *testing.T) {
+	orig := loadFixture(t, "multi")
+	var blanked string
+	for _, e := range orig.Path(orig.Leaf()) {
+		if r, ok := e.(*agentsession.ResponseEntry); ok {
+			blanked, r.RequestHash = r.ID, ""
+			break
+		}
+	}
+	if blanked == "" {
+		t.Fatal("the fixture records no response")
+	}
+	if _, err := replay.NewModel(orig, replay.Strict()); !errors.Is(err, replay.ErrUnverifiable) {
+		t.Fatalf("without AllowUnhashed: err = %v, want ErrUnverifiable", err)
+	}
+	var seen []replay.Served
+	model, err := replay.NewModel(orig, replay.Strict(), replay.AllowUnhashed(),
+		replay.WithObserver(func(sv replay.Served) { seen = append(seen, sv) }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, end, err := rerun(t, fixtureConfig(model), "first", "second")
+	if err != nil {
+		t.Fatalf("the recorded configuration was refused: %v", err)
+	}
+	if end.Reason != agentturn.ReasonDone {
+		t.Errorf("reason = %s", end.Reason)
+	}
+	if model.Served() != model.Steps() {
+		t.Errorf("served %d of %d steps", model.Served(), model.Steps())
+	}
+	for _, sv := range seen {
+		if sv.EntryID == blanked {
+			// Nothing was compared, so Recorded is empty and Match is
+			// false -- but Got still reports what this replay sent,
+			// which for a call the record is silent about is the only
+			// account of it there is.
+			if sv.Recorded != "" || sv.Match {
+				t.Errorf("the unhashed call reports %+v, want no recorded hash and Match false", sv)
+			}
+			if sv.Got == "" {
+				t.Errorf("the unhashed call reports no hash for the request received: %+v", sv)
+			}
+			continue
+		}
+		if !sv.Match {
+			t.Errorf("step %d: recorded %s, got %s", sv.N, sv.Recorded, sv.Got)
+		}
+	}
+}
+
+// A fold through the compaction endpoint is the one call no mode
+// checks: the endpoint sends a CompactRequest, not a request the
+// format hashes, so there is nothing to compare and its absence is not
+// ErrUnverifiable. Strict() does not refuse it and AllowUnhashed is
+// not needed to serve it. Asserted because two doc sentences and a
+// README paragraph promise the opposite guarantee, and because
+// TestCompactedRunReplays counts the fold's Match and discards it.
+func TestEndpointFoldIsServedUnchecked(t *testing.T) {
+	// The second case is a fold the entry does have a hash for, which
+	// an endpoint replay still cannot check: it is reported on Served
+	// and not compared.
+	for _, hashed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("recorded_hash=%t", hashed), func(t *testing.T) {
+			orig := loadFixture(t, "endpoint")
+			if hashed {
+				setFoldHashes(t, orig, "sha256:notthehashofanyrequest")
+			}
+			var folds []replay.Served
+			model, err := replay.NewModel(orig, replay.Strict(), replay.WithObserver(func(sv replay.Served) {
+				if sv.Kind == replay.KindFold {
+					folds = append(folds, sv)
+				}
+			}))
+			if err != nil {
+				t.Fatalf("NewModel: %v", err)
+			}
+			ran := 0
+			cfg := fixtureConfig(model, replay.Tools(orig, []agenttool.Tool{upperTool(&ran)}, replay.Strict())...)
+			_, _, err = rerunWith(t, cfg, func(cfg *agentturn.Config, rec *session.Recorder) {
+				cfg.Transform = compact.New(model, compact.WithBudget(1), compact.WithKeepLast(2), compact.WithOnFold(rec.Fold)).Transform
+			}, "one", "two", "three")
+			if err != nil {
+				t.Fatalf("a strict replay through the endpoint was refused: %v", err)
+			}
+			if len(folds) == 0 {
+				t.Fatal("no fold was served")
+			}
+			for _, sv := range folds {
+				if sv.Got != "" || sv.Match {
+					t.Errorf("a fold through the endpoint reports a check it cannot have made: %+v", sv)
+				}
+				if want := foldHashOf(t, orig, sv.EntryID); sv.Recorded != want {
+					t.Errorf("Recorded = %q, want the entry's fold hash %q", sv.Recorded, want)
+				}
+			}
+		})
+	}
+}
+
+// foldHashOf is the request hash on a compaction entry's fold member,
+// or "" when the entry has no member or no hash on it.
+func foldHashOf(t *testing.T, s *agentsession.Session, entryID string) string {
+	t.Helper()
+	e, ok := s.Entry(entryID)
+	if !ok {
+		t.Fatalf("no entry %s", entryID)
+	}
+	c, ok := e.(*agentsession.CompactionEntry)
+	if !ok {
+		t.Fatalf("entry %s is not a compaction", entryID)
+	}
+	raw, ok := c.Unknown[session.FoldMember]
+	if !ok {
+		return ""
+	}
+	var call session.FoldCall
+	if err := json.Unmarshal(raw, &call); err != nil {
+		t.Fatal(err)
+	}
+	return call.RequestHash
+}
+
+// setFoldHashes writes hash as the request hash of every compaction
+// entry's fold member on the path, which is what an entry recorded
+// through a local fold carries and one recorded through the endpoint
+// does not.
+func setFoldHashes(t *testing.T, s *agentsession.Session, hash string) {
+	t.Helper()
+	n := 0
+	for _, e := range s.Path(s.Leaf()) {
+		c, ok := e.(*agentsession.CompactionEntry)
+		if !ok {
+			continue
+		}
+		var call session.FoldCall
+		if raw, ok := c.Unknown[session.FoldMember]; ok {
+			if err := json.Unmarshal(raw, &call); err != nil {
+				t.Fatal(err)
+			}
+		}
+		call.RequestHash = hash
+		raw, err := json.Marshal(call)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Unknown == nil {
+			c.Unknown = map[string]json.RawMessage{}
+		}
+		c.Unknown[session.FoldMember] = raw
+		n++
+	}
+	if n == 0 {
+		t.Fatal("the fixture records no fold")
+	}
+}
+
+// A compaction entry with no fold hash cannot be refused at
+// construction, because one recorded through the compaction endpoint
+// carries none either and replays through Compact without a check
+// being possible. It is refused at the call instead.
+func TestStrictRefusesAFoldWithNoRecordedHash(t *testing.T) {
+	orig := loadFixture(t, "compaction")
+	found := false
+	for _, e := range orig.Path(orig.Leaf()) {
+		if c, ok := e.(*agentsession.CompactionEntry); ok {
+			delete(c.Unknown, session.FoldMember)
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the compaction fixture records no fold")
+	}
+	model, err := replay.NewModel(orig, replay.Strict())
+	if err != nil {
+		t.Fatalf("NewModel refused a path whose responses are all hashed: %v", err)
+	}
+	ran := 0
+	cfg := fixtureConfig(model, replay.Tools(orig, []agenttool.Tool{upperTool(&ran)}, replay.Strict())...)
+	_, _, err = rerunWith(t, cfg, func(cfg *agentturn.Config, rec *session.Recorder) {
+		cfg.Transform = compact.NewLocal(model, compact.WithBudget(1), compact.WithKeepLast(2), compact.WithOnFold(rec.Fold)).Transform
+	}, "one", "two", "three")
+	if !errors.Is(err, replay.ErrUnverifiable) {
+		t.Fatalf("err = %v, want ErrUnverifiable", err)
+	}
+	if errors.Is(err, replay.ErrDiverged) {
+		t.Errorf("the refusal reads as a divergence: %v", err)
+	}
+}
+
 func TestLenientServesByPositionAndReports(t *testing.T) {
 	orig := loadFixture(t, "multi")
 	var seen []replay.Served

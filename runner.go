@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/ChristopherDavenport/agenteval/replay"
 	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agentsession/export"
 	"github.com/ChristopherDavenport/agentturn"
@@ -223,12 +224,17 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task) Result {
 	if res.Target == "" {
 		return res
 	}
+	// replayable and trajectoryAt are this package's own, and their
+	// errors already name it. Wrapping those with the package again
+	// puts it twice in front of one message; the sites below wrap
+	// another package's error, or one with no name of its own, and
+	// name this one because nothing else would.
 	if err := replayable(s, res.Target); err != nil {
-		res.Err = errors.Join(res.Err, fmt.Errorf("agenteval: task %s: %w", task.ID, err))
+		res.Err = errors.Join(res.Err, fmt.Errorf("task %s: %w", task.ID, err))
 	}
 	t, err := trajectoryAt(s, res.Target)
 	if err != nil {
-		res.Err = errors.Join(res.Err, fmt.Errorf("agenteval: task %s: %w", task.ID, err))
+		res.Err = errors.Join(res.Err, fmt.Errorf("task %s: %w", task.ID, err))
 		return res
 	}
 	for _, j := range r.Judges {
@@ -313,33 +319,34 @@ func (r *Runner) answer(ctx context.Context, a *agentturn.Agent, end *agentturn.
 var ErrUnreplayable = errors.New("agenteval: the run cannot be replayed strictly")
 
 // replayable reports whether the record rebuilds every request the run
-// made. The recorder writes a response without a request hash when the
-// path it wrote does not rebuild that request's input: what a
-// compacting configuration whose folds were never reported produces,
-// and what a hook that edits the input produces. A strict replay of
-// such a session refuses at that call against an empty recorded hash,
-// weeks later and with nothing at write time having said why; naming
-// it on the result is that missing word.
+// made. Whether it does is [replay.Unverifiable]'s question and is
+// asked there rather than answered again here: a strict replay of a
+// session it rejects cannot be built at all, and naming that on the
+// result is the word missing at write time, weeks before anyone tries.
+// What this adds is the runner's own diagnosis, which replay cannot
+// make because it never sees the configuration: a session with no fold
+// at all is most often one whose compacting configuration never bound
+// compact.WithOnFold, and that is a seam this package owns.
 func replayable(s *agentsession.Session, leaf string) error {
-	unhashed, responses, folds := 0, 0, 0
-	for _, e := range s.Path(leaf) {
-		switch v := e.(type) {
-		case *agentsession.ResponseEntry:
-			responses++
-			if v.RequestHash == "" {
-				unhashed++
-			}
-		case *agentsession.CompactionEntry:
-			folds++
-		}
-	}
-	if unhashed == 0 {
+	err := replay.Unverifiable(s, leaf)
+	if err == nil {
 		return nil
 	}
-	if folds == 0 {
-		return fmt.Errorf("%w: %d of %d responses carry no request hash and the session records no fold; a configuration that compacts binds compact.WithOnFold(rec.Fold) through Runner.ConfigWith, and a transform or a hook that edits the input is a change the record cannot describe at all", ErrUnreplayable, unhashed, responses)
+	// Unverifiable also reports a leaf it could not resolve, which is a
+	// different failure and gets none of the diagnosis below: a session
+	// with no entries has no seam to have gone unbound.
+	if !errors.Is(err, replay.ErrUnverifiable) {
+		return err
 	}
-	return fmt.Errorf("%w: %d of %d responses carry no request hash, so the record does not rebuild what was sent", ErrUnreplayable, unhashed, responses)
+	if leaf == "" {
+		leaf = s.Leaf()
+	}
+	for _, e := range s.Path(leaf) {
+		if _, ok := e.(*agentsession.CompactionEntry); ok {
+			return fmt.Errorf("%w: %w", ErrUnreplayable, err)
+		}
+	}
+	return fmt.Errorf("%w: %w and the session records no fold; a configuration that compacts binds compact.WithOnFold(rec.Fold) through Runner.ConfigWith, and a transform or a hook that edits the input is a change the record cannot describe at all", ErrUnreplayable, err)
 }
 
 // describe writes what the session is a run of: an info entry naming

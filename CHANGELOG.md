@@ -26,6 +26,28 @@ versions may break the API.
   cannot be replayed strictly because a response on its path carries
   no request hash. The runner reports it when the run is written
   rather than leaving it to a replay weeks later (#1).
+- `replay.ErrUnverifiable`, `replay.AllowUnhashed()` and
+  `replay.Unverifiable`. A strict replay refuses a call the record
+  carries no hash for rather than serve it unchecked: `NewModel`
+  refuses the whole session when a response on the path is unhashed,
+  before a call is served, and a fold whose compaction entry recorded
+  no fold hash is refused at the call, since whether that matters
+  depends on the compactor the replay runs with. `AllowUnhashed()`
+  serves them by position instead, which is how a recording made
+  before agentturn v0.0.6 replays, and its doc says what it turns off.
+  `Unverifiable` is the rule `NewModel` applies, exported so a caller
+  can ask before building a model; `ErrUnreplayable` is now that rule
+  plus the runner's diagnosis rather than a second copy of it. A fold
+  through the compaction endpoint is the one call none of this governs
+  — it sends no request the format hashes, so `Model.Compact` serves it
+  unchecked in every mode, which the package doc, `Strict`, `Served`
+  and the README now say (#2).
+- `Served.Recorded` is set for a fold served through `Model.Compact`
+  when the compaction entry records a fold hash. The endpoint cannot
+  check it, so it is reported rather than compared, and `Got` stays
+  empty: a model call was checked exactly when both are set. A tool
+  call is reported only when a recorded output was found, so its
+  `Match` is always true and its hashes are always empty.
 - `replay.Model.BeforeModelCall`, an `agentturn` `BeforeModelCall`
   hook that serves the instructions and the tool list in force at each
   recorded call, and `Model.Settings` and `Model.SettingsAt`, the
@@ -50,10 +72,11 @@ versions may break the API.
   budget or a filter that changed is no longer answered with the
   recorded summary and reported as neutral. `Served` carries both
   hashes for a fold. A compaction entry with no recorded fold hash, a
-  fold through the compaction endpoint or a recording made before
-  agentturn v0.0.6, keeps the shape-only check. A replay that passed
-  while folding differently from the recording now fails, which is the
-  point (#2).
+  recording made before agentturn v0.0.6, is refused as
+  `ErrUnverifiable` unless `AllowUnhashed()` is set; a fold through the
+  compaction endpoint sends no request to check and is served through
+  `Compact` as before. A replay that passed while folding differently
+  from the recording now fails, which is the point (#2).
 - **Breaking.** `judge.Render` strips the raw item passthrough through
   `export.NoPassthrough`, so a judged document keeps the root's
   payload profile name and says which wire profile produced it.
@@ -77,6 +100,13 @@ versions may break the API.
 
 ### Fixed
 
+- A task result no longer names this package twice in front of one
+  message. `Run` wraps each failure with `agenteval: task <id>: `, and
+  the two errors on that path that come from this package —
+  `ErrUnreplayable` and the one `trajectoryAt` returns — already began
+  with `agenteval: `. Those two sites now wrap with `task <id>: ` and
+  leave the naming to the error, and the sites that wrap another
+  package's error, or one with no name of its own, are unchanged.
 - `replay` serves a recorded item's own bytes. It streamed each item
   through `openresponses.Emitter`, which promotes an unset status to
   `completed` as it closes an item, so a recording from a server that
@@ -91,6 +121,14 @@ versions may break the API.
   ID differs. A custom entry written between two output items of one
   response, which is where a guard or a policy layer writes its
   verdict, no longer costs the response the items before it.
+- `replay.Strict()` no longer reports a call the record carries no hash
+  for as a divergence. It compared the received hash against the empty
+  string, so a replay under the recorded configuration failed with a
+  message describing a mismatch that never happened: `recorded ,
+  received sha256:…`. Such a call is refused as `ErrUnverifiable`
+  instead, which says what is actually wrong — the record cannot
+  describe the request — and `NewModel` refuses it at construction
+  rather than at the call.
 
 ## v0.0.1 - 2026-09-20
 

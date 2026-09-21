@@ -66,9 +66,16 @@ version it came from.
 order, folds included, and in strict mode refuses a request whose hash
 differs from the recorded one: a hook, a transform or a front that
 changes what the model would have been sent fails loudly against real
-traffic. `replay.Tools` serves recorded tool outputs by call ID or by
-name and canonical arguments, so a whole run replays without touching
-the world.
+traffic. A record that carries no hash for a call is refused rather
+than served unchecked — at `NewModel` when a response on the path is
+unhashed, so a replay that could not have checked what it served says
+so before it starts instead of passing quietly, and at the call for a
+fold — unless `replay.AllowUnhashed()` says to serve it anyway. The
+one call no mode checks is a fold through the compaction endpoint,
+which sends no request the format hashes.
+`replay.Tools` serves recorded tool outputs by call ID or by name and
+canonical arguments, so a whole run replays without touching the
+world.
 
 ```go
 s, _ := store.Open(ctx, id)
