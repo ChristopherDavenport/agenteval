@@ -317,9 +317,11 @@ var ErrUnreplayable = errors.New("agenteval: the run cannot be replayed strictly
 // path it wrote does not rebuild that request's input: what a
 // compacting configuration whose folds were never reported produces,
 // and what a hook that edits the input produces. A strict replay of
-// such a session refuses at that call against an empty recorded hash,
-// weeks later and with nothing at write time having said why; naming
-// it on the result is that missing word.
+// such a session serves that call by position, because an absent hash
+// is nothing to check against, so the one property strict mode is
+// asked for is silently missing at it, weeks later and with nothing at
+// write time having said why; naming it on the result is that missing
+// word.
 func replayable(s *agentsession.Session, leaf string) error {
 	unhashed, responses, folds := 0, 0, 0
 	for _, e := range s.Path(leaf) {

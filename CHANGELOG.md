@@ -91,6 +91,14 @@ versions may break the API.
   ID differs. A custom entry written between two output items of one
   response, which is where a guard or a policy layer writes its
   verdict, no longer costs the response the items before it.
+- `replay.Strict()` no longer refuses a response entry that recorded no
+  request hash. It compared the received hash against the empty string
+  and reported the difference as a divergence, so a replay of a correct
+  session under the recorded configuration failed with a message that
+  read as a mismatch that never happened: `recorded , received
+  sha256:…`. Such a call is served by position and `Served` leaves both
+  hashes empty and `Match` false, as a compaction entry that recorded
+  no fold hash already did.
 
 ## v0.0.1 - 2026-09-20
 

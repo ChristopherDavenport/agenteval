@@ -195,6 +195,55 @@ func TestStrictDivergesAtTheChangedCall(t *testing.T) {
 	}
 }
 
+// A response entry carries no request hash when the path the recorder
+// wrote does not rebuild that request's input: a fold that was never
+// reported, or a transform or a hook that edits the request. Strict
+// replay serves such a call by position, as serveFold already does for
+// a compaction entry that recorded no fold hash, because an absent
+// hash says the record cannot describe the request and not that the
+// request differs.
+func TestStrictServesAResponseThatRecordedNoHash(t *testing.T) {
+	orig := loadFixture(t, "multi")
+	var blanked string
+	for _, e := range orig.Path(orig.Leaf()) {
+		if r, ok := e.(*agentsession.ResponseEntry); ok {
+			blanked, r.RequestHash = r.ID, ""
+			break
+		}
+	}
+	if blanked == "" {
+		t.Fatal("the fixture records no response")
+	}
+	var seen []replay.Served
+	model, err := replay.NewModel(orig, replay.Strict(), replay.WithObserver(func(sv replay.Served) { seen = append(seen, sv) }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, end, err := rerun(t, fixtureConfig(model), "first", "second")
+	if err != nil {
+		t.Fatalf("the recorded configuration was refused: %v", err)
+	}
+	if end.Reason != agentturn.ReasonDone {
+		t.Errorf("reason = %s", end.Reason)
+	}
+	if model.Served() != model.Steps() {
+		t.Errorf("served %d of %d steps", model.Served(), model.Steps())
+	}
+	// The unhashed call reports what a fold with no fold hash reports:
+	// both hashes empty and Match false. Every other call still matches.
+	for _, sv := range seen {
+		if sv.EntryID == blanked {
+			if sv.Recorded != "" || sv.Got != "" || sv.Match {
+				t.Errorf("the unhashed call reports %+v, want both hashes empty and Match false", sv)
+			}
+			continue
+		}
+		if !sv.Match {
+			t.Errorf("step %d: recorded %s, got %s", sv.N, sv.Recorded, sv.Got)
+		}
+	}
+}
+
 func TestLenientServesByPositionAndReports(t *testing.T) {
 	orig := loadFixture(t, "multi")
 	var seen []replay.Served

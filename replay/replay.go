@@ -77,9 +77,10 @@ type Served struct {
 	// of the request received: the response entry's own hash, or, for
 	// a fold, the one on its compaction entry's fold member. A fold
 	// through the compaction endpoint sends no request the format
-	// hashes, and an entry written before agentturn v0.0.6 carries no
-	// fold member at all; both leave the two empty and Match false.
-	// Match reports whether the two agree.
+	// hashes, an entry written before agentturn v0.0.6 carries no fold
+	// member at all, and a response entry carries no hash when the path
+	// does not rebuild that request's input; all three leave the two
+	// empty and Match false. Match reports whether the two agree.
 	Recorded, Got string
 	Match         bool
 	// CallID and Name describe a served tool call, and ByID reports
@@ -102,7 +103,10 @@ type Option func(*options)
 // recorded one, and tools refuse a call with no recorded output. A
 // fold is checked against the hash its compaction entry recorded for
 // it, and one recorded before agentturn v0.0.6, which wrote no fold
-// member, is checked only for the shape of a fold's request. The
+// member, is checked only for the shape of a fold's request. An entry
+// that recorded no hash at all is served by position, because there is
+// nothing to check it against; agenteval's runner refuses such a
+// session before the replay starts rather than serve it unchecked. The
 // default is lenient: the model serves by position and reports the
 // hashes through the observer, and an unmatched call runs the real
 // tool.
@@ -388,14 +392,24 @@ func (m *Model) CreateStream(_ context.Context, req openresponses.Request, sink 
 		// recording folded.
 		return fmt.Errorf("%w: compaction %s (step %d): the recording folded here and the request did not", ErrDiverged, st.comp.ID, n)
 	}
-	got, err := agentsession.RequestHash(session.Canonical(req))
-	if err != nil {
-		return err
+	sv := Served{Kind: KindResponse, N: n, EntryID: st.resp.ID, Recorded: st.resp.RequestHash}
+	if st.resp.RequestHash != "" {
+		got, err := agentsession.RequestHash(session.Canonical(req))
+		if err != nil {
+			return err
+		}
+		sv.Got, sv.Match = got, got == st.resp.RequestHash
 	}
-	sv := Served{Kind: KindResponse, N: n, EntryID: st.resp.ID, Recorded: st.resp.RequestHash, Got: got, Match: got == st.resp.RequestHash}
 	m.observe(sv)
-	if m.opts.strict && !sv.Match {
-		return fmt.Errorf("%w: response %s (step %d): recorded %s, received %s", ErrDiverged, st.resp.ID, n, st.resp.RequestHash, got)
+	// An entry that recorded no request hash is served by position, as
+	// a compaction entry that recorded no fold hash is. The record does
+	// not say what was sent, which is not the same as saying that what
+	// was sent differs, and refusing here reports a divergence that was
+	// never measured. A session whose record is short of a hash is
+	// named unreplayable by agenteval's runner before a replay of it
+	// reaches here.
+	if m.opts.strict && sv.Recorded != "" && !sv.Match {
+		return fmt.Errorf("%w: response %s (step %d): recorded %s, received %s", ErrDiverged, st.resp.ID, n, sv.Recorded, sv.Got)
 	}
 	return serveResponse(st, req, sink)
 }
