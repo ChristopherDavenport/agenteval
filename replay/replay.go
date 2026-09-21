@@ -199,15 +199,27 @@ func NewModel(s *agentsession.Session, opts ...Option) (*Model, error) {
 			settings = settings.Apply(v)
 		case *agentsession.ResponseEntry:
 			st := step{resp: v, settings: settings}
-			// The response's own output is the item entries directly
-			// before it that name its response ID, the rule
-			// Session.RequestContext uses to drop them.
-			for j := i - 1; j >= 0; j-- {
-				item, ok := path[j].(*agentsession.ItemEntry)
-				if !ok || item.ResponseID == "" || item.ResponseID != v.ResponseID {
-					break
+			// The response's own output is the item entries before it
+			// that name its response ID: entries that are not item
+			// entries are skipped and the walk stops at the first item
+			// entry belonging to something else. It is the rule
+			// Session.RequestContext uses to drop them, and the two
+			// must agree or a replay serves an input item as output.
+			// Skipping rather than stopping is what lets an observer
+			// write a custom entry between two output items of one
+			// response, which is where every layer above the loop puts
+			// its verdict, without losing the item after it.
+			if v.ResponseID != "" {
+				for j := i - 1; j >= 0; j-- {
+					item, ok := path[j].(*agentsession.ItemEntry)
+					if !ok {
+						continue
+					}
+					if item.ResponseID != v.ResponseID {
+						break
+					}
+					st.output = append(openresponses.Items{item.Item}, st.output...)
 				}
-				st.output = append(openresponses.Items{item.Item}, st.output...)
 			}
 			// Served items are cloned: what is served reaches the
 			// replayed run's transcript and its recorder, and the

@@ -675,3 +675,66 @@ func TestReplayServesItemsVerbatim(t *testing.T) {
 		})
 	}
 }
+
+// TestInterleavedCustomEntry is the contiguity rule of seam 1: an
+// entry that is not an item entry between two output items of one
+// response is skipped, and the walk stops at the first item entry
+// belonging to something else. An OutputGuard observer that writes its
+// verdict there, which is where every layer above the loop writes one,
+// otherwise costs the response the items before it.
+func TestInterleavedCustomEntry(t *testing.T) {
+	first := &openresponses.ReasoningItem{ID: "rs_1", Summary: openresponses.Contents{&openresponses.SummaryText{Text: "thinking"}}}
+	second := &openresponses.Message{
+		ID: "msg_1", Status: openresponses.StatusCompleted, Role: openresponses.RoleAssistant,
+		Content: openresponses.Contents{&openresponses.OutputText{Text: "hello"}},
+	}
+	s := agentsession.New(agentsession.Header{})
+	req := openresponses.Request{Model: "m", Input: openresponses.Items{openresponses.UserText("hi")}}
+	cfg, err := agentsession.ConfigFromRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := func(item openresponses.Item) agentsession.Entry {
+		e := agentsession.NewItemEntry(item)
+		e.ResponseID = "resp_1"
+		return e
+	}
+	entries := []agentsession.Entry{
+		cfg,
+		agentsession.NewItemEntry(openresponses.UserText("hi")),
+		output(first),
+		// The verdict of a guard, written between the two items of one
+		// response.
+		&agentsession.CustomEntry{NS: "product:guard", Data: []byte(`{"verdict":"allow"}`)},
+		output(second),
+		&agentsession.ResponseEntry{ResponseID: "resp_1", Model: "m", Status: openresponses.ResponseStatusCompleted},
+	}
+	for _, e := range entries {
+		if _, err := s.Append(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	model, err := replay.NewModel(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := model.Create(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Output) != 2 {
+		t.Fatalf("served %d of the response's 2 output items", len(got.Output))
+	}
+	for i, want := range []openresponses.Item{first, second} {
+		if served := itemJSON(t, got.Output[i]); served != itemJSON(t, want) {
+			t.Errorf("item %d served %s", i, served)
+		}
+	}
+	// The user message before the response is not its output, whatever
+	// stands between them.
+	for _, item := range got.Output {
+		if m, ok := item.(*openresponses.Message); ok && m.Role == openresponses.RoleUser {
+			t.Error("an input item was served as output")
+		}
+	}
+}

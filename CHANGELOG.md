@@ -56,6 +56,12 @@ versions may break the API.
   later request and the divergence named two hashes and no field. The
   two item events are sent directly and the emitter keeps the output
   indices, the response snapshot and the terminal event (#6).
+- `replay` reads a response's output items by the contiguity rule
+  `agentsession` is adopting: entries that are not item entries are
+  skipped, and the walk stops at the first item entry whose response
+  ID differs. A custom entry written between two output items of one
+  response, which is where a guard or a policy layer writes its
+  verdict, no longer costs the response the items before it.
 
 ## v0.0.1 - 2026-09-20
 
