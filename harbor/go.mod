@@ -5,14 +5,14 @@ go 1.25.0
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/ChristopherDavenport/agenteval v0.0.2
-	github.com/ChristopherDavenport/agentsession v0.0.5
+	github.com/ChristopherDavenport/agentsession v0.0.7
 )
 
 require (
-	github.com/ChristopherDavenport/agenttool v0.0.5 // indirect
-	github.com/ChristopherDavenport/agentturn v0.0.6 // indirect
-	github.com/ChristopherDavenport/agentturn/session v0.0.6 // indirect
-	github.com/ChristopherDavenport/openresponses v0.0.9 // indirect
+	github.com/ChristopherDavenport/agenttool v0.0.7 // indirect
+	github.com/ChristopherDavenport/agentturn v0.0.8 // indirect
+	github.com/ChristopherDavenport/agentturn/session v0.0.8 // indirect
+	github.com/ChristopherDavenport/openresponses v0.0.12 // indirect
 )
 
 // The require names the released root a consumer fetches; the replace
