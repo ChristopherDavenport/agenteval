@@ -34,6 +34,26 @@ report, _ := r.Run(ctx, suite)
 report.WriteJSON(os.Stdout)
 ```
 
+A configuration that needs the run's recorder takes `ConfigWith`
+instead: a compacting configuration binds `compact.WithOnFold` there,
+without which its folds reach no session and the run cannot be
+replayed, and a layer that annotates the run it is in keeps the same
+recorder. `Answer` answers the calls a run left pending when it ended
+`input_required` and resumes it, so a product whose policy asks is
+measured over the whole run rather than the part before its first ask.
+
+```go
+r := &agenteval.Runner{
+	Store: store,
+	ConfigWith: func(t agenteval.Task, rec *session.Recorder) agentturn.Config {
+		cfg := product.Config(t)
+		cfg.Transform = compact.NewLocal(cfg.Model, compact.WithOnFold(rec.Fold)).Transform
+		return cfg
+	},
+	Answer: engine.Answers,
+}
+```
+
 A task file is JSON: an `instruction`, or `prompts` for several
 turns, with `expect` for the judges and `setup` and `meta` for the
 product. The suite's manifest, the hash of every file loaded, is
@@ -46,16 +66,32 @@ version it came from.
 order, folds included, and in strict mode refuses a request whose hash
 differs from the recorded one: a hook, a transform or a front that
 changes what the model would have been sent fails loudly against real
-traffic. `replay.Tools` serves recorded tool outputs by call ID or by
-name and canonical arguments, so a whole run replays without touching
-the world.
+traffic. A record that carries no hash for a call is refused rather
+than served unchecked — at `NewModel` when a response on the path is
+unhashed, so a replay that could not have checked what it served says
+so before it starts instead of passing quietly, and at the call for a
+fold — unless `replay.AllowUnhashed()` says to serve it anyway. The
+one call no mode checks is a fold through the compaction endpoint,
+which sends no request the format hashes.
+`replay.Tools` serves recorded tool outputs by call ID or by name and
+canonical arguments, so a whole run replays without touching the
+world.
 
 ```go
 s, _ := store.Open(ctx, id)
 model, _ := replay.NewModel(s, replay.Strict())
 cfg.Model = model
+cfg.BeforeModelCall = model.BeforeModelCall
 cfg.Tools = replay.Tools(s, cfg.Tools, replay.Strict())
 ```
+
+`Model.BeforeModelCall` serves the instructions and the tool list
+recorded for each call. A product whose layers rebuild those every
+turn, from a memory store, a skill set or an AGENTS.md, otherwise
+replays against what the layers say today and diverges at the first
+call with an error naming two hashes and no layer. `Model.Settings`
+is the rest of what each recorded call was made under, for a judge or
+a check that wants to read it.
 
 ## Judges
 
@@ -69,15 +105,26 @@ one it judged, so a judgement is as replayable as the run.
 
 `Compare` runs a suite under two configurations, pairs the results by
 task, and names how the two configurations differed, read back from
-the sessions. `price` loads a table of rates and prices a run with
-ATIF's formula; the same hook feeds the runner and the exporter, so the
-report and the exported document agree on one number.
+the sessions. The difference it names is the settings the record
+describes; when those are the same and the two first requests are not,
+it says so with `beyond_settings`, because a transform, a hook and an
+injected item are not settings.
+
+`price` loads a table of rates and prices a run with ATIF's formula,
+and the runner and the exporter take the same hook, so the two agree
+on the rate. They do not agree on the total: a result's `usage` is
+every response on the run's path, while the exported document's final
+metrics cover the context after the last compaction, so a run that
+folded is counted twice over on two different scopes.
 
 ## Harbor
 
 The `harbor` nested module reads a Harbor task directory as a `Task`
 (the prompt only; the environment and the verifier stay with Harbor)
 and a finished trial's `reward.json` or `reward.txt` as scores.
+`Task.Meta` carries `[task]` and `[metadata]` under `task.` and
+`metadata.`, because the second table is free-form and invites the
+first table's words.
 
 ## Design
 

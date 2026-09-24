@@ -88,16 +88,42 @@ implementations.
 // through the same model. A fold made through compact.NewLocal is an
 // ordinary call whose answer the session holds only as the summary
 // item, and it is served from the compaction entry when that entry is
-// next on the path.
+// next on the path. A strict model over a path whose responses are not
+// all hashed is refused here, with ErrUnverifiable, rather than at the
+// call that could not be checked.
 func NewModel(s *agentsession.Session, opts ...Option) (*Model, error)
 
 // Strict makes the model compare the hash of each request it receives
 // with the hash recorded on the response entry it is about to serve.
 // A mismatch returns ErrDiverged naming the entry and both hashes. The
 // default is lenient: responses are served by position and the hashes
-// are reported through the observer. A fold records no request hash
-// and is never a divergence.
+// are reported through the observer. A local fold is checked the same
+// way against the hash its compaction entry's fold member records. A
+// call the record carries no hash for is refused as ErrUnverifiable --
+// at NewModel for a response, at the call for a fold, since only there
+// is the compactor known -- unless AllowUnhashed says to serve it by
+// position, which is how a recording made before that member existed
+// replays. A fold through the compaction endpoint sends no request the
+// format hashes and is served unchecked in every mode.
 func Strict() Option
+
+// AllowUnhashed serves a call whose entry recorded no hash instead of
+// refusing it, unchecked and by position, and says so in its doc: it
+// turns the guarantee off for those calls rather than relaxing it.
+func AllowUnhashed() Option
+
+// Unverifiable is the rule NewModel applies, exported so the runner
+// and any other caller ask it rather than keep a second copy.
+func Unverifiable(s *agentsession.Session, leaf string) error
+// BeforeModelCall is an agentturn Config.BeforeModelCall that replaces
+// the request's instructions and tool list with the ones in force at
+// the recorded call about to be served, rebuilt from the config
+// entries on the path. A product whose layers re-read state each turn
+// chains it last, and Settings holds every step's settings for a
+// reader.
+func (m *Model) BeforeModelCall(ctx context.Context, req *openresponses.Request) error
+func (m *Model) Settings() []agentsession.Settings
+func (m *Model) SettingsAt(n int) (agentsession.Settings, bool)
 // WithLeaf names the path. A session that was branched has several
 // leaves, and its current leaf, after judging, is an outcome entry
 // rather than a model output, so a replay of a judged session names
@@ -124,7 +150,12 @@ comparison on `stream`.
 
 Strict mode is the fidelity test: a hook, a transform or a front that
 changes what the model would have been sent fails loudly against real
-traffic. Lenient mode is the fixture: a TUI or a session recorder is
+traffic. What the model was sent is not the model and the tools alone,
+which is why the settings come out of `NewModel` too: the composition
+study's product diverged at its first call because a layer rebuilt the
+instructions from a store the recorded run itself had written to, and
+replayed strictly only once the instructions in force at each recorded
+response were served back to it. Lenient mode is the fixture: a TUI or a session recorder is
 exercised by a real run with no model behind it.
 
 ### Tasks and suites
@@ -193,6 +224,18 @@ judge that normalises keeps the raw number in `Details`.
 type Runner struct {
     Store    agentsession.Store                      // where each run's session is created
     Config   func(Task) agentturn.Config             // the configuration under test, per task
+    // ConfigWith is Config with the recorder that writes the run, and
+    // wins over Config. It is where a compacting configuration binds
+    // compact.WithOnFold(rec.Fold), without which the folds reach no
+    // session and the run cannot be replayed strictly, and where a
+    // layer keeps the recorder to Annotate the run it is in.
+    ConfigWith func(Task, *session.Recorder) agentturn.Config
+    // Answer answers the calls a run left pending when it ended
+    // input_required; the run is resumed with them, up to MaxResumes
+    // times, and every resume is recorded. agentpolicy.Engine.Answers
+    // satisfies it as written.
+    Answer     func(context.Context, *agentturn.RunEnd) ([]agentturn.Answer, error)
+    MaxResumes int
     Judges   []Judge
     Parallel int
     Header   func(Task) agentsession.Header          // optional: harness, cwd, a fixed ID
@@ -204,7 +247,8 @@ type Result struct {
     SessionID string
     Target    string             // the entry every score of this result targets
     Reason    agentturn.Reason   // how the last run ended
-    Runs      int
+    Runs      int                // one per prompt sent and one per resume
+    Resumes   int                // how many of them were resumes through Answer
     Usage     openresponses.Usage
     CostUSD   *float64           // when Cost is set and priced every call
     Scores    []Score
@@ -216,6 +260,11 @@ func (r *Runner) Run(ctx context.Context, suite *Suite) (*Report, error)
 ```
 
 Each task runs in a fresh session recorded through `agentturn/session`.
+The recorder is made before the configuration, so `ConfigWith` can hand
+it to the configuration under test; a run whose session ends with a
+response carrying no request hash is reported on the result as
+`ErrUnreplayable`, because that is exactly the session a strict replay
+will refuse and nothing else says so at write time.
 Before the run the session holds an `info` entry naming the task, an
 `env` entry whose `files.read` is the suite manifest, and a `custom`
 entry in the `agenteval:task` namespace carrying the suite name, its
@@ -322,9 +371,12 @@ func Hook(t Table) func(model string, usage openresponses.Usage) (float64, bool)
 
 The cost formula is ATIF's: `(prompt - cached) x input + cached x cached
 + completion x output`. The runner and the exporter take the same hook,
-so the report and the exported document agree on one number. Prices
-belong with the thing that compares runs, not in the wire package or
-the record.
+so the two agree on the rate. They do not agree on the total, and the
+invariant below says so: `Result.Usage` sums every response on the
+run's path, and the document's final metrics sum the context after the
+last compaction, which on one seven-fold run was 539 prompt tokens
+against 301. Prices belong with the thing that compares runs, not in
+the wire package or the record.
 
 ### `harbor`
 
@@ -335,9 +387,13 @@ the record.
 func Reward(fsys fs.FS, dir string) ([]agenteval.Score, error)
 
 // Load reads a Harbor task directory: instruction.md as Instruction,
-// [task].name as ID, and task.toml copied into Setup and Meta. It is
-// the prompt only; running the task faithfully means running it under
-// Harbor.
+// [task].name as ID, and task.toml copied into Setup and Meta, every
+// table under its own name, so [task] and [metadata], which are a
+// package description and a free-form dict that invite the same
+// words, cannot lose each other's keys. It is the prompt only;
+// running the task faithfully means running it under Harbor, and
+// every real task ID holds a slash, because Harbor validates a name
+// as org/name.
 func Load(fsys fs.FS, dir string) (agenteval.Task, error)
 ```
 
@@ -367,7 +423,10 @@ of what it copies.
 - A run's session, exported, contains everything the report says
   about it; the report holds no fact the session lacks. Cost is the
   one derived number, and it names its source: the runner's price
-  hook, which the export takes too.
+  hook, which the export takes too. The two price the same calls at
+  the same rates over different scopes, the whole path against the
+  context after the last compaction, so they agree on the rate and
+  not on the total.
 - Scores are appended, never rewritten; a second judgement is a
   second `outcome` entry.
 - The runner never mutates a suite's `fs.FS`.
@@ -404,13 +463,16 @@ directory and a trial directory.
 - Where a judgement of a human-labelled trajectory goes: the same
   `outcome` entry with `kind: "feedback"` and `label: "human"` is the
   obvious answer, and the export's preference already reads it.
-- Whether the fold served from a compaction entry should also verify
-  something about the fold request, given it records no hash. The
-  request's shape, no tools and the summary prompt last, is the
-  candidate.
 
 ## Resolved
 
+- The fold is checked like any other call. `agentturn/session` v0.0.6
+  records `FoldCall.RequestHash` on every compaction entry a local
+  fold produces, so strict mode hashes the fold's own request and
+  refuses a summary prompt, a budget or a filter that changed. The
+  shape test, no tools and no instructions, decides only whether the
+  request is a fold at all, and is the whole check for a fold through
+  the compaction endpoint, which sends no request the format hashes.
 - `Tools` matches arguments canonically: `agentsession` already has
   RFC 8785 in its request hash, the same bytes decide both, and byte
   comparison makes a replay fail when a serialiser reorders a map.

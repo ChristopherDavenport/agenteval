@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/ChristopherDavenport/agenteval/replay"
 	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agentsession/export"
 	"github.com/ChristopherDavenport/agentturn"
@@ -19,11 +20,38 @@ import (
 type Runner struct {
 	// Store is where each run's session is created. Required.
 	Store agentsession.Store
-	// Config returns the configuration under test for a task. Required.
+	// Config returns the configuration under test for a task.
+	// Required unless ConfigWith is set.
 	Config func(Task) agentturn.Config
+	// ConfigWith is Config with the recorder that writes the run's
+	// session, and wins over Config when set. It is where a
+	// configuration binds anything that must reach the record:
+	// compact.WithOnFold(rec.Fold), without which a compacting
+	// configuration records no fold and its session cannot be replayed
+	// strictly, and the recorder itself, which a layer keeps to
+	// annotate through Recorder.Annotate the run it is in.
+	//
+	//	ConfigWith: func(t agenteval.Task, rec *session.Recorder) agentturn.Config {
+	//		cfg := product.Config(t)
+	//		cfg.Transform = compact.NewLocal(cfg.Model, compact.WithOnFold(rec.Fold)).Transform
+	//		return cfg
+	//	}
+	ConfigWith func(Task, *session.Recorder) agentturn.Config
 	// Judges score each run once it has ended. Each score is appended
 	// to the run's session as an outcome entry.
 	Judges []Judge
+	// Answer answers the calls a run left pending when it ended
+	// input_required, so an evaluation of a product whose policy asks
+	// measures the whole run rather than the part before the first
+	// ask. The run is resumed with what it returns and the resume is
+	// recorded like any other turn; no answers, or a nil Answer, ends
+	// the task there as before. agentpolicy.Engine.Answers satisfies
+	// this signature as written.
+	Answer func(context.Context, *agentturn.RunEnd) ([]agentturn.Answer, error)
+	// MaxResumes bounds how many times one prompt may be resumed
+	// through Answer, so an answer source that keeps a call pending
+	// cannot loop. Zero means [DefaultMaxResumes].
+	MaxResumes int
 	// Parallel bounds how many tasks run at once; zero or one means one
 	// at a time.
 	Parallel int
@@ -48,9 +76,17 @@ type Result struct {
 	// Reason is how the last run of the task ended.
 	Reason agentturn.Reason `json:"reason,omitempty"`
 	// Runs is how many runs of the loop the task took: one per prompt
-	// sent.
+	// sent and one per resume.
 	Runs int `json:"runs"`
-	// Usage is the sum over the responses on the run's path.
+	// Resumes is how many of those runs were resumes through
+	// [Runner.Answer].
+	Resumes int `json:"resumes,omitempty"`
+	// Usage is the sum over the responses on the run's path: every
+	// model call the run made, the folds a compacting configuration
+	// reported included. The exported document's final metrics sum the
+	// context after the last compaction instead, so on a compacted run
+	// the two numbers differ; the runner and the exporter take the same
+	// price hook, so they agree on the rate and not on the total.
 	Usage openresponses.Usage `json:"usage"`
 	// CostUSD is the run's cost under Runner.Cost, when every call was
 	// priced.
@@ -109,7 +145,7 @@ func (r *Runner) Run(ctx context.Context, suite *Suite) (*Report, error) {
 	if r.Store == nil {
 		return nil, errors.New("agenteval: runner has no store")
 	}
-	if r.Config == nil {
+	if r.Config == nil && r.ConfigWith == nil {
 		return nil, errors.New("agenteval: runner has no config")
 	}
 	if suite == nil || len(suite.Tasks) == 0 {
@@ -159,7 +195,7 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task) Result {
 		res.Err = fmt.Errorf("agenteval: task %s: %w", task.ID, err)
 		return res
 	}
-	a := agentturn.New(r.Config(task))
+	a := agentturn.New(r.config(task, rec))
 	unsubscribe := rec.Attach(a)
 	for _, item := range inputs {
 		end, err := a.Prompt(ctx, item)
@@ -168,13 +204,17 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task) Result {
 			res.Runs++
 			res.Reason = end.Reason
 		}
+		if err == nil {
+			end, err = r.answer(ctx, a, end, &res)
+		}
 		if err != nil {
 			res.Err = fmt.Errorf("agenteval: task %s: run %d: %w", task.ID, res.Runs, err)
 			break
 		}
 		if end.Reason != agentturn.ReasonDone && end.Reason != agentturn.ReasonStopped {
-			// input_required and aborted leave calls pending, which the
-			// next prompt cannot answer; the task ends here.
+			// input_required with no answer, and aborted, leave calls
+			// pending, which the next prompt cannot answer; the task
+			// ends here.
 			break
 		}
 	}
@@ -184,9 +224,17 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task) Result {
 	if res.Target == "" {
 		return res
 	}
+	// replayable and trajectoryAt are this package's own, and their
+	// errors already name it. Wrapping those with the package again
+	// puts it twice in front of one message; the sites below wrap
+	// another package's error, or one with no name of its own, and
+	// name this one because nothing else would.
+	if err := replayable(s, res.Target); err != nil {
+		res.Err = errors.Join(res.Err, fmt.Errorf("task %s: %w", task.ID, err))
+	}
 	t, err := trajectoryAt(s, res.Target)
 	if err != nil {
-		res.Err = errors.Join(res.Err, fmt.Errorf("agenteval: task %s: %w", task.ID, err))
+		res.Err = errors.Join(res.Err, fmt.Errorf("task %s: %w", task.ID, err))
 		return res
 	}
 	for _, j := range r.Judges {
@@ -210,6 +258,95 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task) Result {
 		res.Scores = append(res.Scores, score)
 	}
 	return res
+}
+
+// config returns the configuration under test for a task, from
+// ConfigWith when it is set and from Config otherwise.
+func (r *Runner) config(task Task, rec *session.Recorder) agentturn.Config {
+	if r.ConfigWith != nil {
+		return r.ConfigWith(task, rec)
+	}
+	return r.Config(task)
+}
+
+// DefaultMaxResumes is how many times one prompt is resumed through
+// [Runner.Answer] when [Runner.MaxResumes] is zero.
+const DefaultMaxResumes = 8
+
+// answer resumes a run that ended input_required with what
+// Runner.Answer says, up to the bound, and returns the end it stopped
+// at. Each resume is one more run on the result and is recorded like
+// any other, so the trajectory a judge reads is the whole run.
+func (r *Runner) answer(ctx context.Context, a *agentturn.Agent, end *agentturn.RunEnd, res *Result) (*agentturn.RunEnd, error) {
+	if r.Answer == nil {
+		return end, nil
+	}
+	bound := r.MaxResumes
+	if bound <= 0 {
+		bound = DefaultMaxResumes
+	}
+	for range bound {
+		if end == nil || end.Reason != agentturn.ReasonInputRequired {
+			return end, nil
+		}
+		answers, err := r.Answer(ctx, end)
+		if err != nil {
+			return end, fmt.Errorf("answer: %w", err)
+		}
+		if len(answers) == 0 {
+			// The answer source had nothing to say about these calls,
+			// which is a decision and not a failure.
+			return end, nil
+		}
+		next, err := a.Resume(ctx, answers...)
+		if next != nil {
+			res.Ends = append(res.Ends, next)
+			res.Runs++
+			res.Resumes++
+			res.Reason = next.Reason
+			end = next
+		}
+		if err != nil {
+			return end, fmt.Errorf("resume %d: %w", res.Resumes, err)
+		}
+	}
+	return end, nil
+}
+
+// ErrUnreplayable is joined onto the result of a run whose session
+// cannot be replayed strictly, because the record does not rebuild
+// every request the run sent.
+var ErrUnreplayable = errors.New("agenteval: the run cannot be replayed strictly")
+
+// replayable reports whether the record rebuilds every request the run
+// made. Whether it does is [replay.Unverifiable]'s question and is
+// asked there rather than answered again here: a strict replay of a
+// session it rejects cannot be built at all, and naming that on the
+// result is the word missing at write time, weeks before anyone tries.
+// What this adds is the runner's own diagnosis, which replay cannot
+// make because it never sees the configuration: a session with no fold
+// at all is most often one whose compacting configuration never bound
+// compact.WithOnFold, and that is a seam this package owns.
+func replayable(s *agentsession.Session, leaf string) error {
+	err := replay.Unverifiable(s, leaf)
+	if err == nil {
+		return nil
+	}
+	// Unverifiable also reports a leaf it could not resolve, which is a
+	// different failure and gets none of the diagnosis below: a session
+	// with no entries has no seam to have gone unbound.
+	if !errors.Is(err, replay.ErrUnverifiable) {
+		return err
+	}
+	if leaf == "" {
+		leaf = s.Leaf()
+	}
+	for _, e := range s.Path(leaf) {
+		if _, ok := e.(*agentsession.CompactionEntry); ok {
+			return fmt.Errorf("%w: %w", ErrUnreplayable, err)
+		}
+	}
+	return fmt.Errorf("%w: %w and the session records no fold; a configuration that compacts binds compact.WithOnFold(rec.Fold) through Runner.ConfigWith, and a transform or a hook that edits the input is a change the record cannot describe at all", ErrUnreplayable, err)
 }
 
 // describe writes what the session is a run of: an info entry naming

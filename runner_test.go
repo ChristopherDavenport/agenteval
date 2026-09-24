@@ -12,9 +12,12 @@ import (
 
 	"github.com/ChristopherDavenport/agenteval"
 	"github.com/ChristopherDavenport/agenteval/judge"
+	"github.com/ChristopherDavenport/agenteval/replay"
 	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agentsession/export"
 	"github.com/ChristopherDavenport/agentturn"
+	"github.com/ChristopherDavenport/agentturn/compact"
+	"github.com/ChristopherDavenport/agentturn/session"
 	"github.com/ChristopherDavenport/openresponses"
 )
 
@@ -402,4 +405,301 @@ type failingModel struct{}
 
 func (failingModel) CreateStream(context.Context, openresponses.Request, openresponses.EventSink) error {
 	return errors.New("model down")
+}
+
+// foldingConfig is the echo configuration under a local fold with a
+// budget so small that every call past the first folds. rec, when
+// given, is where the folds are reported.
+func foldingConfig(rec *session.Recorder) agentturn.Config {
+	cfg := echoConfig()
+	opts := []compact.Option{compact.WithBudget(1), compact.WithKeepLast(2)}
+	if rec != nil {
+		opts = append(opts, compact.WithOnFold(rec.Fold))
+	}
+	cfg.Transform = compact.NewLocal(cfg.Model, opts...).Transform
+	return cfg
+}
+
+// countPath counts the compaction entries and the responses without a
+// request hash on the path to leaf.
+func countPath(s *agentsession.Session, leaf string) (folds, responses, unhashed int) {
+	for _, e := range s.Path(leaf) {
+		switch v := e.(type) {
+		case *agentsession.CompactionEntry:
+			folds++
+		case *agentsession.ResponseEntry:
+			responses++
+			if v.RequestHash == "" {
+				unhashed++
+			}
+		}
+	}
+	return folds, responses, unhashed
+}
+
+// replayStrictly replays the session's path to leaf under a folding
+// configuration bound to a fresh recorder, as a product testing a hook
+// against the recording would, and returns how it ended.
+func replayStrictly(t *testing.T, s *agentsession.Session, leaf string, prompts openresponses.Items) error {
+	t.Helper()
+	model, err := replay.NewModel(s, replay.Strict(), replay.WithLeaf(leaf))
+	if err != nil {
+		return err
+	}
+	rec, _, err := session.Start(context.Background(), newStableStore(), agentsession.Header{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := echoConfig()
+	cfg.Model = model
+	cfg.Transform = compact.NewLocal(model, compact.WithBudget(1), compact.WithKeepLast(2), compact.WithOnFold(rec.Fold)).Transform
+	cfg.Tools = replay.Tools(s, cfg.Tools, replay.Strict(), replay.WithLeaf(leaf))
+	a := agentturn.New(cfg)
+	defer rec.Attach(a)()
+	for _, p := range prompts {
+		if _, err := a.Prompt(context.Background(), p); err != nil {
+			return err
+		}
+	}
+	if model.Served() != model.Steps() {
+		t.Errorf("replay served %d of %d steps", model.Served(), model.Steps())
+	}
+	return nil
+}
+
+// TestRunnerRecordsFolds is issue 1: a compacting configuration
+// records its folds only where it can bind them to the runner's own
+// recorder, and a run that recorded none says so at write time instead
+// of failing a replay weeks later.
+func TestRunnerRecordsFolds(t *testing.T) {
+	prompts := openresponses.Items{openresponses.UserText("one"), openresponses.UserText("two"), openresponses.UserText("three")}
+	suite := &agenteval.Suite{Name: "long", Tasks: []agenteval.Task{{ID: "chat", Prompts: prompts}}}
+	tests := []struct {
+		name  string
+		bound bool
+	}{
+		{"bound through ConfigWith", true},
+		{"unbound through Config", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newStableStore()
+			r := &agenteval.Runner{Store: store, Judges: []agenteval.Judge{judge.Contains("contains")}}
+			if tt.bound {
+				r.ConfigWith = func(_ agenteval.Task, rec *session.Recorder) agentturn.Config {
+					return foldingConfig(rec)
+				}
+			} else {
+				r.Config = func(agenteval.Task) agentturn.Config { return foldingConfig(nil) }
+			}
+			report, err := r.Run(context.Background(), suite)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res := report.Results[0]
+			s, err := store.Open(context.Background(), res.SessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			folds, responses, unhashed := countPath(s, res.Target)
+			if responses < 3 {
+				t.Fatalf("the run made %d model calls", responses)
+			}
+			if !tt.bound {
+				if folds != 0 || unhashed == 0 {
+					t.Errorf("unbound: %d folds, %d of %d responses unhashed", folds, unhashed, responses)
+				}
+				if !errors.Is(res.Err, agenteval.ErrUnreplayable) {
+					t.Errorf("unbound: err = %v, want ErrUnreplayable", res.Err)
+				}
+				if !strings.Contains(res.Err.Error(), "ConfigWith") {
+					t.Errorf("unbound: the error does not name the seam: %v", res.Err)
+				}
+				return
+			}
+			if folds == 0 || unhashed != 0 {
+				t.Errorf("bound: %d folds, %d of %d responses unhashed", folds, unhashed, responses)
+			}
+			if res.Err != nil {
+				t.Errorf("bound: %v", res.Err)
+			}
+			if err := replayStrictly(t, s, res.Target, prompts); err != nil {
+				t.Errorf("bound: strict replay: %v", err)
+			}
+		})
+	}
+}
+
+// alwaysCalls answers every request with one call to upper, so a
+// configuration that defers every call asks once a turn.
+type alwaysCalls struct{}
+
+func (alwaysCalls) CreateStream(_ context.Context, req openresponses.Request, sink openresponses.EventSink) error {
+	em := openresponses.NewEmitter(sink, openresponses.NewResponse(req))
+	w, err := em.FunctionCall("", "upper")
+	if err != nil {
+		return err
+	}
+	if err := w.Arguments(`{"text":"x"}`); err != nil {
+		return err
+	}
+	if err := w.Close(); err != nil {
+		return err
+	}
+	return em.Complete()
+}
+
+// deferring is a configuration whose every tool call is asked about,
+// as a policy defaulting to Ask() makes it.
+func deferring(model agentturn.Model) agentturn.Config {
+	cfg := echoConfig()
+	if model != nil {
+		cfg.Model = model
+	}
+	cfg.BeforeToolCall = func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+		return &agentturn.ToolDecision{Action: agentturn.Defer}, nil
+	}
+	return cfg
+}
+
+// TestRunnerAnswers is issue 7: a run that ends input_required is
+// resumed with what Answer says, so an evaluation of a product
+// configured the safe way measures the whole run and not the part
+// before its first ask.
+func TestRunnerAnswers(t *testing.T) {
+	refuse := func(_ context.Context, end *agentturn.RunEnd) ([]agentturn.Answer, error) {
+		var out []agentturn.Answer
+		for _, p := range end.Pending {
+			out = append(out, agentturn.Output(openresponses.NewFunctionCallOutput(p.Call.CallID, "the reviewer answered")))
+		}
+		return out, nil
+	}
+	boom := errors.New("no reviewer")
+	tests := []struct {
+		name    string
+		model   agentturn.Model
+		answer  func(context.Context, *agentturn.RunEnd) ([]agentturn.Answer, error)
+		max     int
+		reason  agentturn.Reason
+		resumes int
+		err     error
+	}{
+		{name: "no answer source", reason: agentturn.ReasonInputRequired},
+		{
+			name: "the reviewer answers", answer: refuse,
+			reason: agentturn.ReasonDone, resumes: 1,
+		},
+		{
+			name:   "the reviewer declines to answer",
+			answer: func(context.Context, *agentturn.RunEnd) ([]agentturn.Answer, error) { return nil, nil },
+			reason: agentturn.ReasonInputRequired,
+		},
+		{
+			name:   "the reviewer fails",
+			answer: func(context.Context, *agentturn.RunEnd) ([]agentturn.Answer, error) { return nil, boom },
+			reason: agentturn.ReasonInputRequired, err: boom,
+		},
+		{
+			name: "a run that asks every turn is bounded", model: alwaysCalls{},
+			answer: refuse, max: 2,
+			reason: agentturn.ReasonInputRequired, resumes: 2,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newStableStore()
+			r := &agenteval.Runner{
+				Store:      store,
+				Config:     func(agenteval.Task) agentturn.Config { return deferring(tt.model) },
+				Judges:     []agenteval.Judge{judge.ToolCalled("upper")},
+				Answer:     tt.answer,
+				MaxResumes: tt.max,
+			}
+			suite := &agenteval.Suite{Name: "s", Tasks: []agenteval.Task{{ID: "ask", Instruction: "hello"}}}
+			report, err := r.Run(context.Background(), suite)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res := report.Results[0]
+			if res.Reason != tt.reason || res.Resumes != tt.resumes {
+				t.Errorf("reason %s resumes %d, want %s and %d", res.Reason, res.Resumes, tt.reason, tt.resumes)
+			}
+			if tt.err != nil {
+				if !errors.Is(res.Err, tt.err) {
+					t.Errorf("err = %v, want %v", res.Err, tt.err)
+				}
+				return
+			}
+			if res.Err != nil {
+				t.Fatalf("err = %v", res.Err)
+			}
+			if res.Runs != 1+tt.resumes || len(res.Ends) != res.Runs {
+				t.Errorf("%d runs, %d ends, %d resumes", res.Runs, len(res.Ends), res.Resumes)
+			}
+			// Every resume is recorded: the answers reach the session,
+			// so the trajectory a judge reads is the whole run.
+			s, err := store.Open(context.Background(), res.SessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			outputs := 0
+			for _, e := range s.Path(res.Target) {
+				if item, ok := e.(*agentsession.ItemEntry); ok {
+					if _, ok := item.Item.(*openresponses.FunctionCallOutput); ok {
+						outputs++
+					}
+				}
+			}
+			if outputs != tt.resumes {
+				t.Errorf("%d answered calls in the session, %d resumes", outputs, tt.resumes)
+			}
+		})
+	}
+}
+
+// TestRunnerConfigWithAnnotates is the other half of issue 7: the
+// configuration is handed the recorder, so a layer can annotate the
+// run it is in and its provenance reaches the session a judge reads.
+// Before it, the only route to the session ID was a store wrapper that
+// captured it from Create, and that told a layer nothing about which
+// run it was in.
+func TestRunnerConfigWithAnnotates(t *testing.T) {
+	const ns = "product:memory"
+	store := newStableStore()
+	r := &agenteval.Runner{
+		Store: store,
+		ConfigWith: func(_ agenteval.Task, rec *session.Recorder) agentturn.Config {
+			cfg := echoConfig()
+			cfg.BeforeTurn = func(ctx context.Context, _ agentturn.TurnStartInfo) (openresponses.Items, error) {
+				return nil, rec.Annotate(ctx, ns, map[string]string{"block": "go-version"})
+			}
+			return cfg
+		},
+		Judges: []agenteval.Judge{judge.ToolCalled("upper")},
+	}
+	report, err := r.Run(context.Background(), &agenteval.Suite{Name: "s", Tasks: []agenteval.Task{{ID: "one", Instruction: "hello"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := report.Results[0]
+	if res.Err != nil {
+		t.Fatalf("err = %v", res.Err)
+	}
+	s, err := store.Open(context.Background(), res.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	annotations := 0
+	for _, e := range s.Path(res.Target) {
+		if c, ok := e.(*agentsession.CustomEntry); ok && c.NS == ns {
+			annotations++
+		}
+	}
+	if annotations == 0 {
+		t.Errorf("no %s entry on the run: %s", ns, entryTypes(s))
+	}
+	// The layer's annotations did not cost the run its replayability.
+	if _, _, unhashed := countPath(s, res.Target); unhashed != 0 {
+		t.Errorf("%d responses carry no request hash", unhashed)
+	}
 }
