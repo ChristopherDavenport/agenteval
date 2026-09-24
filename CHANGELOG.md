@@ -127,6 +127,13 @@ versions may break the API.
   describe the request — and `NewModel` refuses it at construction
   rather than at the call.
 
+### Dependencies
+
+- openresponses v0.0.9 to v0.0.12, agenttool v0.0.5 to v0.0.7,
+  agentturn and its `session` module v0.0.6 to v0.0.8, and agentsession
+  v0.0.5 to v0.0.7, in the root module and in `harbor`. No API of this
+  module changes with them.
+
 ## v0.0.1 - 2026-09-20
 
 - Initial release: `replay.Model` and `replay.Tools` serve a recorded
