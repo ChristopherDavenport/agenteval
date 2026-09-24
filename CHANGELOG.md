@@ -90,9 +90,6 @@ versions may break the API.
 - `harbor`'s package comment holds the Harbor verifier judge, twelve
   lines wrapping `Reward`, and `Load` says that every real Harbor task
   ID holds a slash, since Harbor validates a name as `org/name` (#4).
-- `make published` builds each nested module with its `replace` to the
-  tree dropped, against the released root, which is the pair a
-  consumer gets and which nothing compiled before. CI runs it (#4).
 - The README and `Result.Usage` say that the runner and the exported
   document price the same calls over different scopes, the whole path
   against the context after the last compaction, so the two agree on

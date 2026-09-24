@@ -25,8 +25,8 @@ Go 1.25 or later is required. The full local check is:
 make check        # gofmt, tidy, vet, deps, staticcheck, govulncheck, race tests
 ```
 
-The individual targets are `fmt`, `tidy-check`, `vet`, `deps`, `lint`,
-`vuln`, `test`, `tidy` and `published`.
+The individual targets are `fmt`, `tidy-check`, `vet`, `deps`,
+`replaces`, `lint`, `vuln`, `test` and `tidy`.
 
 The repository has two modules: the library at the root and `harbor`,
 nested so its TOML decoder stays out of the library's dependency graph.
@@ -40,13 +40,47 @@ newer Go toolchain the first time.
 
 `harbor`'s `go.mod` requires the released root next to a `replace` to
 the tree, so a consumer fetches the version and the checkout builds
-against the working copy. Go reads that `replace` when the module is
-the main one, which is why the published module cannot be built from
-its own zip; `make published` builds a copy of each nested module with
-the `replace` dropped, against the released root, and CI runs it.
+against the working copy. A `replace` is a property of the main module,
+so a consumer ignores it and gets the require; that is safe because the
+require names the very commit the module is tagged from, which
+`release-guard` proves before the tag is written.
 
 Tests are table-driven and offline. The replay fixtures under
 `testdata/sessions/` are sessions recorded from the `echo` adapter and
 the report golden under `testdata/report/` is written by the runner;
 both are regenerated with `go test . -update`. Review the diff before
 committing it.
+
+## Releases
+
+Every module in the repository is released at one version, from one
+commit, and requires its first-party siblings at exactly that version.
+With the changelog's *Unreleased* section written:
+
+```sh
+make release VERSION=v0.1.0
+```
+
+points `harbor` at the version, dates the changelog, runs `make tidy`
+and `make check`, reads the requires back to confirm tidy did not move
+them, commits, then guards and tags `v0.1.0` and `harbor/v0.1.0`, and
+pushes the branch and both tags with `git push origin --atomic`.
+
+`make release-guard TAG=<tag>` is what stands between a mistake and a
+permanent one, and `make release` runs it for every tag it writes. It
+refuses a dirty tree, a tag that already exists locally or on origin, a
+version that sorts below the current root release or does not move its
+module forward, a first-party require that does not name that version, a
+root tag that is not this commit, and a module that will not build with
+`GOWORK=off`. The root is guarded and tagged first, because a nested
+module's guard needs the root tag to exist. Nothing is public until the
+push, so a refusal costs a `git reset --hard HEAD~1` and a `git tag -d`.
+
+`make replaces`, part of `check`, refuses a first-party require that
+lacks a matching `replace`. There is no `go.work` here, so the replaces
+are the only thing building the tree against itself — and losing one
+would make the next release resolve that module from the proxy, where
+the version being released does not exist yet.
+
+`go mod tidy` can move a requirement that the release just set, so the
+requires are read back and asserted before anything is tagged.
