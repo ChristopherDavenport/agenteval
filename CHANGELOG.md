@@ -5,6 +5,20 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+### Dependencies
+
+- agentturn and its `session` module v0.0.8 to v0.0.9, agenttool
+  v0.0.7 to v0.0.8, and agentsession v0.0.7 to v0.0.8, in the root
+  module and in `harbor`. No API of this module changes with them. The
+  sessions the runner records are `agentsession/0.5`, whose entry IDs
+  are the hashes of their envelopes, so a `Result.Target` and the
+  outcome entries it names carry a `sha256:` hash where they carried
+  the ID the store chose, and a `dispatch` entry is written per call as
+  it reaches its tool rather than per batch. The fixtures under
+  `testdata/sessions` are rewritten in that format.
+
 ## v0.0.3 - 2026-09-24
 
 ### Dependencies

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -79,6 +80,17 @@ func checkGolden(t *testing.T, path string, got []byte) {
 	}
 }
 
+// targetHash matches a result's target in a written report: the leaf
+// entry's ID, which is the hash of its envelope.
+var targetHash = regexp.MustCompile(`"target": "sha256:[0-9a-f]{64}"`)
+
+// normTargets replaces every target in a written report with one
+// spelling, so reports whose sessions differ only in the IDs the loop
+// and the adapter draw at random compare equal.
+func normTargets(report string) string {
+	return targetHash.ReplaceAllLiteralString(report, `"target": "sha256:LEAF"`)
+}
+
 func TestRunnerReport(t *testing.T) {
 	store := newStableStore()
 	r := basicRunner(store)
@@ -102,6 +114,18 @@ func TestRunnerReport(t *testing.T) {
 		}
 		if res.CostUSD == nil || *res.CostUSD <= 0 || res.Usage.TotalTokens == 0 {
 			t.Errorf("%s: cost %v usage %+v", res.Task.ID, res.CostUSD, res.Usage)
+		}
+		// The target is the end of the last run; the outcomes hang
+		// from it, so the session's leaf has moved past it.
+		s, err := store.Open(context.Background(), res.SessionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e, ok := s.Entry(res.Target)
+		if !ok {
+			t.Errorf("%s: target %s is not in the session", res.Task.ID, res.Target)
+		} else if run, ok := e.(*agentsession.RunEntry); !ok || run.Phase != "end" || run.Reason != string(res.Reason) {
+			t.Errorf("%s: target %s is %T %+v, want the run end", res.Task.ID, res.Target, e, e)
 		}
 	}
 	if greet.Runs != 1 || plain.Runs != 2 {
@@ -136,12 +160,15 @@ func TestRunnerReport(t *testing.T) {
 		t.Error("Result(nope) found")
 	}
 
-	// The report is the golden, and reads back to the same value.
+	// The report is the golden, and reads back to the same value. The
+	// targets are checked above and normalised here: each is the hash
+	// of an entry whose body carries the run, call and response IDs
+	// the loop and the adapter draw at random, so no two runs agree.
 	var buf bytes.Buffer
 	if err := report.WriteJSON(&buf); err != nil {
 		t.Fatal(err)
 	}
-	checkGolden(t, filepath.Join("testdata", "report", "basic.json"), buf.Bytes())
+	checkGolden(t, filepath.Join("testdata", "report", "basic.json"), []byte(normTargets(buf.String())))
 	back, err := agenteval.ReadReport(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatal(err)
@@ -294,9 +321,10 @@ func TestRunnerParallelKeepsOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Session IDs are assigned in start order, which parallel runs may
-	// swap; everything else is the same.
+	// swap, and the targets hash IDs drawn at random; everything else is
+	// the same.
 	norm := func(s string) string {
-		return strings.ReplaceAll(strings.ReplaceAll(s, "000000000001", "N"), "000000000002", "N")
+		return normTargets(strings.ReplaceAll(strings.ReplaceAll(s, "000000000001", "N"), "000000000002", "N"))
 	}
 	if norm(ba.String()) != norm(bb.String()) {
 		t.Errorf("parallel report differs:\n%s\n%s", ba.String(), bb.String())
