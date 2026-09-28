@@ -24,9 +24,11 @@ var update = flag.Bool("update", false, "rewrite golden files and fixtures")
 // epoch is the clock every stable store starts from.
 var epoch = time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
 
-// stableStore wraps a memory store and assigns every session and entry
-// a fixed ID and time, so a session recorded through it, and a report
-// over it, are byte-stable and can be golden files.
+// stableStore wraps a memory store and assigns every session a fixed ID
+// and every entry a fixed time, so a session recorded through it, and a
+// report over it, are byte-stable and can be golden files. An entry's ID
+// is the hash of its envelope, which the store computes from the body
+// and the time, so a fixed time is what makes it stable.
 type stableStore struct {
 	*agentsession.MemoryStore
 	mu       sync.Mutex
@@ -58,9 +60,6 @@ func (s *stableStore) Append(ctx context.Context, sessionID string, e agentsessi
 	n := s.entries[sessionID]
 	s.mu.Unlock()
 	b := e.Base()
-	if b.ID == "" {
-		b.ID = fmt.Sprintf("e%07d", n)
-	}
 	if b.Timestamp.IsZero() {
 		b.Timestamp = epoch.Add(time.Duration(n) * time.Second)
 	}

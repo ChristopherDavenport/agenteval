@@ -24,7 +24,7 @@
         }
       },
       "session_id": "01995b2a-0000-7000-8000-000000000001",
-      "target": "e0000013",
+      "target": "sha256:LEAF",
       "reason": "done",
       "runs": 1,
       "usage": {
@@ -93,7 +93,7 @@
         }
       },
       "session_id": "01995b2a-0000-7000-8000-000000000002",
-      "target": "e0000014",
+      "target": "sha256:LEAF",
       "reason": "done",
       "runs": 2,
       "usage": {
