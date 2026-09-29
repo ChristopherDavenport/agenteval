@@ -108,14 +108,17 @@ task, and names how the two configurations differed, read back from
 the sessions. The difference it names is the settings the record
 describes; when those are the same and the two first requests are not,
 it says so with `beyond_settings`, because a transform, a hook and an
-injected item are not settings.
+injected item are not settings. A context strategy that folds only
+later in the run shows as `folded`, whether each side's path held a
+compaction entry, when one did and the other did not.
 
 `price` loads a table of rates and prices a run with ATIF's formula,
-and the runner and the exporter take the same hook, so the two agree
-on the rate. They do not agree on the total: a result's `usage` is
-every response on the run's path, while the exported document's final
-metrics cover the context after the last compaction, so a run that
-folded is counted twice over on two different scopes.
+and the runner and the exporter take the same hook. A result's `usage`
+and `cost_usd` sum every model call on the run's path, the folds a
+compacting configuration made included, which is what the exported
+document's final metrics sum, so the two agree on the total. A run
+with a call the hook cannot price has no `cost_usd`, where the
+document reports the sum of the calls it could.
 
 ## Harbor
 

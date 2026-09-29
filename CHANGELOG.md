@@ -5,6 +5,74 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+### Added
+
+- A result `replay.Tools` serves carries the record its call's result
+  carried as its `Details`, so a wrapper that acts on a result's
+  details acts on a replayed call as it did on the live one: a grant
+  made on a skill read is made again, and a replay no longer asks where
+  the record did not. The record is the tool's custom entry beside the
+  call, found by its `call_id` and, in a session from before
+  `agentsession/0.6`, by position when one call alone was waiting for
+  its output. It is served as a `replay.Record`, which is itself
+  `Recordable`, so the replayed session holds the record again beside
+  the served call; `replay.DetailsAs[T]()` serves the records of T's
+  namespace decoded as a T, for a wrapper that asserts its type. A
+  nested call's record is not its parent's; a record the tool wrote
+  through `agenttool.WriteRecord` names the call as its result's does
+  and cannot be told from it, so a tool whose details are not
+  recordable and that wrote one is served that one. A
+  wrapper the product builds inside the tools it hands over, as
+  agentkit's granting wrapper is, still sits under the replay and sees
+  nothing; the seam to wrap each tool where it is made is agentkit's,
+  filed there. (#17)
+- `Result.ResumeBound` says a prompt was still waiting on input when
+  `MaxResumes` stopped resuming it, so a task the bound ended no longer
+  reads like one whose answer source declined. (#20)
+- `ConfigDiff.Folded` says one run's path held a compaction entry and
+  the other's none, so `Compare` of a plain configuration against a
+  compacting one no longer reports that nothing differed when the
+  first calls were the same. `Empty` counts it. Whether a run folds
+  depends on the task, so it does not make a suite's pairs
+  non-uniform; the comparison's own `Folded` is over every run of
+  each side. (#20)
+
+### Fixed
+
+- `Result.Usage` and `Result.CostUSD` count the folds a compacting
+  configuration made and any branch summary on the path, pricing each
+  under the model the exporter prices it under, so the report's cost
+  column and the exported document's `final_metrics` agree on the
+  total whenever every call was priced. They summed the responses alone, while the doc comment said
+  the folds were included: a compacting run reported 38 per cent of
+  what it spent in the harbor-eval study, and `Compare` could call the
+  costlier configuration the cheaper. (#18)
+
+### Notes
+
+- The `replace => ../` in `harbor`'s published `go.mod` stays, since the
+  release builds the pair from one commit through it, and the pair is
+  tested: `make extracted` copies `harbor` out of the tree, drops the
+  replace and builds, vets and tests it against the root its require
+  names, and CI runs it on every pull request and on main. It ran
+  against the published pair on the v0.0.4 release commit and passed.
+  What cannot build is the module cache's copy in place, where the
+  relative replace names a directory that is not there; a consumer
+  never builds it that way, since Go ignores a dependency's replace.
+  `harbor/go.mod` now says this beside the replace. (#19)
+
+### Dependencies
+
+- agentturn and its `session` module v0.0.9 to v0.0.10, agenttool
+  v0.0.8 to v0.0.9, and agentsession v0.0.8 to v0.0.9, in the root
+  module and in `harbor`. No API of this module changes with them. The
+  runner records `agentsession/0.6`, which adds optional members only:
+  a run start carries its trigger, a custom record names its call, and
+  the header promises `queued`. The fixtures under `testdata/sessions`
+  are rewritten in that format.
+
 ## v0.0.4 - 2026-09-28
 
 ### Dependencies

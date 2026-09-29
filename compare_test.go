@@ -10,6 +10,8 @@ import (
 	"github.com/ChristopherDavenport/agenteval"
 	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agentturn"
+	"github.com/ChristopherDavenport/agentturn/compact"
+	"github.com/ChristopherDavenport/agentturn/session"
 	"github.com/ChristopherDavenport/openresponses"
 )
 
@@ -201,5 +203,77 @@ func TestCompareSeesBeyondTheSettings(t *testing.T) {
 				t.Errorf("written comparison: %s", buf.String())
 			}
 		})
+	}
+}
+
+// TestCompareSeesTheFolds is from issue 20: a comparison of a plain
+// configuration against a compacting one says one side folded, which
+// the first call alone cannot show.
+func TestCompareSeesTheFolds(t *testing.T) {
+	prompts := openresponses.Items{openresponses.UserText("one"), openresponses.UserText("two"), openresponses.UserText("three")}
+	suite := &agenteval.Suite{Name: "long", Tasks: []agenteval.Task{{ID: "chat", Prompts: prompts}}}
+	plain := func(agenteval.Task, *session.Recorder) agentturn.Config { return echoConfig() }
+	folding := func(_ agenteval.Task, rec *session.Recorder) agentturn.Config { return foldingConfig(rec) }
+	tests := []struct {
+		name string
+		a, b func(agenteval.Task, *session.Recorder) agentturn.Config
+		want *agenteval.Change
+	}{
+		{"neither folds", plain, plain, nil},
+		{"B folds", plain, folding, &agenteval.Change{A: false, B: true}},
+		{"both fold", folding, folding, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := &agenteval.Runner{Store: newStableStore(), ConfigWith: tt.a}
+			b := &agenteval.Runner{Store: newStableStore(), ConfigWith: tt.b}
+			c, err := agenteval.Compare(context.Background(), suite, a, b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := c.Config.Folded
+			if (got == nil) != (tt.want == nil) || (got != nil && *got != *tt.want) {
+				t.Errorf("folded = %+v, want %+v", got, tt.want)
+			}
+			if c.Config.Empty() != (tt.want == nil) {
+				t.Errorf("empty = %v with folded = %+v", c.Config.Empty(), got)
+			}
+		})
+	}
+}
+
+// TestCompareFoldsKeepTheSuiteUniform: a compacting side folds on a
+// long task and not on a short one, which is the task and not the
+// configuration, so the settings both sides differ by for every task
+// stay on the comparison.
+func TestCompareFoldsKeepTheSuiteUniform(t *testing.T) {
+	suite := &agenteval.Suite{Name: "mixed", Tasks: []agenteval.Task{
+		{ID: "short", Instruction: "hi"},
+		{ID: "long", Prompts: openresponses.Items{openresponses.UserText("one"), openresponses.UserText("two"), openresponses.UserText("three")}},
+	}}
+	a := &agenteval.Runner{Store: newStableStore(), ConfigWith: func(agenteval.Task, *session.Recorder) agentturn.Config { return echoConfig() }}
+	b := &agenteval.Runner{Store: newStableStore(), ConfigWith: func(_ agenteval.Task, rec *session.Recorder) agentturn.Config {
+		cfg := echoConfig()
+		cfg.Instructions = "Be terse."
+		// A budget only the long task's context exceeds.
+		cfg.Transform = compact.NewLocal(cfg.Model, compact.WithBudget(150), compact.WithKeepLast(2), compact.WithOnFold(rec.Fold)).Transform
+		return cfg
+	}}
+	c, err := agenteval.Compare(context.Background(), suite, a, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	folds := map[string]bool{}
+	for _, p := range c.Pairs {
+		folds[p.Task] = p.Config.Folded != nil
+	}
+	if folds["short"] || !folds["long"] {
+		t.Fatalf("the pairs folded %v; the test needs the long task alone to fold", folds)
+	}
+	if !c.Uniform || c.Config.Instructions == nil {
+		t.Errorf("uniform %v, config %+v: the instructions differ for every task", c.Uniform, c.Config)
+	}
+	if c.Config.Folded == nil || c.Config.Folded.A != false || c.Config.Folded.B != true {
+		t.Errorf("folded = %+v, want B's runs to have folded and A's not", c.Config.Folded)
 	}
 }

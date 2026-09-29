@@ -558,6 +558,74 @@ func TestRunnerRecordsFolds(t *testing.T) {
 	}
 }
 
+// echoRate is flatRate for the echo model and no price for any other,
+// so a call priced under the wrong model, or none, leaves a run
+// unpriced.
+func echoRate(model string, u openresponses.Usage) (float64, bool) {
+	if model != "echo/echo-1" {
+		return 0, false
+	}
+	return flatRate(model, u)
+}
+
+// TestRunnerCostCountsFolds is issue 18: a result's usage and cost
+// count the folds a compacting configuration made, so the report and
+// the document the same run exports agree on what the run spent.
+func TestRunnerCostCountsFolds(t *testing.T) {
+	prompts := openresponses.Items{openresponses.UserText("one"), openresponses.UserText("two"), openresponses.UserText("three")}
+	suite := &agenteval.Suite{Name: "long", Tasks: []agenteval.Task{{ID: "chat", Prompts: prompts}}}
+	store := newStableStore()
+	r := &agenteval.Runner{
+		Store: store,
+		ConfigWith: func(_ agenteval.Task, rec *session.Recorder) agentturn.Config {
+			return foldingConfig(rec)
+		},
+		Cost: echoRate,
+	}
+	report, err := r.Run(context.Background(), suite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := report.Results[0]
+	if res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	s, err := store.Open(context.Background(), res.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var folded int
+	for _, e := range s.Path(res.Target) {
+		if c, ok := e.(*agentsession.CompactionEntry); ok && c.Usage != nil {
+			folded += c.Usage.InputTokens
+		}
+	}
+	if folded == 0 {
+		t.Fatal("no fold on the path reported usage")
+	}
+	tr, err := export.At(s, res.Target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := export.ToATIF(tr, export.Options{Cost: echoRate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := doc.FinalMetrics
+	if m == nil || m.TotalPromptTokens == nil || m.TotalCompletionTokens == nil || m.TotalCostUSD == nil {
+		t.Fatalf("the document has no totals: %+v", m)
+	}
+	if res.Usage.InputTokens != *m.TotalPromptTokens || res.Usage.OutputTokens != *m.TotalCompletionTokens {
+		t.Errorf("usage %d in, %d out; the document %d in, %d out", res.Usage.InputTokens, res.Usage.OutputTokens, *m.TotalPromptTokens, *m.TotalCompletionTokens)
+	}
+	if res.CostUSD == nil {
+		t.Fatal("the run was not priced")
+	}
+	if *res.CostUSD != *m.TotalCostUSD {
+		t.Errorf("cost %v, the document %v", *res.CostUSD, *m.TotalCostUSD)
+	}
+}
+
 // alwaysCalls answers every request with one call to upper, so a
 // configuration that defers every call asks once a turn.
 type alwaysCalls struct{}
@@ -590,6 +658,17 @@ func deferring(model agentturn.Model) agentturn.Config {
 	return cfg
 }
 
+// declineAfter answers through fn n times and then has nothing to say.
+func declineAfter(n int, fn func(context.Context, *agentturn.RunEnd) ([]agentturn.Answer, error)) func(context.Context, *agentturn.RunEnd) ([]agentturn.Answer, error) {
+	return func(ctx context.Context, end *agentturn.RunEnd) ([]agentturn.Answer, error) {
+		if n == 0 {
+			return nil, nil
+		}
+		n--
+		return fn(ctx, end)
+	}
+}
+
 // TestRunnerAnswers is issue 7: a run that ends input_required is
 // resumed with what Answer says, so an evaluation of a product
 // configured the safe way measures the whole run and not the part
@@ -610,6 +689,7 @@ func TestRunnerAnswers(t *testing.T) {
 		max     int
 		reason  agentturn.Reason
 		resumes int
+		bound   bool
 		err     error
 	}{
 		{name: "no answer source", reason: agentturn.ReasonInputRequired},
@@ -630,6 +710,11 @@ func TestRunnerAnswers(t *testing.T) {
 		{
 			name: "a run that asks every turn is bounded", model: alwaysCalls{},
 			answer: refuse, max: 2,
+			reason: agentturn.ReasonInputRequired, resumes: 2, bound: true,
+		},
+		{
+			name: "a reviewer that declines under the bound is not the bound", model: alwaysCalls{},
+			answer: declineAfter(2, refuse), max: 3,
 			reason: agentturn.ReasonInputRequired, resumes: 2,
 		},
 	}
@@ -649,8 +734,8 @@ func TestRunnerAnswers(t *testing.T) {
 				t.Fatal(err)
 			}
 			res := report.Results[0]
-			if res.Reason != tt.reason || res.Resumes != tt.resumes {
-				t.Errorf("reason %s resumes %d, want %s and %d", res.Reason, res.Resumes, tt.reason, tt.resumes)
+			if res.Reason != tt.reason || res.Resumes != tt.resumes || res.ResumeBound != tt.bound {
+				t.Errorf("reason %s resumes %d bound %t, want %s, %d and %t", res.Reason, res.Resumes, res.ResumeBound, tt.reason, tt.resumes, tt.bound)
 			}
 			if tt.err != nil {
 				if !errors.Is(res.Err, tt.err) {
@@ -699,7 +784,8 @@ func TestRunnerConfigWithAnnotates(t *testing.T) {
 		ConfigWith: func(_ agenteval.Task, rec *session.Recorder) agentturn.Config {
 			cfg := echoConfig()
 			cfg.BeforeTurn = func(ctx context.Context, _ agentturn.TurnStartInfo) (openresponses.Items, error) {
-				return nil, rec.Annotate(ctx, ns, map[string]string{"block": "go-version"})
+				_, err := rec.Annotate(ctx, ns, map[string]string{"block": "go-version"})
+				return nil, err
 			}
 			return cfg
 		},

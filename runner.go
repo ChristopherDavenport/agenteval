@@ -81,12 +81,17 @@ type Result struct {
 	// Resumes is how many of those runs were resumes through
 	// [Runner.Answer].
 	Resumes int `json:"resumes,omitempty"`
-	// Usage is the sum over the responses on the run's path: every
-	// model call the run made, the folds a compacting configuration
-	// reported included. The exported document's final metrics sum the
-	// context after the last compaction instead, so on a compacted run
-	// the two numbers differ; the runner and the exporter take the same
-	// price hook, so they agree on the rate and not on the total.
+	// ResumeBound says a prompt was still waiting on input when
+	// [Runner.MaxResumes] stopped resuming it, where a task that ends
+	// input_required without it stopped because there was no Answer,
+	// or it had nothing to say or failed.
+	ResumeBound bool `json:"resume_bound,omitempty"`
+	// Usage is the sum over the model calls on the run's path: every
+	// response, and every fold or branch summary that reported usage.
+	// It is the path the exported document's final metrics sum, and the
+	// runner prices each call under the model the exporter does, so
+	// with the same price hook the two agree on the total whenever
+	// every call was priced.
 	Usage openresponses.Usage `json:"usage"`
 	// CostUSD is the run's cost under Runner.Cost, when every call was
 	// priced.
@@ -310,6 +315,9 @@ func (r *Runner) answer(ctx context.Context, a *agentturn.Agent, end *agentturn.
 			return end, fmt.Errorf("resume %d: %w", res.Resumes, err)
 		}
 	}
+	if end != nil && end.Reason == agentturn.ReasonInputRequired {
+		res.ResumeBound = true
+	}
 	return end, nil
 }
 
@@ -373,23 +381,50 @@ func (r *Runner) describe(ctx context.Context, sessionID string, suite *Suite, t
 	return err
 }
 
-// usage sums the usage of the responses on the path to leaf and prices
-// them when the runner can.
+// usage sums the usage of the model calls on the path to leaf, the
+// responses and the folds, and prices them when the runner can.
 func (r *Runner) usage(s *agentsession.Session, leaf string) (openresponses.Usage, *float64) {
 	var u openresponses.Usage
 	cost, priced := 0.0, r.Cost != nil
+	// The model in force, for a fold or a response that does not name
+	// its own, replayed as the exporter replays it so the two price
+	// every call under the same model.
+	model := ""
 	for _, e := range s.Path(leaf) {
-		resp, ok := e.(*agentsession.ResponseEntry)
-		if !ok || resp.Usage == nil {
+		var eu *openresponses.Usage
+		m := model
+		switch v := e.(type) {
+		case *agentsession.ConfigEntry:
+			if v.Replace {
+				model = ""
+			}
+			if v.Model != "" {
+				model = v.Model
+			}
+			continue
+		case *agentsession.ResponseEntry:
+			eu = v.Usage
+			if v.Model != "" {
+				m = v.Model
+			}
+		case *agentsession.CompactionEntry:
+			model = v.Config.Model
+			eu, m = v.Usage, v.Config.Model
+		case *agentsession.BranchSummaryEntry:
+			eu = v.Usage
+		default:
 			continue
 		}
-		u.InputTokens += resp.Usage.InputTokens
-		u.OutputTokens += resp.Usage.OutputTokens
-		u.TotalTokens += resp.Usage.TotalTokens
-		u.InputTokensDetails.CachedTokens += resp.Usage.InputTokensDetails.CachedTokens
-		u.OutputTokensDetails.ReasoningTokens += resp.Usage.OutputTokensDetails.ReasoningTokens
+		if eu == nil {
+			continue
+		}
+		u.InputTokens += eu.InputTokens
+		u.OutputTokens += eu.OutputTokens
+		u.TotalTokens += eu.TotalTokens
+		u.InputTokensDetails.CachedTokens += eu.InputTokensDetails.CachedTokens
+		u.OutputTokensDetails.ReasoningTokens += eu.OutputTokensDetails.ReasoningTokens
 		if priced {
-			usd, ok := r.Cost(resp.Model, *resp.Usage)
+			usd, ok := r.Cost(m, *eu)
 			priced = ok
 			cost += usd
 		}
