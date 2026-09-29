@@ -648,6 +648,17 @@ func deferring(model agentturn.Model) agentturn.Config {
 	return cfg
 }
 
+// declineAfter answers through fn n times and then has nothing to say.
+func declineAfter(n int, fn func(context.Context, *agentturn.RunEnd) ([]agentturn.Answer, error)) func(context.Context, *agentturn.RunEnd) ([]agentturn.Answer, error) {
+	return func(ctx context.Context, end *agentturn.RunEnd) ([]agentturn.Answer, error) {
+		if n == 0 {
+			return nil, nil
+		}
+		n--
+		return fn(ctx, end)
+	}
+}
+
 // TestRunnerAnswers is issue 7: a run that ends input_required is
 // resumed with what Answer says, so an evaluation of a product
 // configured the safe way measures the whole run and not the part
@@ -668,6 +679,7 @@ func TestRunnerAnswers(t *testing.T) {
 		max     int
 		reason  agentturn.Reason
 		resumes int
+		bound   bool
 		err     error
 	}{
 		{name: "no answer source", reason: agentturn.ReasonInputRequired},
@@ -688,6 +700,11 @@ func TestRunnerAnswers(t *testing.T) {
 		{
 			name: "a run that asks every turn is bounded", model: alwaysCalls{},
 			answer: refuse, max: 2,
+			reason: agentturn.ReasonInputRequired, resumes: 2, bound: true,
+		},
+		{
+			name: "a reviewer that declines under the bound is not the bound", model: alwaysCalls{},
+			answer: declineAfter(2, refuse), max: 3,
 			reason: agentturn.ReasonInputRequired, resumes: 2,
 		},
 	}
@@ -707,8 +724,8 @@ func TestRunnerAnswers(t *testing.T) {
 				t.Fatal(err)
 			}
 			res := report.Results[0]
-			if res.Reason != tt.reason || res.Resumes != tt.resumes {
-				t.Errorf("reason %s resumes %d, want %s and %d", res.Reason, res.Resumes, tt.reason, tt.resumes)
+			if res.Reason != tt.reason || res.Resumes != tt.resumes || res.ResumeBound != tt.bound {
+				t.Errorf("reason %s resumes %d bound %t, want %s, %d and %t", res.Reason, res.Resumes, res.ResumeBound, tt.reason, tt.resumes, tt.bound)
 			}
 			if tt.err != nil {
 				if !errors.Is(res.Err, tt.err) {

@@ -81,6 +81,11 @@ type Result struct {
 	// Resumes is how many of those runs were resumes through
 	// [Runner.Answer].
 	Resumes int `json:"resumes,omitempty"`
+	// ResumeBound says a prompt was still waiting on input when
+	// [Runner.MaxResumes] stopped resuming it, where a task that ends
+	// input_required without it stopped because Answer had nothing to
+	// say or failed.
+	ResumeBound bool `json:"resume_bound,omitempty"`
 	// Usage is the sum over the model calls on the run's path: every
 	// response, and every fold or branch summary that reported usage.
 	// It is the path the exported document's final metrics sum, and the
@@ -308,6 +313,9 @@ func (r *Runner) answer(ctx context.Context, a *agentturn.Agent, end *agentturn.
 		if err != nil {
 			return end, fmt.Errorf("resume %d: %w", res.Resumes, err)
 		}
+	}
+	if end != nil && end.Reason == agentturn.ReasonInputRequired {
+		res.ResumeBound = true
 	}
 	return end, nil
 }

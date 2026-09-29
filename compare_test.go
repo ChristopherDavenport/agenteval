@@ -10,6 +10,7 @@ import (
 	"github.com/ChristopherDavenport/agenteval"
 	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agentturn"
+	"github.com/ChristopherDavenport/agentturn/session"
 	"github.com/ChristopherDavenport/openresponses"
 )
 
@@ -199,6 +200,42 @@ func TestCompareSeesBeyondTheSettings(t *testing.T) {
 			}
 			if strings.Contains(buf.String(), "beyond_settings") != tt.want {
 				t.Errorf("written comparison: %s", buf.String())
+			}
+		})
+	}
+}
+
+// TestCompareSeesTheFolds is from issue 20: a comparison of a plain
+// configuration against a compacting one says one side folded, which
+// the first call alone cannot show.
+func TestCompareSeesTheFolds(t *testing.T) {
+	prompts := openresponses.Items{openresponses.UserText("one"), openresponses.UserText("two"), openresponses.UserText("three")}
+	suite := &agenteval.Suite{Name: "long", Tasks: []agenteval.Task{{ID: "chat", Prompts: prompts}}}
+	plain := func(agenteval.Task, *session.Recorder) agentturn.Config { return echoConfig() }
+	folding := func(_ agenteval.Task, rec *session.Recorder) agentturn.Config { return foldingConfig(rec) }
+	tests := []struct {
+		name string
+		a, b func(agenteval.Task, *session.Recorder) agentturn.Config
+		want *agenteval.Change
+	}{
+		{"neither folds", plain, plain, nil},
+		{"B folds", plain, folding, &agenteval.Change{A: false, B: true}},
+		{"both fold", folding, folding, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := &agenteval.Runner{Store: newStableStore(), ConfigWith: tt.a}
+			b := &agenteval.Runner{Store: newStableStore(), ConfigWith: tt.b}
+			c, err := agenteval.Compare(context.Background(), suite, a, b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := c.Config.Folded
+			if (got == nil) != (tt.want == nil) || (got != nil && *got != *tt.want) {
+				t.Errorf("folded = %+v, want %+v", got, tt.want)
+			}
+			if c.Config.Empty() != (tt.want == nil) {
+				t.Errorf("empty = %v with folded = %+v", c.Config.Empty(), got)
 			}
 		})
 	}

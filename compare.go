@@ -78,14 +78,20 @@ type ConfigDiff struct {
 	// not rebuild, which is a transform or a hook by definition. It
 	// compares the first call of each run, so a transform that
 	// changes nothing until later, as a compaction transform does not
-	// fold before it has anything to fold, is not visible here; the
-	// compaction entries of the two sessions are.
+	// fold before it has anything to fold, is not visible here;
+	// Folded is.
 	BeyondSettings bool `json:"beyond_settings,omitempty"`
+	// Folded says one run's path held a compaction entry and the
+	// other's none, with whether each side folded: a context strategy
+	// is not a setting either, and the fold is what it leaves on the
+	// path. Two runs that both folded, however often, do not differ
+	// here.
+	Folded *Change `json:"folded,omitempty"`
 }
 
 // Empty reports whether nothing differed.
 func (d ConfigDiff) Empty() bool {
-	return !d.BeyondSettings && d.Model == nil && d.Instructions == nil && d.Reasoning == nil && d.Text == nil &&
+	return !d.BeyondSettings && d.Folded == nil && d.Model == nil && d.Instructions == nil && d.Reasoning == nil && d.Text == nil &&
 		len(d.ToolsAdded) == 0 && len(d.ToolsRemoved) == 0 && len(d.ToolsChanged) == 0 && len(d.Extra) == 0
 }
 
@@ -129,8 +135,8 @@ func Compare(ctx context.Context, suite *Suite, a, b *Runner) (*Comparison, erro
 				counts[s.Judge]++
 			}
 		}
-		sa, ha, errA := initialCall(ctx, a.Store, pa.SessionID)
-		sb, hb, errB := initialCall(ctx, b.Store, pb.SessionID)
+		sa, ha, fa, errA := initialCall(ctx, a.Store, pa)
+		sb, hb, fb, errB := initialCall(ctx, b.Store, pb)
 		if errA == nil && errB == nil {
 			pair.Config = DiffSettings(sa, sb)
 			// The same settings and a different request is something
@@ -138,6 +144,9 @@ func Compare(ctx context.Context, suite *Suite, a, b *Runner) (*Comparison, erro
 			// injected item.
 			if pair.Config.Empty() && differentFirstCall(ha, hb) {
 				pair.Config.BeyondSettings = true
+			}
+			if fa != fb {
+				pair.Config.Folded = &Change{A: fa, B: fb}
 			}
 		}
 		if i == 0 {
@@ -156,27 +165,39 @@ func Compare(ctx context.Context, suite *Suite, a, b *Runner) (*Comparison, erro
 	return c, nil
 }
 
-// initialCall replays the settings the session's first model call was
+// initialCall replays the settings the result's first model call was
 // made under, the config entries on the path to the first response
-// entry, and returns the hash that response recorded for its request.
-// A session with no response yields the settings at its leaf and no
-// hash.
-func initialCall(ctx context.Context, store agentsession.Store, sessionID string) (agentsession.Settings, string, error) {
-	if sessionID == "" {
-		return agentsession.Settings{}, "", errors.New("agenteval: no session")
+// entry, and returns the hash that response recorded for its request
+// and whether the path to the result's target holds a compaction
+// entry. A session with no response yields the settings at its leaf
+// and no hash.
+func initialCall(ctx context.Context, store agentsession.Store, res *Result) (agentsession.Settings, string, bool, error) {
+	if res.SessionID == "" {
+		return agentsession.Settings{}, "", false, errors.New("agenteval: no session")
 	}
-	s, err := store.Open(ctx, sessionID)
+	s, err := store.Open(ctx, res.SessionID)
 	if err != nil {
-		return agentsession.Settings{}, "", err
+		return agentsession.Settings{}, "", false, err
+	}
+	leaf := res.Target
+	if leaf == "" {
+		leaf = s.Leaf()
+	}
+	folded := false
+	for _, e := range s.Path(leaf) {
+		if _, ok := e.(*agentsession.CompactionEntry); ok {
+			folded = true
+			break
+		}
 	}
 	for _, e := range s.Path(s.Leaf()) {
 		if resp, ok := e.(*agentsession.ResponseEntry); ok {
 			cx, err := s.RequestContext(resp.ID)
-			return cx.Settings, resp.RequestHash, err
+			return cx.Settings, resp.RequestHash, folded, err
 		}
 	}
 	cx, err := s.Context()
-	return cx.Settings, "", err
+	return cx.Settings, "", folded, err
 }
 
 // differentFirstCall reports whether two runs' first calls sent

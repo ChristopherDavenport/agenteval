@@ -24,6 +24,13 @@ versions may break the API.
   agentkit's granting wrapper is, still sits under the replay and sees
   nothing; the seam to wrap each tool where it is made is agentkit's,
   filed there. (#17)
+- `Result.ResumeBound` says a prompt was still waiting on input when
+  `MaxResumes` stopped resuming it, so a task the bound ended no longer
+  reads like one whose answer source declined. (#20)
+- `ConfigDiff.Folded` says one run's path held a compaction entry and
+  the other's none, so `Compare` of a plain configuration against a
+  compacting one no longer reports that nothing differed when the
+  first calls were the same. `Empty` counts it. (#20)
 
 ### Fixed
 

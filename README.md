@@ -108,7 +108,9 @@ task, and names how the two configurations differed, read back from
 the sessions. The difference it names is the settings the record
 describes; when those are the same and the two first requests are not,
 it says so with `beyond_settings`, because a transform, a hook and an
-injected item are not settings.
+injected item are not settings. A context strategy that folds only
+later in the run shows as `folded`, whether each side's path held a
+compaction entry, when one did and the other did not.
 
 `price` loads a table of rates and prices a run with ATIF's formula,
 and the runner and the exporter take the same hook. A result's `usage`
