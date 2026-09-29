@@ -699,7 +699,8 @@ func TestRunnerConfigWithAnnotates(t *testing.T) {
 		ConfigWith: func(_ agenteval.Task, rec *session.Recorder) agentturn.Config {
 			cfg := echoConfig()
 			cfg.BeforeTurn = func(ctx context.Context, _ agentturn.TurnStartInfo) (openresponses.Items, error) {
-				return nil, rec.Annotate(ctx, ns, map[string]string{"block": "go-version"})
+				_, err := rec.Annotate(ctx, ns, map[string]string{"block": "go-version"})
+				return nil, err
 			}
 			return cfg
 		},

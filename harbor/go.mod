@@ -5,13 +5,13 @@ go 1.25.0
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/ChristopherDavenport/agenteval v0.0.4
-	github.com/ChristopherDavenport/agentsession v0.0.8
+	github.com/ChristopherDavenport/agentsession v0.0.9
 )
 
 require (
-	github.com/ChristopherDavenport/agenttool v0.0.8 // indirect
-	github.com/ChristopherDavenport/agentturn v0.0.9 // indirect
-	github.com/ChristopherDavenport/agentturn/session v0.0.9 // indirect
+	github.com/ChristopherDavenport/agenttool v0.0.9 // indirect
+	github.com/ChristopherDavenport/agentturn v0.0.10 // indirect
+	github.com/ChristopherDavenport/agentturn/session v0.0.10 // indirect
 	github.com/ChristopherDavenport/openresponses v0.0.12 // indirect
 )
 
