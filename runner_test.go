@@ -558,6 +558,64 @@ func TestRunnerRecordsFolds(t *testing.T) {
 	}
 }
 
+// TestRunnerCostCountsFolds is issue 18: a result's usage and cost
+// count the folds a compacting configuration made, so the report and
+// the document the same run exports agree on what the run spent.
+func TestRunnerCostCountsFolds(t *testing.T) {
+	prompts := openresponses.Items{openresponses.UserText("one"), openresponses.UserText("two"), openresponses.UserText("three")}
+	suite := &agenteval.Suite{Name: "long", Tasks: []agenteval.Task{{ID: "chat", Prompts: prompts}}}
+	store := newStableStore()
+	r := &agenteval.Runner{
+		Store: store,
+		ConfigWith: func(_ agenteval.Task, rec *session.Recorder) agentturn.Config {
+			return foldingConfig(rec)
+		},
+		Cost: flatRate,
+	}
+	report, err := r.Run(context.Background(), suite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := report.Results[0]
+	if res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	s, err := store.Open(context.Background(), res.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var folded int
+	for _, e := range s.Path(res.Target) {
+		if c, ok := e.(*agentsession.CompactionEntry); ok && c.Usage != nil {
+			folded += c.Usage.InputTokens
+		}
+	}
+	if folded == 0 {
+		t.Fatal("no fold on the path reported usage")
+	}
+	tr, err := export.At(s, res.Target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := export.ToATIF(tr, export.Options{Cost: flatRate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := doc.FinalMetrics
+	if m == nil || m.TotalPromptTokens == nil || m.TotalCompletionTokens == nil || m.TotalCostUSD == nil {
+		t.Fatalf("the document has no totals: %+v", m)
+	}
+	if res.Usage.InputTokens != *m.TotalPromptTokens || res.Usage.OutputTokens != *m.TotalCompletionTokens {
+		t.Errorf("usage %d in, %d out; the document %d in, %d out", res.Usage.InputTokens, res.Usage.OutputTokens, *m.TotalPromptTokens, *m.TotalCompletionTokens)
+	}
+	if res.CostUSD == nil {
+		t.Fatal("the run was not priced")
+	}
+	if *res.CostUSD != *m.TotalCostUSD {
+		t.Errorf("cost %v, the document %v", *res.CostUSD, *m.TotalCostUSD)
+	}
+}
+
 // alwaysCalls answers every request with one call to upper, so a
 // configuration that defers every call asks once a turn.
 type alwaysCalls struct{}

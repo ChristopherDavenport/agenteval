@@ -7,6 +7,17 @@ versions may break the API.
 
 ## Unreleased
 
+### Fixed
+
+- `Result.Usage` and `Result.CostUSD` count the folds a compacting
+  configuration made and any branch summary on the path, pricing each
+  under the model the exporter prices it under, so the report's cost
+  column and the exported document's `final_metrics` agree on the
+  total. They summed the responses alone, while the doc comment said
+  the folds were included: a compacting run reported 38 per cent of
+  what it spent in the harbor-eval study, and `Compare` could call the
+  costlier configuration the cheaper. (#18)
+
 ### Dependencies
 
 - agentturn and its `session` module v0.0.9 to v0.0.10, agenttool
