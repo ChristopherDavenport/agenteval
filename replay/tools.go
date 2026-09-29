@@ -146,8 +146,11 @@ type recording struct {
 // RFC 8785 over the JSON, the rule the request hash uses, so a
 // serialiser that reorders members still matches; arguments that are
 // not JSON compare byte for byte. A call with no recorded output runs
-// the real tool, or fails with [ErrDiverged] when Strict. A tool's
-// name, description, schema, strictness and sequencing are unchanged.
+// the real tool, or fails with [ErrDiverged] when Strict. Each tool is
+// wrapped with [agenttool.Wrap], so it is the original in every way but
+// Execute: its name, description and schema, and every property it
+// declares, confinement, resource, annotations and replay safety among
+// them, so a policy decides a replayed call as it decided the live one.
 //
 // A served result carries the record its call's result carried as its
 // Details, as a [Record] or as the type [DetailsAs] names, so a wrapper
@@ -174,7 +177,9 @@ func Tools(s *agentsession.Session, tools []agenttool.Tool, opts ...Option) []ag
 	}
 	out := make([]agenttool.Tool, len(tools))
 	for i, t := range tools {
-		out[i] = &replayed{Tool: t, rec: rec}
+		out[i] = agenttool.Wrap(t, func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
+			return rec.serve(ctx, t, call)
+		})
 	}
 	return out
 }
@@ -302,25 +307,18 @@ func (r *recording) count() int {
 	return r.served
 }
 
-// replayed is a tool whose calls are answered from the recording when
-// they match.
-type replayed struct {
-	agenttool.Tool
-	rec *recording
-}
-
-// Execute serves the recorded output for a matching call, else runs the
-// wrapped tool or fails when strict.
-func (t *replayed) Execute(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
-	c, byID, ok := t.rec.lookup(t.Name(), call.ID, call.Args)
+// serve answers a call of t from the recording: the recorded output for
+// a matching call, else t's own Execute, or a failure when strict.
+func (r *recording) serve(ctx context.Context, t agenttool.Tool, call agenttool.Call) (agenttool.Result, error) {
+	c, byID, ok := r.lookup(t.Name(), call.ID, call.Args)
 	if !ok {
-		if t.rec.opts.strict {
+		if r.opts.strict {
 			return agenttool.Result{}, fmt.Errorf("%w: no recorded output for call %s to %s with arguments %s", ErrDiverged, call.ID, t.Name(), call.Args)
 		}
-		return t.Tool.Execute(ctx, call)
+		return t.Execute(ctx, call)
 	}
-	if t.rec.opts.observer != nil {
-		t.rec.opts.observer(Served{Kind: KindCall, N: t.rec.count(), EntryID: c.entryID, CallID: c.call.CallID, Name: t.Name(), ByID: byID, Match: true})
+	if r.opts.observer != nil {
+		r.opts.observer(Served{Kind: KindCall, N: r.count(), EntryID: c.entryID, CallID: c.call.CallID, Name: t.Name(), ByID: byID, Match: true})
 	}
 	res := agenttool.Result{Output: c.output.Output}
 	if len(c.records) == 0 {
@@ -328,7 +326,7 @@ func (t *replayed) Execute(ctx context.Context, call agenttool.Call) (agenttool.
 	}
 	for i := len(c.records) - 1; i >= 0; i-- {
 		rec := c.records[i]
-		decode, ok := t.rec.opts.details[rec.NS]
+		decode, ok := r.opts.details[rec.NS]
 		if !ok {
 			continue
 		}
@@ -344,16 +342,4 @@ func (t *replayed) Execute(ctx context.Context, call agenttool.Call) (agenttool.
 	return res, nil
 }
 
-// Sequential reports the wrapped tool's answer.
-func (t *replayed) Sequential() bool { return agenttool.IsSequential(t.Tool) }
-
-// Strict reports the wrapped tool's answer.
-func (t *replayed) Strict() bool { return agenttool.IsStrict(t.Tool) }
-
-var (
-	_ agenttool.Tool       = (*replayed)(nil)
-	_ agenttool.Sequential = (*replayed)(nil)
-	_ agenttool.Strict     = (*replayed)(nil)
-
-	_ agenttool.Recordable = Record{}
-)
+var _ agenttool.Recordable = Record{}
