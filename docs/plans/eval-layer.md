@@ -230,6 +230,13 @@ type Runner struct {
     // session and the run cannot be replayed strictly, and where a
     // layer keeps the recorder to Annotate the run it is in.
     ConfigWith func(Task, *session.Recorder) agentturn.Config
+    // Build is ConfigWith for a configuration that can fail to build or
+    // holds something to release, and wins over both; its error goes on
+    // Result.Err and its close is called once the task is done.
+    Build func(context.Context, Task, *session.Recorder) (agentturn.Config, func() error, error)
+    // SessionOptions opens each run's recorder with options such as
+    // session.WithInstructionsParts.
+    SessionOptions func(Task) []session.Option
     // Answer answers the calls a run left pending when it ended
     // input_required; the run is resumed with them, up to MaxResumes
     // times, and every resume is recorded. agentpolicy.Engine.Answers
@@ -238,7 +245,7 @@ type Runner struct {
     MaxResumes int
     Judges   []Judge
     Parallel int
-    Header   func(Task) agentsession.Header          // optional: harness, cwd, a fixed ID
+    Header   func(Task) agentsession.Header          // optional: harness, cwd, a fixed ID, a base to fork
     Cost     func(model string, usage openresponses.Usage) (float64, bool) // optional: price.Hook
 }
 

@@ -1001,3 +1001,104 @@ func TestInterleavedCustomEntry(t *testing.T) {
 		}
 	}
 }
+
+// A target written before the 0.5 migration names its entry by the ID
+// it had then, which the reader keeps as legacy_id; a replay resolves
+// it as export.At does.
+func TestLegacyLeafResolves(t *testing.T) {
+	s := loadFixture(t, "legacy")
+	const legacy = "e0000010"
+	id, ok := s.Resolve(legacy)
+	if !ok || id == legacy {
+		t.Fatalf("Resolve(%s) = %s, %v; the fixture is not pre-migration", legacy, id, ok)
+	}
+	model, err := replay.NewModel(s, replay.WithLeaf(legacy))
+	if err != nil {
+		t.Fatalf("NewModel: %v", err)
+	}
+	if model.Steps() != 2 {
+		t.Errorf("steps = %d, want 2", model.Steps())
+	}
+	if err := replay.Unverifiable(s, legacy); errors.Is(err, agentsession.ErrNoEntry) {
+		t.Errorf("Unverifiable: %v", err)
+	}
+	ran := 0
+	tools := replay.Tools(s, []agenttool.Tool{upperTool(&ran)}, replay.WithLeaf(legacy), replay.Strict())
+	var call *openresponses.FunctionCall
+	for _, e := range s.Path(id) {
+		if it, ok := e.(*agentsession.ItemEntry); ok {
+			if fc, ok := it.Item.(*openresponses.FunctionCall); ok {
+				call = fc
+			}
+		}
+	}
+	if call == nil {
+		t.Fatal("the fixture holds no call")
+	}
+	if _, err := tools[0].Execute(context.Background(), agenttool.Call{ID: call.CallID, Args: json.RawMessage(call.Arguments)}); err != nil || ran != 0 {
+		t.Errorf("tools: %v, ran %d", err, ran)
+	}
+}
+
+// A later env entry naming another workspace, once a response was
+// recorded, is a substitution: a strict replay refuses the path unless
+// told to serve it.
+func TestStrictRefusesASubstitutedWorkspace(t *testing.T) {
+	container := &agentsession.Workspace{Kind: "container", Ref: "sha256:abc"}
+	local := &agentsession.Workspace{Kind: "local"}
+	env := func(cwd string, w *agentsession.Workspace) agentsession.Entry {
+		return &agentsession.EnvEntry{CWD: cwd, Workspace: w}
+	}
+	resp := func() agentsession.Entry {
+		return &agentsession.ResponseEntry{ResponseID: "resp", RequestHash: "sha256:0"}
+	}
+	tests := []struct {
+		name    string
+		entries []agentsession.Entry
+		subst   bool
+	}{
+		{"one workspace", []agentsession.Entry{env("/w", container), resp(), env("/w/sub", container), resp()}, false},
+		{"resumed elsewhere", []agentsession.Entry{env("/w", container), resp(), env("/w", local), resp()}, true},
+		{"named where it was absent", []agentsession.Entry{env("/w", nil), resp(), env("/w", local)}, true},
+		{"absent both times", []agentsession.Entry{env("/w", nil), resp(), env("/x", nil)}, false},
+		{"before any response", []agentsession.Entry{env("/w", container), env("/w", local), resp()}, false},
+		{"no env before", []agentsession.Entry{resp(), env("/w", local), resp()}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := agentsession.New(agentsession.Header{})
+			for _, e := range tt.entries {
+				if _, err := s.Append(e); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := replay.Unverifiable(s, "")
+			if got := errors.Is(err, replay.ErrSubstituted); got != tt.subst {
+				t.Fatalf("Unverifiable = %v, substitution %v want %v", err, got, tt.subst)
+			}
+			_, err = replay.NewModel(s, replay.Strict())
+			if got := errors.Is(err, replay.ErrSubstituted); got != tt.subst {
+				t.Errorf("strict NewModel = %v", err)
+			}
+			if !tt.subst {
+				return
+			}
+			if !errors.Is(err, replay.ErrUnverifiable) {
+				t.Errorf("a substitution is not ErrUnverifiable: %v", err)
+			}
+			// Every substituting case changes workspace at its third entry.
+			if !strings.Contains(err.Error(), tt.entries[2].Base().ID) {
+				t.Errorf("the error does not name the env entry: %v", err)
+			}
+			if _, err := replay.NewModel(s, replay.Strict(), replay.AllowSubstitution()); err != nil {
+				t.Errorf("AllowSubstitution: %v", err)
+			}
+			if err := replay.Unverifiable(s, "", replay.AllowSubstitution()); err != nil {
+				t.Errorf("Unverifiable with AllowSubstitution: %v", err)
+			}
+			if _, err := replay.NewModel(s); err != nil {
+				t.Errorf("lenient: %v", err)
+			}
+		})
+	}
+}

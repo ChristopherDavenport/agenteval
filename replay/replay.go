@@ -57,8 +57,21 @@ var ErrDiverged = errors.New("replay: diverged from the recording")
 // measured to differ, and the record simply does not say. [NewModel]
 // returns it for a path whose responses are not all hashed, and a
 // strict fold whose compaction entry recorded no fold hash returns it
-// at the call; [AllowUnhashed] serves both unchecked instead.
+// at the call; [AllowUnhashed] serves both unchecked instead. A path
+// whose workspace was substituted is refused with it too, as
+// [ErrSubstituted].
 var ErrUnverifiable = errors.New("replay: the record cannot say what was sent")
+
+// ErrSubstituted is returned by a strict [NewModel] for a path on which a later env entry names another
+// workspace than the one in force before it, after a response: RFC 0001
+// calls that a substitution, and a reader that holds the environment
+// fixed treats the path from it on as not verifiable against what came
+// before it. The recorded outputs after it came from another file
+// system than those before it, so a pass on one half says nothing
+// about the other. It wraps [ErrUnverifiable]: nothing was measured to
+// differ, and the record cannot be held to one environment.
+// [AllowSubstitution] serves the path anyway.
+var ErrSubstituted = fmt.Errorf("%w: the path changes workspace", ErrUnverifiable)
 
 // ErrExhausted is returned when the path holds no further recorded
 // call of the kind requested.
@@ -123,6 +136,7 @@ type Served struct {
 type options struct {
 	strict        bool
 	allowUnhashed bool
+	allowSubst    bool
 	leaf          string
 	observer      func(Served)
 	foldText      func(openresponses.Item) string
@@ -173,6 +187,15 @@ func Strict() Option { return func(o *options) { o.strict = true } }
 // a transform or a hook edited. Reach for it to replay an old session
 // at all, not to quiet a failure on a current one.
 func AllowUnhashed() Option { return func(o *options) { o.allowUnhashed = true } }
+
+// AllowSubstitution lets a strict model serve a path whose workspace
+// was substituted part way, which it otherwise refuses with
+// [ErrSubstituted]. The calls are still checked against their hashes;
+// what the caller accepts is that the tool outputs before and after the
+// substitution came from different file systems, as when a session
+// recorded in a container was resumed on a laptop and the replay is
+// meant to cover both halves.
+func AllowSubstitution() Option { return func(o *options) { o.allowSubst = true } }
 
 // WithLeaf names the path to serve. The default is the session's
 // current leaf, which after judging is an outcome entry rather than a
@@ -248,15 +271,16 @@ type Model struct {
 // named by [WithLeaf], or to the session's current leaf. A strict
 // model over a path a strict replay could not check is refused here
 // with [ErrUnverifiable], rather than at the call it could not check:
-// see [Unverifiable], and [AllowUnhashed] to serve it anyway.
+// see [Unverifiable], and [AllowUnhashed] and [AllowSubstitution] to
+// serve it anyway.
 func NewModel(s *agentsession.Session, opts ...Option) (*Model, error) {
 	o := apply(opts)
 	path, err := pathTo(s, o.leaf)
 	if err != nil {
 		return nil, err
 	}
-	if o.strict && !o.allowUnhashed {
-		if err := unverifiable(path); err != nil {
+	if o.strict {
+		if err := unverifiable(path, o); err != nil {
 			return nil, err
 		}
 	}
@@ -333,6 +357,12 @@ func pathTo(s *agentsession.Session, leaf string) ([]agentsession.Entry, error) 
 	if leaf == "" {
 		return nil, errors.New("replay: session has no entries")
 	}
+	// An ID from before the 0.5 migration names the entry that carries
+	// it as its legacy_id, as export.At resolves it, so a target in an
+	// old report replays as it exports.
+	if id, ok := s.Resolve(leaf); ok {
+		leaf = id
+	}
 	path := s.Path(leaf)
 	if path == nil {
 		return nil, fmt.Errorf("replay: %w: %s", agentsession.ErrNoEntry, leaf)
@@ -343,10 +373,13 @@ func pathTo(s *agentsession.Session, leaf string) ([]agentsession.Entry, error) 
 // Unverifiable reports whether a strict replay of the path to leaf, or
 // to the session's current leaf when leaf is empty, could check every
 // call it serves. It returns nil when it could, and an error wrapping
-// [ErrUnverifiable] naming how many responses are unhashed when it
-// could not. An error that does not wrap [ErrUnverifiable] is the
-// failure to resolve leaf to a path at all, which says nothing either
-// way about the record.
+// [ErrUnverifiable] when it could not: one naming how many responses
+// are unhashed, one wrapping [ErrSubstituted] naming the env entry that
+// changed workspace, or both joined. An error that does not wrap
+// [ErrUnverifiable] is the failure to resolve leaf to a path at all,
+// which says nothing either way about the record. [AllowUnhashed] and
+// [AllowSubstitution] among opts leave out what they allow, as they do
+// for [NewModel]; the other options are ignored.
 //
 // The recorder writes a response without a request hash when the path
 // it wrote does not rebuild that request's input: what a compacting
@@ -359,20 +392,32 @@ func pathTo(s *agentsession.Session, leaf string) ([]agentsession.Entry, error) 
 // This is the rule [NewModel] applies to the path it builds, exported
 // so a caller can ask before building a model or running a suite
 // rather than find out at the call.
-func Unverifiable(s *agentsession.Session, leaf string) error {
+func Unverifiable(s *agentsession.Session, leaf string, opts ...Option) error {
 	path, err := pathTo(s, leaf)
 	if err != nil {
 		return err
 	}
-	return unverifiable(path)
+	return unverifiable(path, apply(opts))
 }
 
 // unverifiable is [Unverifiable] over a path already in hand. Folds
 // are not counted here: a compaction entry with no fold hash matters
 // only if the replay folds locally, which is not known until the call,
 // so serveFold decides that one.
-func unverifiable(path []agentsession.Entry) error {
-	unhashed, responses := 0, 0
+func unverifiable(path []agentsession.Entry, o options) error {
+	var errs []error
+	if !o.allowUnhashed {
+		errs = append(errs, unhashed(path))
+	}
+	if !o.allowSubst {
+		errs = append(errs, substituted(path))
+	}
+	return errors.Join(errs...)
+}
+
+// unhashed reports the responses on path that carry no request hash.
+func unhashed(path []agentsession.Entry) error {
+	n, responses := 0, 0
 	for _, e := range path {
 		r, ok := e.(*agentsession.ResponseEntry)
 		if !ok {
@@ -380,13 +425,54 @@ func unverifiable(path []agentsession.Entry) error {
 		}
 		responses++
 		if r.RequestHash == "" {
-			unhashed++
+			n++
 		}
 	}
-	if unhashed == 0 {
+	if n == 0 {
 		return nil
 	}
-	return fmt.Errorf("%w: %d of %d responses on the path carry no request hash", ErrUnverifiable, unhashed, responses)
+	return fmt.Errorf("%w: %d of %d responses on the path carry no request hash", ErrUnverifiable, n, responses)
+}
+
+// substituted reports the first env entry on path whose workspace
+// differs from the one in force before it, once a response was
+// recorded. Before the first env entry no workspace is in force, and
+// before the first response nothing was recorded to hold fixed, so
+// neither is a substitution.
+func substituted(path []agentsession.Entry) error {
+	var inForce *agentsession.EnvEntry
+	responded := false
+	for _, e := range path {
+		switch v := e.(type) {
+		case *agentsession.ResponseEntry:
+			responded = true
+		case *agentsession.EnvEntry:
+			if inForce != nil && responded && !sameWorkspace(inForce.Workspace, v.Workspace) {
+				return fmt.Errorf("%w: env entry %s runs in %s where the path before it ran in %s", ErrSubstituted, v.ID, describeWorkspace(v.Workspace), describeWorkspace(inForce.Workspace))
+			}
+			inForce = v
+		}
+	}
+	return nil
+}
+
+// sameWorkspace compares two workspace members as RFC 0001 does: as
+// members, with an absent one equal only to another absent one.
+func sameWorkspace(a, b *agentsession.Workspace) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+func describeWorkspace(w *agentsession.Workspace) string {
+	switch {
+	case w == nil:
+		return "no named workspace"
+	case w.Ref == "":
+		return w.Kind
+	}
+	return w.Kind + " " + w.Ref
 }
 
 // Steps returns how many recorded calls, responses and folds, the path

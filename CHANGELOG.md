@@ -5,6 +5,42 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+### Added
+
+- `Runner.Build` hosts a configuration whose construction can fail or
+  holds something to release, such as an agentkit kit: its error goes
+  on `Result.Err` rather than surfacing as "config has no model", and
+  the close it returns is called once the task is done. It wins over
+  `ConfigWith` and `Config`. (#23)
+- `Runner.SessionOptions` supplies the options each run's recorder is
+  opened with, so a kit-built configuration records its instructions
+  parts through `session.WithInstructionsParts`. (#23)
+- `replay.ErrSubstituted` and `replay.AllowSubstitution()`. A strict
+  replay refuses a path on which a later env entry names another
+  workspace than the one in force before it, after a response, which
+  RFC 0001 calls a substitution; the error wraps `ErrUnverifiable` and
+  names the env entry. `replay.Unverifiable` reports it too, and takes
+  `AllowUnhashed` and `AllowSubstitution` to ask about one rule alone.
+  `ErrUnreplayable` no longer blames an unbound `WithOnFold` for a
+  substitution. (#26)
+
+### Fixed
+
+- A replayed tool reports every property the original declares:
+  `replay.Tools` wraps each tool with `agenttool.Wrap`, so confinement,
+  resource, annotations, replay safety and `io.Closer` reach a policy
+  and the executor, and a strict replay under the live policy no
+  longer asks where the live run did not. (#22)
+- `replay.WithLeaf`, `NewModel`, `Unverifiable` and `Tools` resolve an
+  entry ID from before the 0.5 migration through its `legacy_id`, as
+  `export.At` does. (#24)
+- A task whose `Header` names a `Base` starts its agent from the
+  context at the base, which `session.Start` seeds the recorder with,
+  so the fork's requests are hashed and it replays strictly; it was
+  run unseeded and reported `ErrUnreplayable`. (#25)
+
 ## v0.0.5 - 2026-09-28
 
 ### Added

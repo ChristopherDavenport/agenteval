@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -154,6 +155,58 @@ func TestToolsKeepTheDefinition(t *testing.T) {
 	tools = replay.Tools(s, []agenttool.Tool{real}, replay.Strict())
 	if _, err := tools[0].Execute(context.Background(), agenttool.Call{ID: "pending", Args: json.RawMessage(`{"text":"p"}`)}); !errors.Is(err, replay.ErrDiverged) {
 		t.Errorf("pending call: err = %v", err)
+	}
+}
+
+// A policy reads the tool as well as the result: a replayed tool
+// reports every property the original declares, so a call the live run
+// allowed because its tool ran confined is not asked about on replay.
+func TestToolsKeepEveryProperty(t *testing.T) {
+	s := recordedSession(t, [2]string{"call_1", `{"text":"a"}`})
+	args := json.RawMessage(`{"text":"a"}`)
+	closed := 0
+	body := func(_ context.Context, a upperArgs) (string, error) { return a.Text, nil }
+	tests := []struct {
+		name string
+		tool agenttool.Tool
+	}{
+		{"bare", agenttool.New("upper", "Uppercase the text", body)},
+		{"sequential", agenttool.New("upper", "Uppercase the text", body, agenttool.WithSequential(), agenttool.WithStrict())},
+		{"declared", agenttool.New("upper", "Uppercase the text", body,
+			agenttool.WithResource("fs"),
+			agenttool.WithAnnotations(agenttool.Annotations{Title: "Shell", ReadOnly: true}),
+			agenttool.WithConfined(func(context.Context, json.RawMessage) (bool, string) { return true, "landlock+seccomp" }),
+			agenttool.WithReplay(func(context.Context, json.RawMessage) agenttool.Replay { return agenttool.ReplaySafe }),
+			agenttool.WithCloser(func() error { closed++; return nil }),
+		)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			got := replay.Tools(s, []agenttool.Tool{tt.tool}, replay.Strict())[0]
+			describe := func(tool agenttool.Tool) string {
+				confined, by := agenttool.ConfinedBy(ctx, tool, args)
+				_, closer := tool.(io.Closer)
+				return fmt.Sprintf("strict=%v sequential=%v resource=%q annotations=%+v confined=%v %q replay=%s closer=%v",
+					agenttool.IsStrict(tool), agenttool.IsSequential(tool), agenttool.ResourceOf(tool),
+					agenttool.AnnotationsOf(tool), confined, by, agenttool.ReplayOf(ctx, tool, args), closer)
+			}
+			if g, w := describe(got), describe(tt.tool); g != w {
+				t.Errorf("replayed tool:\n got %s\nwant %s", g, w)
+			}
+			if agenttool.Unwrap(got) != tt.tool {
+				t.Error("Unwrap does not return the original")
+			}
+			res, err := got.Execute(ctx, agenttool.Call{ID: "call_1", Args: args})
+			if err != nil || res.Output.String() != "recorded:a" {
+				t.Errorf("served %+v, %v", res, err)
+			}
+		})
+	}
+	if c, ok := replay.Tools(s, []agenttool.Tool{tests[2].tool})[0].(io.Closer); ok {
+		if err := c.Close(); err != nil || closed != 1 {
+			t.Errorf("close: %v, closed %d times", err, closed)
+		}
 	}
 }
 

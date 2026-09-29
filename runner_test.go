@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -816,4 +817,135 @@ func TestRunnerConfigWithAnnotates(t *testing.T) {
 	if _, _, unhashed := countPath(s, res.Target); unhashed != 0 {
 		t.Errorf("%d responses carry no request hash", unhashed)
 	}
+}
+
+// Build hosts a configuration that can fail to build and holds
+// something to release, and SessionOptions opens the recorder with the
+// options such a configuration needs recorded.
+func TestRunnerBuild(t *testing.T) {
+	suite := &agenteval.Suite{Name: "s", Tasks: []agenteval.Task{{ID: "one", Instruction: "hello"}, {ID: "two", Instruction: "hi"}}}
+	parts := []agentsession.InstructionPart{{ID: "product", Text: "Be brief."}, {ID: "agentsmd", Text: "Use Go."}}
+
+	t.Run("parts and close", func(t *testing.T) {
+		store := newStableStore()
+		closed := 0
+		r := &agenteval.Runner{
+			Store: store,
+			SessionOptions: func(agenteval.Task) []session.Option {
+				return []session.Option{session.WithInstructionsParts(func(openresponses.Request) ([]agentsession.InstructionPart, []agentsession.OmittedPart) {
+					return parts, nil
+				})}
+			},
+			Build: func(_ context.Context, _ agenteval.Task, _ *session.Recorder) (agentturn.Config, func() error, error) {
+				cfg := echoConfig()
+				cfg.Instructions = agentsession.JoinInstructions(parts)
+				return cfg, func() error { closed++; return nil }, nil
+			},
+		}
+		report, err := r.Run(context.Background(), suite)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if closed != len(suite.Tasks) {
+			t.Errorf("closed %d times, want once per task", closed)
+		}
+		for _, res := range report.Results {
+			if res.Err != nil {
+				t.Fatalf("%s: %v", res.Task.ID, res.Err)
+			}
+			s, err := store.Open(context.Background(), res.SessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, e := range s.Path(res.Target) {
+				if c, ok := e.(*agentsession.ConfigEntry); ok {
+					for _, p := range c.InstructionsParts {
+						got = append(got, p.ID)
+					}
+				}
+			}
+			if strings.Join(got, ",") != "product,agentsmd" {
+				t.Errorf("%s: config entries carry parts %v", res.Task.ID, got)
+			}
+		}
+	})
+
+	t.Run("build fails", func(t *testing.T) {
+		closed := 0
+		r := &agenteval.Runner{
+			Store: newStableStore(),
+			Build: func(context.Context, agenteval.Task, *session.Recorder) (agentturn.Config, func() error, error) {
+				return agentturn.Config{}, func() error { closed++; return errors.New("release failed") }, errors.New("no skills directory")
+			},
+		}
+		report, err := r.Run(context.Background(), suite)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, res := range report.Results {
+			msg := fmt.Sprint(res.Err)
+			if !strings.Contains(msg, "build: no skills directory") || !strings.Contains(msg, "close: release failed") || strings.Contains(msg, "no model") {
+				t.Errorf("%s: err = %v", res.Task.ID, res.Err)
+			}
+			if res.Runs != 0 {
+				t.Errorf("%s: %d runs after a failed build", res.Task.ID, res.Runs)
+			}
+		}
+		if closed != len(suite.Tasks) {
+			t.Errorf("closed %d times, want once per task", closed)
+		}
+	})
+}
+
+// A header naming a base forks that session, and the agent starts from
+// the context there: the fork's requests are hashed and it replays
+// strictly.
+func TestRunnerForksAtABase(t *testing.T) {
+	ctx := context.Background()
+	store := newStableStore()
+	first, err := basicRunner(store).Run(ctx, basicSuite(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin := first.Results[0]
+	r := &agenteval.Runner{
+		Store:  store,
+		Config: basicConfig,
+		Header: func(agenteval.Task) agentsession.Header {
+			return agentsession.Header{ParentSession: origin.SessionID, Base: origin.Target}
+		},
+		Judges: []agenteval.Judge{judge.ToolCalled("upper")},
+	}
+	report, err := r.Run(ctx, &agenteval.Suite{Name: "fork", Tasks: []agenteval.Task{{ID: "more", Instruction: "again"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := report.Results[0]
+	if res.Err != nil {
+		t.Fatalf("err = %v", res.Err)
+	}
+	s, err := store.Open(ctx, res.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, unhashed := countPath(s, res.Target); unhashed != 0 {
+		t.Errorf("%d responses carry no request hash", unhashed)
+	}
+	if n := verifyAll(t, s); n == 0 {
+		t.Error("no responses")
+	}
+	// The fork's first request carried the origin's transcript.
+	model, err := replay.NewModel(s, replay.Strict(), replay.WithLeaf(res.Target))
+	if err != nil {
+		t.Fatalf("strict replay: %v", err)
+	}
+	if originS, _ := store.Open(ctx, origin.SessionID); model.Steps() <= countResponses(originS, origin.Target) {
+		t.Errorf("the fork's path holds %d steps, no more than its origin's", model.Steps())
+	}
+}
+
+func countResponses(s *agentsession.Session, leaf string) int {
+	_, responses, _ := countPath(s, leaf)
+	return responses
 }
