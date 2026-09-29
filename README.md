@@ -38,7 +38,13 @@ A configuration that needs the run's recorder takes `ConfigWith`
 instead: a compacting configuration binds `compact.WithOnFold` there,
 without which its folds reach no session and the run cannot be
 replayed, and a layer that annotates the run it is in keeps the same
-recorder. `Answer` answers the calls a run left pending when it ended
+recorder. A configuration whose construction can fail or holds
+something to release, such as an agentkit kit, takes `Build`, which
+returns an error and a close; `SessionOptions` opens each run's
+recorder with options such as `session.WithInstructionsParts`, so the
+session records which instructions part changed. A `Header` that names
+a `Base` forks that session, and the agent starts from the context
+there. `Answer` answers the calls a run left pending when it ended
 `input_required` and resumes it, so a product whose policy asks is
 measured over the whole run rather than the part before its first ask.
 
