@@ -7,6 +7,24 @@ versions may break the API.
 
 ## Unreleased
 
+### Added
+
+- A result `replay.Tools` serves carries the record its call's result
+  carried as its `Details`, so a wrapper that acts on a result's
+  details acts on a replayed call as it did on the live one: a grant
+  made on a skill read is made again, and a replay no longer asks where
+  the record did not. The record is the tool's custom entry beside the
+  call, found by its `call_id` and, in a session from before
+  `agentsession/0.6`, by position when one call alone was waiting for
+  its output. It is served as a `replay.Record`, which is itself
+  `Recordable`, so the replayed session holds the record again beside
+  the served call; `replay.DetailsAs[T]()` serves the records of T's
+  namespace decoded as a T, for a wrapper that asserts its type. A
+  wrapper the product builds inside the tools it hands over, as
+  agentkit's granting wrapper is, still sits under the replay and sees
+  nothing; the seam to wrap each tool where it is made is agentkit's,
+  filed there. (#17)
+
 ### Fixed
 
 - `Result.Usage` and `Result.CostUSD` count the folds a compacting

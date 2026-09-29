@@ -4,12 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/ChristopherDavenport/agenteval/replay"
 	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agenttool"
+	"github.com/ChristopherDavenport/agentturn"
+	"github.com/ChristopherDavenport/agentturn/session"
 	"github.com/ChristopherDavenport/openresponses"
+	"github.com/ChristopherDavenport/openresponses/echo"
 )
 
 // recordedSession builds a session holding calls to upper with the
@@ -149,5 +154,221 @@ func TestToolsKeepTheDefinition(t *testing.T) {
 	tools = replay.Tools(s, []agenttool.Tool{real}, replay.Strict())
 	if _, err := tools[0].Execute(context.Background(), agenttool.Call{ID: "pending", Args: json.RawMessage(`{"text":"p"}`)}); !errors.Is(err, replay.ErrDiverged) {
 		t.Errorf("pending call: err = %v", err)
+	}
+}
+
+// skillRead stands in for a Details value a wrapper acts on by its
+// type, as agentkit's granting wrapper does on agentskill.Read.
+type skillRead struct {
+	Name string `json:"name"`
+}
+
+func (skillRead) RecordNS() string { return "test:read" }
+
+// custom appends a custom entry, naming callID when it is not empty.
+func custom(t *testing.T, s *agentsession.Session, ns, data, callID string) {
+	t.Helper()
+	if _, err := s.Append(&agentsession.CustomEntry{NS: ns, Data: json.RawMessage(data), CallID: callID}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// callItem and outputItem append one call to upper and its output.
+func callItem(t *testing.T, s *agentsession.Session, callID, text string) {
+	t.Helper()
+	if _, err := s.Append(&agentsession.ItemEntry{Item: &openresponses.FunctionCall{CallID: callID, Name: "upper", Arguments: `{"text":"` + text + `"}`}, ResponseID: "resp_1"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func outputItem(t *testing.T, s *agentsession.Session, callID, text string) {
+	t.Helper()
+	if _, err := s.Append(&agentsession.ItemEntry{Item: openresponses.NewFunctionCallOutput(callID, "recorded:"+text)}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestToolsServeTheRecord is issue 17: a served result carries the
+// record its call's result carried as its Details, so a wrapper that
+// acts on Details acts on a replayed call.
+func TestToolsServeTheRecord(t *testing.T) {
+	tests := []struct {
+		name  string
+		build func(t *testing.T, s *agentsession.Session)
+		opts  []replay.Option
+		// want is the served Details, nil for none.
+		want    any
+		wantErr bool
+	}{
+		{
+			name: "named by call_id",
+			build: func(t *testing.T, s *agentsession.Session) {
+				callItem(t, s, "call_1", "one")
+				custom(t, s, "test:read", `{"name":"one"}`, "call_1")
+				outputItem(t, s, "call_1", "one")
+			},
+			want: replay.Record{NS: "test:read", Data: json.RawMessage(`{"name":"one"}`)},
+		},
+		{
+			name: "decoded as the type asked for",
+			build: func(t *testing.T, s *agentsession.Session) {
+				callItem(t, s, "call_1", "one")
+				custom(t, s, "test:read", `{"name":"one"}`, "call_1")
+				outputItem(t, s, "call_1", "one")
+			},
+			opts: []replay.Option{replay.DetailsAs[skillRead]()},
+			want: skillRead{Name: "one"},
+		},
+		{
+			name: "the last before the output",
+			build: func(t *testing.T, s *agentsession.Session) {
+				callItem(t, s, "call_1", "one")
+				custom(t, s, "test:written", `{"n":1}`, "call_1")
+				custom(t, s, "test:read", `{"name":"one"}`, "call_1")
+				outputItem(t, s, "call_1", "one")
+				custom(t, s, "test:after", `{}`, "call_1")
+			},
+			want: replay.Record{NS: "test:read", Data: json.RawMessage(`{"name":"one"}`)},
+		},
+		{
+			name: "by position before call_id",
+			build: func(t *testing.T, s *agentsession.Session) {
+				callItem(t, s, "call_1", "one")
+				custom(t, s, "test:read", `{"name":"one"}`, "")
+				outputItem(t, s, "call_1", "one")
+			},
+			want: replay.Record{NS: "test:read", Data: json.RawMessage(`{"name":"one"}`)},
+		},
+		{
+			name: "not by position in a parallel batch",
+			build: func(t *testing.T, s *agentsession.Session) {
+				callItem(t, s, "call_1", "one")
+				callItem(t, s, "call_2", "two")
+				custom(t, s, "test:read", `{"name":"one"}`, "")
+				outputItem(t, s, "call_1", "one")
+				outputItem(t, s, "call_2", "two")
+			},
+		},
+		{
+			name: "not the recorder's own",
+			build: func(t *testing.T, s *agentsession.Session) {
+				callItem(t, s, "call_1", "one")
+				custom(t, s, session.NestedCallNS, `{}`, "call_1")
+				custom(t, s, session.ElicitationNS, `{}`, "call_1")
+				outputItem(t, s, "call_1", "one")
+			},
+		},
+		{
+			name: "another call's",
+			build: func(t *testing.T, s *agentsession.Session) {
+				callItem(t, s, "call_1", "one")
+				custom(t, s, "test:read", `{"name":"zero"}`, "call_0")
+				outputItem(t, s, "call_1", "one")
+			},
+		},
+		{
+			name: "a record that does not decode",
+			build: func(t *testing.T, s *agentsession.Session) {
+				callItem(t, s, "call_1", "one")
+				custom(t, s, "test:read", `{"name":1}`, "call_1")
+				outputItem(t, s, "call_1", "one")
+			},
+			opts:    []replay.Option{replay.DetailsAs[skillRead]()},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := agentsession.New(agentsession.Header{})
+			tt.build(t, s)
+			ran := 0
+			tools := replay.Tools(s, []agenttool.Tool{upperTool(&ran)}, append(tt.opts, replay.Strict())...)
+			res, err := tools[0].Execute(context.Background(), agenttool.Call{ID: "call_1", Args: json.RawMessage(`{"text":"one"}`)})
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("served a record that does not decode")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ran != 0 {
+				t.Errorf("the real tool ran %d time(s)", ran)
+			}
+			got, _ := json.Marshal(res.Details)
+			want, _ := json.Marshal(tt.want)
+			if fmt.Sprintf("%T %s", res.Details, got) != fmt.Sprintf("%T %s", tt.want, want) {
+				t.Errorf("details = %T %s, want %T %s", res.Details, got, tt.want, want)
+			}
+		})
+	}
+}
+
+// reading is upper with a Recordable Details value, as a skill tool's
+// read is.
+type reading struct{ agenttool.Tool }
+
+func (r reading) Execute(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
+	res, err := r.Tool.Execute(ctx, call)
+	var a upperArgs
+	_ = json.Unmarshal(call.Args, &a)
+	res.Details = skillRead{Name: a.Text}
+	return res, err
+}
+
+// granting records the Details it sees by type, as a wrapper that
+// grants on a skill read does.
+type granting struct {
+	agenttool.Tool
+	granted *[]string
+}
+
+func (g granting) Execute(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
+	res, err := g.Tool.Execute(ctx, call)
+	if r, ok := res.Details.(skillRead); ok {
+		*g.granted = append(*g.granted, r.Name)
+	}
+	return res, err
+}
+
+// TestReplayedWrapperActsOnDetails records a live run whose tool's
+// Details are recordable and replays it under a wrapper that acts on
+// them: the wrapper acts as it did live, and the replayed session holds
+// the record beside the served call.
+func TestReplayedWrapperActsOnDetails(t *testing.T) {
+	ran := 0
+	var live []string
+	orig, end, err := rerun(t, fixtureConfig(&echo.Adapter{}, granting{reading{upperTool(&ran)}, &live}), "hello world")
+	if err != nil || end.Reason != agentturn.ReasonDone {
+		t.Fatalf("live run: %v %v", end, err)
+	}
+	if len(live) != 1 || ran != 1 {
+		t.Fatalf("live run granted %v and ran the tool %d time(s)", live, ran)
+	}
+	model, err := replay.NewModel(orig, replay.Strict())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var replayed []string
+	tools := replay.Tools(orig, []agenttool.Tool{reading{upperTool(&ran)}}, replay.Strict(), replay.DetailsAs[skillRead]())
+	s, end, err := rerun(t, fixtureConfig(model, granting{tools[0], &replayed}), "hello world")
+	if err != nil || end.Reason != agentturn.ReasonDone {
+		t.Fatalf("replay: %v %v", end, err)
+	}
+	if ran != 1 {
+		t.Errorf("the replay ran the real tool")
+	}
+	if strings.Join(replayed, ",") != strings.Join(live, ",") {
+		t.Errorf("the replay granted %v, the live run %v", replayed, live)
+	}
+	var records []string
+	for _, e := range s.Path(s.Leaf()) {
+		if c, ok := e.(*agentsession.CustomEntry); ok && c.NS == "test:read" {
+			records = append(records, c.CallID+" "+string(c.Data))
+		}
+	}
+	if len(records) != 1 || !strings.HasSuffix(records[0], `{"name":"hello world"}`) || strings.HasPrefix(records[0], " ") {
+		t.Errorf("the replayed session's records: %q", records)
 	}
 }

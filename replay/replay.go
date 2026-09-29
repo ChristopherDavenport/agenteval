@@ -126,6 +126,7 @@ type options struct {
 	leaf          string
 	observer      func(Served)
 	foldText      func(openresponses.Item) string
+	details       map[string]func(json.RawMessage) (any, error)
 }
 
 // Option configures a [Model] or [Tools].

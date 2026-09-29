@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/ChristopherDavenport/agentsession"
@@ -11,12 +12,64 @@ import (
 	"github.com/ChristopherDavenport/openresponses"
 )
 
-// recorded is one function call on the path with its output.
+// recorded is one function call on the path with its output and the
+// record its tool's result carried, when it carried one.
 type recorded struct {
 	entryID string
 	call    *openresponses.FunctionCall
 	output  *openresponses.FunctionCallOutput
+	record  *agentsession.CustomEntry
 }
+
+// Record is the Details of a served result whose recorded call carried
+// a record: the namespace and data of the custom entry the recorder
+// wrote beside the call from the result's [agenttool.Recordable]
+// Details. It is itself Recordable, marshalling to the data as
+// recorded, so a recorder on the replayed run writes the same record
+// beside the served call. A wrapper that wants its own type back asks
+// for it with [DetailsAs].
+type Record struct {
+	NS   string
+	Data json.RawMessage
+}
+
+// RecordNS returns the namespace the recorded tool chose.
+func (r Record) RecordNS() string { return r.NS }
+
+// MarshalJSON returns the data as recorded.
+func (r Record) MarshalJSON() ([]byte, error) {
+	if len(r.Data) == 0 {
+		return []byte("null"), nil
+	}
+	return r.Data, nil
+}
+
+// DetailsAs serves the record of a call in T's namespace as a T,
+// decoded from its JSON, where it would be a [Record]: a wrapper that
+// acts on a result's Details by its type, such as one that grants a
+// skill's tools when the Details are the skill's read, then sees what
+// the live tool returned. The namespace is the one T's zero value
+// reports. Several may be given, one per namespace. A record that does
+// not decode as a T fails the call.
+func DetailsAs[T agenttool.Recordable]() Option {
+	var zero T
+	ns := zero.RecordNS()
+	return func(o *options) {
+		if o.details == nil {
+			o.details = map[string]func(json.RawMessage) (any, error){}
+		}
+		o.details[ns] = func(data json.RawMessage) (any, error) {
+			var v T
+			err := json.Unmarshal(data, &v)
+			return v, err
+		}
+	}
+}
+
+// harnessNS is the prefix of the namespaces agentturn's recorder
+// writes for itself, a nested call or an elicitation among them. A
+// record under it is not a tool's Details.
+const harnessNS = "agentturn:"
 
 // recording indexes the calls on a path by call ID and by name and
 // canonical arguments. Calls with the same name and arguments are
@@ -38,6 +91,15 @@ type recording struct {
 // not JSON compare byte for byte. A call with no recorded output runs
 // the real tool, or fails with [ErrDiverged] when Strict. A tool's
 // name, description, schema, strictness and sequencing are unchanged.
+//
+// A served result carries the record its call's result carried as its
+// Details, as a [Record] or as the type [DetailsAs] names, so a wrapper
+// that acts on Details acts on a served call as it did on the live one.
+// The record is the last custom entry naming the call in its call_id
+// before the call's output, outside agentturn's own namespaces. A
+// session written before call_id was defined names no call; there the
+// record is taken by position, when one call alone was waiting for its
+// output, and a call of a parallel batch is served without one.
 // A session with no path to the leaf named holds no recordings, so
 // every call falls through, or fails when Strict.
 func Tools(s *agentsession.Session, tools []agenttool.Tool, opts ...Option) []agenttool.Tool {
@@ -58,7 +120,27 @@ func Tools(s *agentsession.Session, tools []agenttool.Tool, opts ...Option) []ag
 func (r *recording) index(path []agentsession.Entry) {
 	calls := map[string]*recorded{}
 	var order []*recorded
+	// waiting holds the calls with no output yet, for a record that
+	// names no call.
+	waiting := map[string]*recorded{}
 	for _, e := range path {
+		if rec, ok := e.(*agentsession.CustomEntry); ok {
+			if strings.HasPrefix(rec.NS, harnessNS) {
+				continue
+			}
+			if rec.CallID != "" {
+				if c, ok := waiting[rec.CallID]; ok {
+					c.record = rec
+				}
+				continue
+			}
+			if len(waiting) == 1 {
+				for _, c := range waiting {
+					c.record = rec
+				}
+			}
+			continue
+		}
 		item, ok := e.(*agentsession.ItemEntry)
 		if !ok {
 			continue
@@ -70,11 +152,13 @@ func (r *recording) index(path []agentsession.Entry) {
 			}
 			c := &recorded{call: v}
 			calls[v.CallID] = c
+			waiting[v.CallID] = c
 			order = append(order, c)
 		case *openresponses.FunctionCallOutput:
 			if c, ok := calls[v.CallID]; ok && c.output == nil {
 				c.output = v
 				c.entryID = item.ID
+				delete(waiting, v.CallID)
 			}
 		}
 	}
@@ -160,7 +244,18 @@ func (t *replayed) Execute(ctx context.Context, call agenttool.Call) (agenttool.
 	if t.rec.opts.observer != nil {
 		t.rec.opts.observer(Served{Kind: KindCall, N: t.rec.count(), EntryID: c.entryID, CallID: c.call.CallID, Name: t.Name(), ByID: byID, Match: true})
 	}
-	return agenttool.Result{Output: c.output.Output}, nil
+	res := agenttool.Result{Output: c.output.Output}
+	if c.record != nil {
+		res.Details = Record{NS: c.record.NS, Data: c.record.Data}
+		if decode, ok := t.rec.opts.details[c.record.NS]; ok {
+			v, err := decode(c.record.Data)
+			if err != nil {
+				return agenttool.Result{}, fmt.Errorf("replay: call %s to %s: record %s: %w", c.call.CallID, t.Name(), c.record.NS, err)
+			}
+			res.Details = v
+		}
+	}
+	return res, nil
 }
 
 // Sequential reports the wrapped tool's answer.
@@ -173,4 +268,6 @@ var (
 	_ agenttool.Tool       = (*replayed)(nil)
 	_ agenttool.Sequential = (*replayed)(nil)
 	_ agenttool.Strict     = (*replayed)(nil)
+
+	_ agenttool.Recordable = Record{}
 )
