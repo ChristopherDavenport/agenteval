@@ -447,22 +447,13 @@ func substituted(path []agentsession.Entry) error {
 		case *agentsession.ResponseEntry:
 			responded = true
 		case *agentsession.EnvEntry:
-			if inForce != nil && responded && !sameWorkspace(inForce.Workspace, v.Workspace) {
+			if inForce != nil && responded && !agentsession.SameWorkspace(inForce.Workspace, v.Workspace) {
 				return fmt.Errorf("%w: env entry %s runs in %s where the path before it ran in %s", ErrSubstituted, v.ID, describeWorkspace(v.Workspace), describeWorkspace(inForce.Workspace))
 			}
 			inForce = v
 		}
 	}
 	return nil
-}
-
-// sameWorkspace compares two workspace members as RFC 0001 does: as
-// members, with an absent one equal only to another absent one.
-func sameWorkspace(a, b *agentsession.Workspace) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	return *a == *b
 }
 
 func describeWorkspace(w *agentsession.Workspace) string {

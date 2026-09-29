@@ -832,7 +832,7 @@ func TestRunnerBuild(t *testing.T) {
 		r := &agenteval.Runner{
 			Store: store,
 			SessionOptions: func(agenteval.Task) []session.Option {
-				return []session.Option{session.WithInstructionsParts(func(openresponses.Request) ([]agentsession.InstructionPart, []agentsession.OmittedPart) {
+				return []session.Option{session.WithInstructionsParts(func(context.Context, openresponses.Request) ([]agentsession.InstructionPart, []agentsession.OmittedPart) {
 					return parts, nil
 				})}
 			},

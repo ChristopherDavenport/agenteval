@@ -1046,6 +1046,13 @@ func TestLegacyLeafResolves(t *testing.T) {
 func TestStrictRefusesASubstitutedWorkspace(t *testing.T) {
 	container := &agentsession.Workspace{Kind: "container", Ref: "sha256:abc"}
 	local := &agentsession.Workspace{Kind: "local"}
+	onHost := func(host string) *agentsession.Workspace {
+		w := &agentsession.Workspace{Kind: "container", Ref: "sha256:abc"}
+		if err := w.SetMember("host", host); err != nil {
+			t.Fatal(err)
+		}
+		return w
+	}
 	env := func(cwd string, w *agentsession.Workspace) agentsession.Entry {
 		return &agentsession.EnvEntry{CWD: cwd, Workspace: w}
 	}
@@ -1059,6 +1066,8 @@ func TestStrictRefusesASubstitutedWorkspace(t *testing.T) {
 	}{
 		{"one workspace", []agentsession.Entry{env("/w", container), resp(), env("/w/sub", container), resp()}, false},
 		{"resumed elsewhere", []agentsession.Entry{env("/w", container), resp(), env("/w", local), resp()}, true},
+		{"same image on one host", []agentsession.Entry{env("/w", onHost("a")), resp(), env("/w", onHost("a")), resp()}, false},
+		{"same image on another host", []agentsession.Entry{env("/w", onHost("a")), resp(), env("/w", onHost("b")), resp()}, true},
 		{"named where it was absent", []agentsession.Entry{env("/w", nil), resp(), env("/w", local)}, true},
 		{"absent both times", []agentsession.Entry{env("/w", nil), resp(), env("/x", nil)}, false},
 		{"before any response", []agentsession.Entry{env("/w", container), env("/w", local), resp()}, false},

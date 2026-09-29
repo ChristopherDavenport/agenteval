@@ -26,6 +26,18 @@ versions may break the API.
   `ErrUnreplayable` no longer blames an unbound `WithOnFold` for a
   substitution. (#26)
 
+### Changed
+
+- Requires agentsession v0.0.11, agenttool v0.0.10 and agentturn and
+  its `session` module v0.0.11. Runs are recorded as
+  `agentsession/0.8`, and the callback given to
+  `session.WithInstructionsParts` through `Runner.SessionOptions` now
+  takes a `context.Context` first.
+- A strict replay's substitution check is `agentsession.SameWorkspace`,
+  so members of a workspace the format does not define, such as its
+  host, count: the same image resumed on another host is a
+  substitution.
+
 ### Fixed
 
 - A replayed tool reports every property the original declares:
