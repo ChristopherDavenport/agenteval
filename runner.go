@@ -83,14 +83,15 @@ type Result struct {
 	Resumes int `json:"resumes,omitempty"`
 	// ResumeBound says a prompt was still waiting on input when
 	// [Runner.MaxResumes] stopped resuming it, where a task that ends
-	// input_required without it stopped because Answer had nothing to
-	// say or failed.
+	// input_required without it stopped because there was no Answer,
+	// or it had nothing to say or failed.
 	ResumeBound bool `json:"resume_bound,omitempty"`
 	// Usage is the sum over the model calls on the run's path: every
 	// response, and every fold or branch summary that reported usage.
 	// It is the path the exported document's final metrics sum, and the
 	// runner prices each call under the model the exporter does, so
-	// with the same price hook the two agree on the total.
+	// with the same price hook the two agree on the total whenever
+	// every call was priced.
 	Usage openresponses.Usage `json:"usage"`
 	// CostUSD is the run's cost under Runner.Cost, when every call was
 	// priced.

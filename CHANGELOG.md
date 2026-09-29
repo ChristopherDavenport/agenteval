@@ -20,6 +20,10 @@ versions may break the API.
   `Recordable`, so the replayed session holds the record again beside
   the served call; `replay.DetailsAs[T]()` serves the records of T's
   namespace decoded as a T, for a wrapper that asserts its type. A
+  nested call's record is not its parent's; a record the tool wrote
+  through `agenttool.WriteRecord` names the call as its result's does
+  and cannot be told from it, so a tool whose details are not
+  recordable and that wrote one is served that one. A
   wrapper the product builds inside the tools it hands over, as
   agentkit's granting wrapper is, still sits under the replay and sees
   nothing; the seam to wrap each tool where it is made is agentkit's,
@@ -30,7 +34,10 @@ versions may break the API.
 - `ConfigDiff.Folded` says one run's path held a compaction entry and
   the other's none, so `Compare` of a plain configuration against a
   compacting one no longer reports that nothing differed when the
-  first calls were the same. `Empty` counts it. (#20)
+  first calls were the same. `Empty` counts it. Whether a run folds
+  depends on the task, so it does not make a suite's pairs
+  non-uniform; the comparison's own `Folded` is over every run of
+  each side. (#20)
 
 ### Fixed
 
@@ -38,7 +45,7 @@ versions may break the API.
   configuration made and any branch summary on the path, pricing each
   under the model the exporter prices it under, so the report's cost
   column and the exported document's `final_metrics` agree on the
-  total. They summed the responses alone, while the doc comment said
+  total whenever every call was priced. They summed the responses alone, while the doc comment said
   the folds were included: a compacting run reported 38 per cent of
   what it spent in the harbor-eval study, and `Compare` could call the
   costlier configuration the cheaper. (#18)

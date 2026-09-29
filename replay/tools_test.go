@@ -165,6 +165,26 @@ type skillRead struct {
 
 func (skillRead) RecordNS() string { return "test:read" }
 
+func TestDetailsAsRefusesATypeWithNoNamespace(t *testing.T) {
+	for name, fn := range map[string]func(){
+		"interface":    func() { replay.DetailsAs[agenttool.Recordable]() },
+		"no namespace": func() { replay.DetailsAs[noNS]() },
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r == nil || !strings.Contains(fmt.Sprint(r), "DetailsAs") {
+					t.Errorf("recovered %v", r)
+				}
+			}()
+			fn()
+		})
+	}
+}
+
+type noNS struct{}
+
+func (noNS) RecordNS() string { return "" }
+
 // custom appends a custom entry, naming callID when it is not empty.
 func custom(t *testing.T, s *agentsession.Session, ns, data, callID string) {
 	t.Helper()
@@ -193,9 +213,11 @@ func outputItem(t *testing.T, s *agentsession.Session, callID, text string) {
 // acts on Details acts on a replayed call.
 func TestToolsServeTheRecord(t *testing.T) {
 	tests := []struct {
-		name  string
-		build func(t *testing.T, s *agentsession.Session)
-		opts  []replay.Option
+		name string
+		// format is the session's, the current one when empty.
+		format string
+		build  func(t *testing.T, s *agentsession.Session)
+		opts   []replay.Option
 		// want is the served Details, nil for none.
 		want    any
 		wantErr bool
@@ -231,7 +253,8 @@ func TestToolsServeTheRecord(t *testing.T) {
 			want: replay.Record{NS: "test:read", Data: json.RawMessage(`{"name":"one"}`)},
 		},
 		{
-			name: "by position before call_id",
+			name:   "by position before call_id",
+			format: "agentsession/0.5",
 			build: func(t *testing.T, s *agentsession.Session) {
 				callItem(t, s, "call_1", "one")
 				custom(t, s, "test:read", `{"name":"one"}`, "")
@@ -240,7 +263,47 @@ func TestToolsServeTheRecord(t *testing.T) {
 			want: replay.Record{NS: "test:read", Data: json.RawMessage(`{"name":"one"}`)},
 		},
 		{
-			name: "not by position in a parallel batch",
+			name: "not by position once call_id is defined",
+			build: func(t *testing.T, s *agentsession.Session) {
+				callItem(t, s, "call_1", "one")
+				custom(t, s, "policy:note", `{}`, "")
+				outputItem(t, s, "call_1", "one")
+			},
+		},
+		{
+			name: "not a nested call's record",
+			build: func(t *testing.T, s *agentsession.Session) {
+				callItem(t, s, "call_1", "one")
+				custom(t, s, session.NestedCallNS, `{"phase":"start","call_id":"n1","parent":"call_1"}`, "call_1")
+				custom(t, s, session.NestedCallNS, `{"phase":"end","call_id":"n1","parent":"call_1"}`, "call_1")
+				custom(t, s, "test:read", `{"name":"nested"}`, "call_1")
+				outputItem(t, s, "call_1", "one")
+			},
+		},
+		{
+			name: "the namespace asked for over a later record",
+			build: func(t *testing.T, s *agentsession.Session) {
+				callItem(t, s, "call_1", "one")
+				custom(t, s, "test:read", `{"name":"one"}`, "call_1")
+				custom(t, s, "test:written", `{"n":1}`, "call_1")
+				outputItem(t, s, "call_1", "one")
+			},
+			opts: []replay.Option{replay.DetailsAs[skillRead]()},
+			want: skillRead{Name: "one"},
+		},
+		{
+			name: "a pointer type",
+			build: func(t *testing.T, s *agentsession.Session) {
+				callItem(t, s, "call_1", "one")
+				custom(t, s, "test:read", `{"name":"one"}`, "call_1")
+				outputItem(t, s, "call_1", "one")
+			},
+			opts: []replay.Option{replay.DetailsAs[*skillRead]()},
+			want: &skillRead{Name: "one"},
+		},
+		{
+			name:   "not by position in a parallel batch",
+			format: "agentsession/0.5",
 			build: func(t *testing.T, s *agentsession.Session) {
 				callItem(t, s, "call_1", "one")
 				callItem(t, s, "call_2", "two")
@@ -279,7 +342,7 @@ func TestToolsServeTheRecord(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := agentsession.New(agentsession.Header{})
+			s := agentsession.New(agentsession.Header{Format: tt.format})
 			tt.build(t, s)
 			ran := 0
 			tools := replay.Tools(s, []agenttool.Tool{upperTool(&ran)}, append(tt.opts, replay.Strict())...)

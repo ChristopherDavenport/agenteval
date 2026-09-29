@@ -558,6 +558,16 @@ func TestRunnerRecordsFolds(t *testing.T) {
 	}
 }
 
+// echoRate is flatRate for the echo model and no price for any other,
+// so a call priced under the wrong model, or none, leaves a run
+// unpriced.
+func echoRate(model string, u openresponses.Usage) (float64, bool) {
+	if model != "echo/echo-1" {
+		return 0, false
+	}
+	return flatRate(model, u)
+}
+
 // TestRunnerCostCountsFolds is issue 18: a result's usage and cost
 // count the folds a compacting configuration made, so the report and
 // the document the same run exports agree on what the run spent.
@@ -570,7 +580,7 @@ func TestRunnerCostCountsFolds(t *testing.T) {
 		ConfigWith: func(_ agenteval.Task, rec *session.Recorder) agentturn.Config {
 			return foldingConfig(rec)
 		},
-		Cost: flatRate,
+		Cost: echoRate,
 	}
 	report, err := r.Run(context.Background(), suite)
 	if err != nil {
@@ -597,7 +607,7 @@ func TestRunnerCostCountsFolds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc, err := export.ToATIF(tr, export.Options{Cost: flatRate})
+	doc, err := export.ToATIF(tr, export.Options{Cost: echoRate})
 	if err != nil {
 		t.Fatal(err)
 	}

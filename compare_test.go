@@ -10,6 +10,7 @@ import (
 	"github.com/ChristopherDavenport/agenteval"
 	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agentturn"
+	"github.com/ChristopherDavenport/agentturn/compact"
 	"github.com/ChristopherDavenport/agentturn/session"
 	"github.com/ChristopherDavenport/openresponses"
 )
@@ -238,5 +239,41 @@ func TestCompareSeesTheFolds(t *testing.T) {
 				t.Errorf("empty = %v with folded = %+v", c.Config.Empty(), got)
 			}
 		})
+	}
+}
+
+// TestCompareFoldsKeepTheSuiteUniform: a compacting side folds on a
+// long task and not on a short one, which is the task and not the
+// configuration, so the settings both sides differ by for every task
+// stay on the comparison.
+func TestCompareFoldsKeepTheSuiteUniform(t *testing.T) {
+	suite := &agenteval.Suite{Name: "mixed", Tasks: []agenteval.Task{
+		{ID: "short", Instruction: "hi"},
+		{ID: "long", Prompts: openresponses.Items{openresponses.UserText("one"), openresponses.UserText("two"), openresponses.UserText("three")}},
+	}}
+	a := &agenteval.Runner{Store: newStableStore(), ConfigWith: func(agenteval.Task, *session.Recorder) agentturn.Config { return echoConfig() }}
+	b := &agenteval.Runner{Store: newStableStore(), ConfigWith: func(_ agenteval.Task, rec *session.Recorder) agentturn.Config {
+		cfg := echoConfig()
+		cfg.Instructions = "Be terse."
+		// A budget only the long task's context exceeds.
+		cfg.Transform = compact.NewLocal(cfg.Model, compact.WithBudget(150), compact.WithKeepLast(2), compact.WithOnFold(rec.Fold)).Transform
+		return cfg
+	}}
+	c, err := agenteval.Compare(context.Background(), suite, a, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	folds := map[string]bool{}
+	for _, p := range c.Pairs {
+		folds[p.Task] = p.Config.Folded != nil
+	}
+	if folds["short"] || !folds["long"] {
+		t.Fatalf("the pairs folded %v; the test needs the long task alone to fold", folds)
+	}
+	if !c.Uniform || c.Config.Instructions == nil {
+		t.Errorf("uniform %v, config %+v: the instructions differ for every task", c.Uniform, c.Config)
+	}
+	if c.Config.Folded == nil || c.Config.Folded.A != false || c.Config.Folded.B != true {
+		t.Errorf("folded = %+v, want B's runs to have folded and A's not", c.Config.Folded)
 	}
 }

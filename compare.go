@@ -23,7 +23,11 @@ type Comparison struct {
 	A, B *Report `json:"-"`
 	// Config is the difference between the settings B's runs started
 	// under and A's, when every pair differs the same way; Uniform
-	// says whether they did. Each pair carries its own.
+	// says whether they did. Each pair carries its own. Whether a run
+	// folded depends on the task as much as the configuration, so
+	// pairs are uniform whatever their Folded says, and Config.Folded
+	// says whether any of A's runs folded and any of B's, when those
+	// differ.
 	Config  ConfigDiff `json:"config"`
 	Uniform bool       `json:"uniform"`
 	Pairs   []Pair     `json:"pairs"`
@@ -85,7 +89,7 @@ type ConfigDiff struct {
 	// other's none, with whether each side folded: a context strategy
 	// is not a setting either, and the fold is what it leaves on the
 	// path. Two runs that both folded, however often, do not differ
-	// here.
+	// here. On a [Comparison] it is over all the runs of each side.
 	Folded *Change `json:"folded,omitempty"`
 }
 
@@ -116,6 +120,7 @@ func Compare(ctx context.Context, suite *Suite, a, b *Runner) (*Comparison, erro
 	}
 	c := &Comparison{Suite: suite.Name, Manifest: suite.Manifest, A: ra, B: rb, Uniform: true, ByJudge: map[string]float64{}}
 	counts := map[string]int{}
+	var foldedA, foldedB bool
 	for i := range ra.Results {
 		pa := &ra.Results[i]
 		pb, ok := rb.Result(pa.Task.ID)
@@ -148,10 +153,13 @@ func Compare(ctx context.Context, suite *Suite, a, b *Runner) (*Comparison, erro
 			if fa != fb {
 				pair.Config.Folded = &Change{A: fa, B: fb}
 			}
+			foldedA, foldedB = foldedA || fa, foldedB || fb
 		}
+		settings := pair.Config
+		settings.Folded = nil
 		if i == 0 {
-			c.Config = pair.Config
-		} else if !reflect.DeepEqual(c.Config, pair.Config) {
+			c.Config = settings
+		} else if !reflect.DeepEqual(c.Config, settings) {
 			c.Uniform = false
 		}
 		c.Pairs = append(c.Pairs, pair)
@@ -161,6 +169,9 @@ func Compare(ctx context.Context, suite *Suite, a, b *Runner) (*Comparison, erro
 	}
 	if !c.Uniform {
 		c.Config = ConfigDiff{}
+	}
+	if foldedA != foldedB {
+		c.Config.Folded = &Change{A: foldedA, B: foldedB}
 	}
 	return c, nil
 }
@@ -190,7 +201,7 @@ func initialCall(ctx context.Context, store agentsession.Store, res *Result) (ag
 			break
 		}
 	}
-	for _, e := range s.Path(s.Leaf()) {
+	for _, e := range s.Path(leaf) {
 		if resp, ok := e.(*agentsession.ResponseEntry); ok {
 			cx, err := s.RequestContext(resp.ID)
 			return cx.Settings, resp.RequestHash, folded, err

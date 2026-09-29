@@ -116,7 +116,9 @@ compaction entry, when one did and the other did not.
 and the runner and the exporter take the same hook. A result's `usage`
 and `cost_usd` sum every model call on the run's path, the folds a
 compacting configuration made included, which is what the exported
-document's final metrics sum, so the two agree on the total.
+document's final metrics sum, so the two agree on the total. A run
+with a call the hook cannot price has no `cost_usd`, where the
+document reports the sum of the calls it could.
 
 ## Harbor
 
