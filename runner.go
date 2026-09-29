@@ -21,7 +21,7 @@ type Runner struct {
 	// Store is where each run's session is created. Required.
 	Store agentsession.Store
 	// Config returns the configuration under test for a task.
-	// Required unless ConfigWith is set.
+	// Required unless ConfigWith or Build is set.
 	Config func(Task) agentturn.Config
 	// ConfigWith is Config with the recorder that writes the run's
 	// session, and wins over Config when set. It is where a
@@ -37,6 +37,22 @@ type Runner struct {
 	//		return cfg
 	//	}
 	ConfigWith func(Task, *session.Recorder) agentturn.Config
+	// Build is ConfigWith for a configuration whose construction can
+	// fail or holds something to release, such as a kit that opens MCP
+	// clients, and wins over both when set. Its error ends the task on
+	// Result.Err; the close it returns, when not nil, is called once the
+	// task is done, after its judges, even when the build failed, and
+	// its error is joined there too.
+	Build func(ctx context.Context, t Task, rec *session.Recorder) (cfg agentturn.Config, close func() error, err error)
+	// SessionOptions, when set, supplies the options each run's
+	// recorder is opened with: session.WithInstructionsParts for a
+	// configuration that composes its instructions from parts, so the
+	// session records which part changed rather than the whole prompt
+	// on every config entry. The recorder is opened before the
+	// configuration is built, so a function it is given here that needs
+	// the configuration, such as one calling a kit's PartsFor, reaches
+	// it through a closure over what Build builds a moment later.
+	SessionOptions func(Task) []session.Option
 	// Judges score each run once it has ended. Each score is appended
 	// to the run's session as an outcome entry.
 	Judges []Judge
@@ -57,7 +73,10 @@ type Runner struct {
 	Parallel int
 	// Header, when set, supplies each run's session header: a harness
 	// name, a working directory, a fixed ID for a test. Empty fields
-	// are filled by the store.
+	// are filled by the store. A header that names a Base and its
+	// ParentSession forks that session, and the agent starts from the
+	// context at the base, so a task runs as a continuation of a
+	// recorded run and its session replays strictly like any other.
 	Header func(Task) agentsession.Header
 	// Cost prices one model call, as export.Options.Cost does; see
 	// price.Hook. When set, and every call of a run is priced, the
@@ -150,7 +169,7 @@ func (r *Runner) Run(ctx context.Context, suite *Suite) (*Report, error) {
 	if r.Store == nil {
 		return nil, errors.New("agenteval: runner has no store")
 	}
-	if r.Config == nil && r.ConfigWith == nil {
+	if r.Config == nil && r.ConfigWith == nil && r.Build == nil {
 		return nil, errors.New("agenteval: runner has no config")
 	}
 	if suite == nil || len(suite.Tasks) == 0 {
@@ -179,8 +198,8 @@ func (r *Runner) Run(ctx context.Context, suite *Suite) (*Report, error) {
 }
 
 // runTask runs one task in a fresh session and judges it.
-func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task) Result {
-	res := Result{Task: task}
+func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task) (res Result) {
+	res.Task = task
 	inputs := task.Inputs()
 	if len(inputs) == 0 {
 		res.Err = fmt.Errorf("agenteval: task %s has nothing to send", task.ID)
@@ -190,17 +209,46 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task) Result {
 	if r.Header != nil {
 		header = r.Header(task)
 	}
-	rec, s, err := session.Start(ctx, r.Store, header)
+	var opts []session.Option
+	if r.SessionOptions != nil {
+		opts = r.SessionOptions(task)
+	}
+	rec, s, err := session.Start(ctx, r.Store, header, opts...)
 	if err != nil {
 		res.Err = fmt.Errorf("agenteval: task %s: %w", task.ID, err)
 		return res
 	}
 	res.SessionID = s.ID()
+	// A fork starts from the context at its base, which Start seeded
+	// the recorder with; an agent that did not start there too would
+	// send requests the record does not describe, and the recorder
+	// would hash none of them.
+	var seed []agentturn.Option
+	if s.Header().Base != "" {
+		cx, err := s.Context()
+		if err != nil {
+			res.Err = fmt.Errorf("agenteval: task %s: base %s: %w", task.ID, s.Header().Base, err)
+			return res
+		}
+		seed = append(seed, agentturn.WithTranscript(cx.Items))
+	}
 	if err := r.describe(ctx, s.ID(), suite, task); err != nil {
 		res.Err = fmt.Errorf("agenteval: task %s: %w", task.ID, err)
 		return res
 	}
-	a := agentturn.New(r.config(task, rec))
+	cfg, closeConfig, err := r.config(ctx, task, rec)
+	if closeConfig != nil {
+		defer func() {
+			if err := closeConfig(); err != nil {
+				res.Err = errors.Join(res.Err, fmt.Errorf("agenteval: task %s: close: %w", task.ID, err))
+			}
+		}()
+	}
+	if err != nil {
+		res.Err = fmt.Errorf("agenteval: task %s: build: %w", task.ID, err)
+		return res
+	}
+	a := agentturn.New(cfg, seed...)
 	unsubscribe := rec.Attach(a)
 	for _, item := range inputs {
 		end, err := a.Prompt(ctx, item)
@@ -265,13 +313,17 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task) Result {
 	return res
 }
 
-// config returns the configuration under test for a task, from
-// ConfigWith when it is set and from Config otherwise.
-func (r *Runner) config(task Task, rec *session.Recorder) agentturn.Config {
-	if r.ConfigWith != nil {
-		return r.ConfigWith(task, rec)
+// config returns the configuration under test for a task and what
+// releases it, from Build when it is set, then ConfigWith, then
+// Config.
+func (r *Runner) config(ctx context.Context, task Task, rec *session.Recorder) (agentturn.Config, func() error, error) {
+	switch {
+	case r.Build != nil:
+		return r.Build(ctx, task, rec)
+	case r.ConfigWith != nil:
+		return r.ConfigWith(task, rec), nil, nil
 	}
-	return r.Config(task)
+	return r.Config(task), nil, nil
 }
 
 // DefaultMaxResumes is how many times one prompt is resumed through
@@ -327,14 +379,16 @@ func (r *Runner) answer(ctx context.Context, a *agentturn.Agent, end *agentturn.
 var ErrUnreplayable = errors.New("agenteval: the run cannot be replayed strictly")
 
 // replayable reports whether the record rebuilds every request the run
-// made. Whether it does is [replay.Unverifiable]'s question and is
-// asked there rather than answered again here: a strict replay of a
-// session it rejects cannot be built at all, and naming that on the
-// result is the word missing at write time, weeks before anyone tries.
-// What this adds is the runner's own diagnosis, which replay cannot
-// make because it never sees the configuration: a session with no fold
-// at all is most often one whose compacting configuration never bound
-// compact.WithOnFold, and that is a seam this package owns.
+// made in one environment. Whether it does is [replay.Unverifiable]'s
+// question and is asked there rather than answered again here: a
+// strict replay of a session it rejects cannot be built at all, and
+// naming that on the result is the word missing at write time, weeks
+// before anyone tries. What this adds is the runner's own diagnosis,
+// which replay cannot make because it never sees the configuration: a
+// session with unhashed responses and no fold at all is most often one
+// whose compacting configuration never bound compact.WithOnFold, and
+// that is a seam this package owns. A workspace substitution alone
+// gets none of it; replay's error names the env entry.
 func replayable(s *agentsession.Session, leaf string) error {
 	err := replay.Unverifiable(s, leaf)
 	if err == nil {
@@ -345,6 +399,9 @@ func replayable(s *agentsession.Session, leaf string) error {
 	// with no entries has no seam to have gone unbound.
 	if !errors.Is(err, replay.ErrUnverifiable) {
 		return err
+	}
+	if replay.Unverifiable(s, leaf, replay.AllowSubstitution()) == nil {
+		return fmt.Errorf("%w: %w", ErrUnreplayable, err)
 	}
 	if leaf == "" {
 		leaf = s.Leaf()
