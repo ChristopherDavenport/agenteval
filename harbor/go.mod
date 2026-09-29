@@ -16,5 +16,9 @@ require (
 )
 
 // The require names the released root a consumer fetches; the replace
-// builds against the tree.
+// builds against the tree. A consumer ignores the replace, and make
+// extracted, which CI runs on every pull request and on main, copies
+// this module out of the tree, drops the replace and builds, vets and
+// tests it against the root the require names. release-guard proves
+// that root is the commit being tagged.
 replace github.com/ChristopherDavenport/agenteval => ../

@@ -18,6 +18,19 @@ versions may break the API.
   what it spent in the harbor-eval study, and `Compare` could call the
   costlier configuration the cheaper. (#18)
 
+### Notes
+
+- The `replace => ../` in `harbor`'s published `go.mod` stays, since the
+  release builds the pair from one commit through it, and the pair is
+  tested: `make extracted` copies `harbor` out of the tree, drops the
+  replace and builds, vets and tests it against the root its require
+  names, and CI runs it on every pull request and on main. It ran
+  against the published pair on the v0.0.4 release commit and passed.
+  What cannot build is the module cache's copy in place, where the
+  relative replace names a directory that is not there; a consumer
+  never builds it that way, since Go ignores a dependency's replace.
+  `harbor/go.mod` now says this beside the replace. (#19)
+
 ### Dependencies
 
 - agentturn and its `session` module v0.0.9 to v0.0.10, agenttool
