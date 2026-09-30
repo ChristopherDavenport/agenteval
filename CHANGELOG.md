@@ -5,6 +5,43 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+### Added
+
+- `replay.KindFailure`. A strict or lenient replay model serves each
+  `agentturn:model_retry` entry on the path as a failed attempt: an
+  `openresponses.Error` with the status and type its recorded text
+  spells, or a 503 carrying the text when it spells none, and
+  `Retry-After: 0` so agentturn's default backoff waits for nothing.
+  The loop retries, and a `Retry.Revise` that fell back to another
+  model or a lower effort sends the request the record hashed, where
+  a strict replay diverged at that call. A failed attempt is a step:
+  `Model.Steps`, `Served.N` and `Model.Settings` count it. (#29)
+
+### Changed
+
+- Requires agentsession v0.0.15, agenttool v0.0.11 and agentturn and
+  its `session` module v0.0.12. Runs are recorded as
+  `agentsession/0.9`, a call ID names one call in the whole session,
+  and agentsession v0.0.11 and earlier refuse the sessions the runner
+  writes.
+- Before the first env entry on a path the workspace is absent, so a
+  first env entry that names a workspace after a response is a
+  substitution: a session recorded with no env entry and resumed
+  under `session.WithEnv` in a container no longer replays strictly
+  as one environment. (#31)
+
+### Fixed
+
+- A task forked from a run recorded in a container replays strictly:
+  the manifest's env entry restates the workspace, directory, VCS
+  state and tools in force at the base, where it named no workspace
+  and read as a substitution after the base's responses. (#28)
+- `ErrSubstituted` names the members that differ when kind and ref
+  agree, such as `instance "ctr-2" where it was "ctr-1"`, rather than
+  a workspace compared with itself. (#30)
+
 ## v0.0.6 - 2026-09-29
 
 ### Added

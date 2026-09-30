@@ -945,6 +945,92 @@ func TestRunnerForksAtABase(t *testing.T) {
 	}
 }
 
+// A fork of a run recorded in a container restates that workspace on
+// the manifest's env entry, so the entry, which follows the base's
+// responses, is no substitution and the fork replays strictly, whether
+// or not the product names the workspace again.
+func TestRunnerForksInAContainer(t *testing.T) {
+	ctx := context.Background()
+	container := func(t *testing.T) *agentsession.Workspace {
+		w := &agentsession.Workspace{Kind: "container", Ref: "sha256:0f1e"}
+		if err := w.SetMember("instance", "ctr-1"); err != nil {
+			t.Fatal(err)
+		}
+		return w
+	}
+	withEnv := func(t *testing.T) func(agenteval.Task) []session.Option {
+		return func(agenteval.Task) []session.Option {
+			return []session.Option{session.WithEnv(func(context.Context) (*agentsession.EnvEntry, error) {
+				return &agentsession.EnvEntry{CWD: "/w", Workspace: container(t)}, nil
+			})}
+		}
+	}
+	tests := []struct {
+		name        string
+		forkWithEnv bool
+	}{
+		{"the product names no workspace", false},
+		{"the product names the same workspace", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newStableStore()
+			base := basicRunner(store)
+			base.SessionOptions = withEnv(t)
+			first, err := base.Run(ctx, basicSuite(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			origin := first.Results[0]
+			if origin.Err != nil {
+				t.Fatalf("origin: %v", origin.Err)
+			}
+			r := &agenteval.Runner{
+				Store:  store,
+				Config: basicConfig,
+				Header: func(agenteval.Task) agentsession.Header {
+					return agentsession.Header{ParentSession: origin.SessionID, Base: origin.Target}
+				},
+				Judges: []agenteval.Judge{judge.ToolCalled("upper")},
+			}
+			if tt.forkWithEnv {
+				r.SessionOptions = withEnv(t)
+			}
+			// A suite from LoadSuite has a manifest, so the runner
+			// writes an env entry after the base's responses.
+			suite := basicSuite(t)
+			suite.Tasks = suite.Tasks[:1]
+			report, err := r.Run(ctx, suite)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res := report.Results[0]
+			if res.Err != nil {
+				t.Fatalf("err = %v", res.Err)
+			}
+			s, err := store.Open(ctx, res.SessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := replay.Unverifiable(s, res.Target); err != nil {
+				t.Errorf("Unverifiable = %v", err)
+			}
+			var manifest *agentsession.EnvEntry
+			for _, e := range s.Path(res.Target) {
+				if v, ok := e.(*agentsession.EnvEntry); ok && v.Files != nil {
+					manifest = v
+				}
+			}
+			if manifest == nil {
+				t.Fatal("the fork holds no manifest env entry")
+			}
+			if !agentsession.SameWorkspace(manifest.Workspace, container(t)) || manifest.CWD != "/w" {
+				t.Errorf("manifest env = cwd %q, workspace %+v; want the base's", manifest.CWD, manifest.Workspace)
+			}
+		})
+	}
+}
+
 func countResponses(s *agentsession.Session, leaf string) int {
 	_, responses, _ := countPath(s, leaf)
 	return responses

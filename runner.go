@@ -232,7 +232,7 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task) (res Resu
 		}
 		seed = append(seed, agentturn.WithTranscript(cx.Items))
 	}
-	if err := r.describe(ctx, s.ID(), suite, task); err != nil {
+	if err := r.describe(ctx, s, suite, task); err != nil {
 		res.Err = fmt.Errorf("agenteval: task %s: %w", task.ID, err)
 		return res
 	}
@@ -417,12 +417,23 @@ func replayable(s *agentsession.Session, leaf string) error {
 // describe writes what the session is a run of: an info entry naming
 // the task, an env entry whose read files are the suite manifest, and
 // a custom entry carrying the suite, the task and its setup.
-func (r *Runner) describe(ctx context.Context, sessionID string, suite *Suite, task Task) error {
+//
+// The env entry restates the environment in force at the session's
+// leaf, its workspace, directory, VCS state and tools, with the
+// manifest as its files. A fork's leaf is its base's, and after the
+// base's responses an env entry that named no workspace where the base
+// ran in one would read as a substitution, which a strict replay
+// refuses.
+func (r *Runner) describe(ctx context.Context, s *agentsession.Session, suite *Suite, task Task) error {
+	sessionID := s.ID()
 	if _, err := r.Store.Append(ctx, sessionID, &agentsession.InfoEntry{Name: task.ID}); err != nil {
 		return err
 	}
 	if len(suite.Manifest.Files) > 0 {
 		env := &agentsession.EnvEntry{Files: &agentsession.FileHashes{Read: make(map[string]string, len(suite.Manifest.Files))}}
+		if prev := lastEnv(s); prev != nil {
+			env.CWD, env.VCS, env.Tools, env.Workspace = prev.CWD, prev.VCS, prev.Tools, prev.Workspace
+		}
 		for p, h := range suite.Manifest.Files {
 			env.Files.Read[p] = h
 		}
@@ -436,6 +447,18 @@ func (r *Runner) describe(ctx context.Context, sessionID string, suite *Suite, t
 	}
 	_, err = r.Store.Append(ctx, sessionID, &agentsession.CustomEntry{NS: TaskNS, Data: data})
 	return err
+}
+
+// lastEnv returns the env entry in force at the session's leaf, or nil
+// when the path holds none.
+func lastEnv(s *agentsession.Session) *agentsession.EnvEntry {
+	path := s.Path(s.Leaf())
+	for i := len(path) - 1; i >= 0; i-- {
+		if e, ok := path[i].(*agentsession.EnvEntry); ok {
+			return e
+		}
+	}
+	return nil
 }
 
 // usage sums the usage of the model calls on the path to leaf, the
