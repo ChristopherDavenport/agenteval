@@ -38,6 +38,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"reflect"
+	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -62,9 +67,10 @@ var ErrDiverged = errors.New("replay: diverged from the recording")
 // [ErrSubstituted].
 var ErrUnverifiable = errors.New("replay: the record cannot say what was sent")
 
-// ErrSubstituted is returned by a strict [NewModel] for a path on which a later env entry names another
-// workspace than the one in force before it, after a response: RFC 0001
-// calls that a substitution, and a reader that holds the environment
+// ErrSubstituted is returned by a strict [NewModel] for a path on which
+// an env entry after a response names another workspace than the one
+// in force before it, which before the first env entry is none: RFC
+// 0001 calls that a substitution, and a reader that holds the environment
 // fixed treats the path from it on as not verifiable against what came
 // before it. The recorded outputs after it came from another file
 // system than those before it, so a pass on one half says nothing
@@ -86,6 +92,9 @@ const (
 	KindResponse Kind = "response"
 	// KindFold is a fold served from a compaction entry.
 	KindFold Kind = "fold"
+	// KindFailure is a failed attempt served from an
+	// agentturn:model_retry entry, as the error the loop retries.
+	KindFailure Kind = "failure"
 	// KindCall is a tool call served from a recorded output.
 	KindCall Kind = "call"
 )
@@ -97,8 +106,9 @@ type Served struct {
 	// N is the 1-based position among the served calls of the model,
 	// or of the tools.
 	N int
-	// EntryID is the entry served: the response or compaction entry
-	// for the model, the output's item entry for a tool call.
+	// EntryID is the entry served: the response, compaction or
+	// model_retry entry for the model, the output's item entry for a
+	// tool call.
 	EntryID string
 	// Recorded and Got are the hash recorded for the call and the hash
 	// of the request received: the response entry's own hash, or, for
@@ -114,6 +124,11 @@ type Served struct {
 	// the caller opted out: the compaction endpoint sends no request
 	// the format hashes, so that fold is served unchecked in every
 	// mode, and Got is always empty there whatever Recorded holds.
+	//
+	// A failed attempt has no Recorded: the recorder hashes only the
+	// request of the attempt that answered, and that one is checked
+	// when it is served. Got is the hash of what the failed attempt
+	// sent.
 	//
 	// Both are empty for a tool call, which is matched on its call ID
 	// or its arguments rather than on a hash.
@@ -239,12 +254,17 @@ func apply(opts []Option) options {
 }
 
 // step is one recorded model call on the path: a response with the
-// items it produced, or a fold with its summary.
+// items it produced, a fold with its summary, or an attempt that
+// failed and was retried.
 type step struct {
 	resp    *agentsession.ResponseEntry
 	output  openresponses.Items
 	comp    *agentsession.CompactionEntry
 	summary openresponses.Item
+	// retry is the model_retry entry of a failed attempt, and failure
+	// the error it is served as.
+	retry   *agentsession.CustomEntry
+	failure *openresponses.Error
 	// settings are the settings in force at this step: what the config
 	// entries on the path up to it say the request was made under.
 	settings agentsession.Settings
@@ -327,9 +347,44 @@ func NewModel(s *agentsession.Session, opts ...Option) (*Model, error) {
 			m.steps = append(m.steps, st)
 		case *agentsession.CompactionEntry:
 			m.steps = append(m.steps, step{comp: v, summary: openresponses.Items{v.Summary}.Clone()[0], foldHash: foldHash(v), settings: settings})
+		case *agentsession.CustomEntry:
+			// A failed attempt is served as a failure so the loop
+			// retries it, and a Retry.Revise that changed the next
+			// request, to a fallback model say, changes it again:
+			// the response after it is hashed over the revised
+			// request, and a replay that never failed would send the
+			// unrevised one and diverge there.
+			if v.NS != session.ModelRetryNS {
+				continue
+			}
+			var rec session.ModelRetry
+			if err := json.Unmarshal(v.Data, &rec); err != nil {
+				return nil, fmt.Errorf("replay: model retry %s: %w", v.ID, err)
+			}
+			m.steps = append(m.steps, step{retry: v, failure: failureOf(rec.Error), settings: settings})
 		}
 	}
 	return m, nil
+}
+
+// recordedError matches the text of an openresponses.Error:
+// "openresponses: <type> (<status>): <message>".
+var recordedError = regexp.MustCompile(`^openresponses: ([a-z_]+) \((\d{3})\)(?:: (.*))?$`)
+
+// failureOf is the error a failed attempt is served as: the
+// openresponses error its recorded text spells, so a Retry.Retryable
+// that reads the status decides as it did, or a 503 carrying the text
+// when it spells none, as a truncated stream or a transport failure
+// does. It carries Retry-After: 0, so agentturn's DefaultBackoff waits
+// for nothing; a product's own Backoff still waits what it says.
+func failureOf(text string) *openresponses.Error {
+	e := &openresponses.Error{StatusCode: http.StatusServiceUnavailable, Type: openresponses.ErrorTypeServerError, Message: text}
+	if m := recordedError.FindStringSubmatch(text); m != nil {
+		status, _ := strconv.Atoi(m[2])
+		e = &openresponses.Error{StatusCode: status, Type: openresponses.ErrorType(m[1]), Message: m[3]}
+	}
+	e.Headers = http.Header{"Retry-After": []string{"0"}}
+	return e
 }
 
 // foldHash reads the request hash of the fold a compaction entry
@@ -436,24 +491,70 @@ func unhashed(path []agentsession.Entry) error {
 
 // substituted reports the first env entry on path whose workspace
 // differs from the one in force before it, once a response was
-// recorded. Before the first env entry no workspace is in force, and
-// before the first response nothing was recorded to hold fixed, so
-// neither is a substitution.
+// recorded. Before the first env entry the workspace is absent, so a
+// first env entry that names one after a response is a substitution,
+// as a resume under WithEnv of a session recorded without it is.
+// Before the first response nothing was recorded to hold fixed, so no
+// change there is one.
 func substituted(path []agentsession.Entry) error {
-	var inForce *agentsession.EnvEntry
+	var inForce *agentsession.Workspace
 	responded := false
 	for _, e := range path {
 		switch v := e.(type) {
 		case *agentsession.ResponseEntry:
 			responded = true
 		case *agentsession.EnvEntry:
-			if inForce != nil && responded && !agentsession.SameWorkspace(inForce.Workspace, v.Workspace) {
-				return fmt.Errorf("%w: env entry %s runs in %s where the path before it ran in %s", ErrSubstituted, v.ID, describeWorkspace(v.Workspace), describeWorkspace(inForce.Workspace))
+			if responded && !agentsession.SameWorkspace(inForce, v.Workspace) {
+				return fmt.Errorf("%w: env entry %s %s", ErrSubstituted, v.ID, describeChange(inForce, v.Workspace))
 			}
-			inForce = v
+			inForce = v.Workspace
 		}
 	}
 	return nil
+}
+
+// describeChange says how workspace now differs from was. When kind
+// and ref agree it names the members that differ, since a restart on
+// the same image differs only in those, and naming kind and ref alone
+// reads as a workspace compared with itself.
+func describeChange(was, now *agentsession.Workspace) string {
+	if was == nil || now == nil || was.Kind != now.Kind || was.Ref != now.Ref {
+		return fmt.Sprintf("runs in %s where the path before it ran in %s", describeWorkspace(now), describeWorkspace(was))
+	}
+	keys := make([]string, 0, len(was.Unknown)+len(now.Unknown))
+	for k := range was.Unknown {
+		keys = append(keys, k)
+	}
+	for k := range now.Unknown {
+		if _, ok := was.Unknown[k]; !ok {
+			keys = append(keys, k)
+		}
+	}
+	slices.Sort(keys)
+	var diffs []string
+	for _, k := range keys {
+		a, inWas := was.Unknown[k]
+		b, inNow := now.Unknown[k]
+		switch {
+		case !inWas:
+			diffs = append(diffs, fmt.Sprintf("%s %s where it had none", k, b))
+		case !inNow:
+			diffs = append(diffs, fmt.Sprintf("no %s where it was %s", k, a))
+		case !sameJSON(a, b):
+			diffs = append(diffs, fmt.Sprintf("%s %s where it was %s", k, b, a))
+		}
+	}
+	return fmt.Sprintf("runs in %s with %s", describeWorkspace(now), strings.Join(diffs, ", "))
+}
+
+// sameJSON reports whether two JSON values are equal as values, so
+// spacing or key order that differs does not count.
+func sameJSON(a, b json.RawMessage) bool {
+	var va, vb any
+	if json.Unmarshal(a, &va) != nil || json.Unmarshal(b, &vb) != nil {
+		return string(a) == string(b)
+	}
+	return reflect.DeepEqual(va, vb)
 }
 
 func describeWorkspace(w *agentsession.Workspace) string {
@@ -466,8 +567,8 @@ func describeWorkspace(w *agentsession.Workspace) string {
 	return w.Kind + " " + w.Ref
 }
 
-// Steps returns how many recorded calls, responses and folds, the path
-// holds.
+// Steps returns how many recorded calls, responses, folds and failed
+// attempts, the path holds.
 func (m *Model) Steps() int { return len(m.steps) }
 
 // Settings returns the settings in force at each recorded step, in
@@ -574,11 +675,24 @@ func isFoldRequest(req openresponses.Request) bool {
 // CreateStream serves the next recorded call. When that is a fold, the
 // request must be a local fold's summary call and the compaction
 // entry's summary is served as the answer; when it is a response, the
-// response entry is served after its hash check in strict mode.
+// response entry is served after its hash check in strict mode; when
+// it is an attempt that failed, its failure is returned for the loop
+// to retry, unchecked, since the record hashes only the attempt that
+// answered.
 func (m *Model) CreateStream(_ context.Context, req openresponses.Request, sink openresponses.EventSink) error {
 	st, n, err := m.take()
 	if err != nil {
 		return err
+	}
+	if st.failure != nil {
+		got, err := agentsession.RequestHash(session.Canonical(req))
+		if err != nil {
+			return err
+		}
+		m.observe(Served{Kind: KindFailure, N: n, EntryID: st.retry.ID, Got: got})
+		f := *st.failure
+		f.Headers = f.Headers.Clone()
+		return &f
 	}
 	if st.comp != nil {
 		if isFoldRequest(req) {
@@ -634,7 +748,10 @@ func (m *Model) Compact(_ context.Context, req openresponses.CompactRequest) (*o
 	if err != nil {
 		return nil, err
 	}
-	if st.comp == nil {
+	switch {
+	case st.retry != nil:
+		return nil, fmt.Errorf("%w: model retry %s (step %d): the recording failed a model call here and the request is a compaction", ErrDiverged, st.retry.ID, n)
+	case st.comp == nil:
 		return nil, fmt.Errorf("%w: response %s (step %d): the recording made a model call here and the request is a compaction", ErrDiverged, st.resp.ID, n)
 	}
 	m.observe(Served{Kind: KindFold, N: n, EntryID: st.comp.ID, Recorded: st.foldHash})

@@ -1071,7 +1071,8 @@ func TestStrictRefusesASubstitutedWorkspace(t *testing.T) {
 		{"named where it was absent", []agentsession.Entry{env("/w", nil), resp(), env("/w", local)}, true},
 		{"absent both times", []agentsession.Entry{env("/w", nil), resp(), env("/x", nil)}, false},
 		{"before any response", []agentsession.Entry{env("/w", container), env("/w", local), resp()}, false},
-		{"no env before", []agentsession.Entry{resp(), env("/w", local), resp()}, false},
+		{"named after responses with no env", []agentsession.Entry{resp(), resp(), env("/w", local), resp()}, true},
+		{"absent after responses with no env", []agentsession.Entry{resp(), resp(), env("/w", nil), resp()}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1107,6 +1108,53 @@ func TestStrictRefusesASubstitutedWorkspace(t *testing.T) {
 			}
 			if _, err := replay.NewModel(s); err != nil {
 				t.Errorf("lenient: %v", err)
+			}
+		})
+	}
+}
+
+// A substitution whose kind and ref agree names the members that
+// differ, so a restart on the same image does not read as a workspace
+// compared with itself.
+func TestSubstitutionNamesTheMembersThatDiffer(t *testing.T) {
+	ws := func(members map[string]string) *agentsession.Workspace {
+		w := &agentsession.Workspace{Kind: "container", Ref: "sha256:abc"}
+		for k, v := range members {
+			if err := w.SetMember(k, v); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return w
+	}
+	tests := []struct {
+		name     string
+		was, now *agentsession.Workspace
+		want     string
+	}{
+		{"another instance", ws(map[string]string{"host": "a", "instance": "ctr-1"}), ws(map[string]string{"host": "a", "instance": "ctr-2"}),
+			`runs in container sha256:abc with instance "ctr-2" where it was "ctr-1"`},
+		{"a member added", ws(nil), ws(map[string]string{"instance": "ctr-2"}),
+			`runs in container sha256:abc with instance "ctr-2" where it had none`},
+		{"a member dropped", ws(map[string]string{"host": "a"}), ws(nil),
+			`runs in container sha256:abc with no host where it was "a"`},
+		{"another image", ws(nil), &agentsession.Workspace{Kind: "container", Ref: "sha256:def"},
+			`runs in container sha256:def where the path before it ran in container sha256:abc`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := agentsession.New(agentsession.Header{})
+			for _, e := range []agentsession.Entry{
+				&agentsession.EnvEntry{CWD: "/w", Workspace: tt.was},
+				&agentsession.ResponseEntry{ResponseID: "resp", RequestHash: "sha256:0"},
+				&agentsession.EnvEntry{CWD: "/w", Workspace: tt.now},
+			} {
+				if _, err := s.Append(e); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := replay.Unverifiable(s, "")
+			if !errors.Is(err, replay.ErrSubstituted) || !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("Unverifiable = %v, want it to say %s", err, tt.want)
 			}
 		})
 	}
