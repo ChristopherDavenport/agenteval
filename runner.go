@@ -114,11 +114,13 @@ type Result struct {
 	// or it had nothing to say or failed.
 	ResumeBound bool `json:"resume_bound,omitempty"`
 	// Usage is the sum over the model calls on the run's path: every
-	// response, and every fold or branch summary that reported usage.
-	// It is the path the exported document's final metrics sum, and the
-	// runner prices each call under the model the exporter does, so
-	// with the same price hook the two agree on the total whenever
-	// every call was priced.
+	// response, every fold or branch summary that reported usage, and
+	// the summary calls of every fold that failed. It is the path the
+	// exported document's final metrics sum, and the runner prices
+	// each call under the model the exporter does, so with the same
+	// price hook the two agree on the total whenever every call was
+	// priced, except that the exporter as of agentsession v0.0.19
+	// leaves a failed fold's calls out (agentsession#184).
 	Usage openresponses.Usage `json:"usage"`
 	// CostUSD is the run's cost under Runner.Cost, when every call was
 	// priced.
@@ -476,7 +478,8 @@ func lastEnv(s *agentsession.Session) *agentsession.EnvEntry {
 }
 
 // usage sums the usage of the model calls on the path to leaf, the
-// responses and the folds, and prices them when the runner can.
+// responses and the folds, failed or not, and prices them when the
+// runner can.
 func (r *Runner) usage(s *agentsession.Session, leaf string) (openresponses.Usage, *float64) {
 	var u openresponses.Usage
 	cost, priced := 0.0, r.Cost != nil
@@ -506,6 +509,21 @@ func (r *Runner) usage(s *agentsession.Session, leaf string) (openresponses.Usag
 			eu, m = v.Usage, v.Config.Model
 		case *agentsession.BranchSummaryEntry:
 			eu = v.Usage
+		case *agentsession.CustomEntry:
+			// A fold that failed still made its summary calls, and
+			// paid for them; the entry holds their usage summed.
+			// It leaves the model in force as it was.
+			if v.NS != session.FailedFoldNS {
+				continue
+			}
+			var f session.FailedFold
+			if json.Unmarshal(v.Data, &f) != nil {
+				continue
+			}
+			eu = f.Usage
+			if f.Model != "" {
+				m = f.Model
+			}
 		default:
 			continue
 		}

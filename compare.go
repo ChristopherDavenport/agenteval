@@ -10,6 +10,7 @@ import (
 	"sort"
 
 	"github.com/ChristopherDavenport/agentsession"
+	"github.com/ChristopherDavenport/agentturn/session"
 	"github.com/ChristopherDavenport/openresponses"
 )
 
@@ -25,9 +26,10 @@ type Comparison struct {
 	// under and A's, when every pair differs the same way; Uniform
 	// says whether they did. Each pair carries its own. Whether a run
 	// folded depends on the task as much as the configuration, so
-	// pairs are uniform whatever their Folded says, and Config.Folded
-	// says whether any of A's runs folded and any of B's, when those
-	// differ.
+	// pairs are uniform whatever their Folded and FoldFailed say, and
+	// Config.Folded says whether any of A's runs folded and any of
+	// B's, when those differ; Config.FoldFailed the same for a fold
+	// that failed.
 	Config  ConfigDiff `json:"config"`
 	Uniform bool       `json:"uniform"`
 	Pairs   []Pair     `json:"pairs"`
@@ -91,11 +93,18 @@ type ConfigDiff struct {
 	// path. Two runs that both folded, however often, do not differ
 	// here. On a [Comparison] it is over all the runs of each side.
 	Folded *Change `json:"folded,omitempty"`
+	// FoldFailed is Folded for a fold that failed: one run's path held
+	// an agentturn:compaction_failed entry and the other's none. A
+	// configuration whose every fold fails, on a summary model too
+	// verbose for agentturn to accept its summary, leaves no compaction
+	// entry, and without this would compare as one that never tried to
+	// compact, though each failed fold paid for its summary calls.
+	FoldFailed *Change `json:"fold_failed,omitempty"`
 }
 
 // Empty reports whether nothing differed.
 func (d ConfigDiff) Empty() bool {
-	return !d.BeyondSettings && d.Folded == nil && d.Model == nil && d.Instructions == nil && d.Reasoning == nil && d.Text == nil &&
+	return !d.BeyondSettings && d.Folded == nil && d.FoldFailed == nil && d.Model == nil && d.Instructions == nil && d.Reasoning == nil && d.Text == nil &&
 		len(d.ToolsAdded) == 0 && len(d.ToolsRemoved) == 0 && len(d.ToolsChanged) == 0 && len(d.Extra) == 0
 }
 
@@ -120,7 +129,7 @@ func Compare(ctx context.Context, suite *Suite, a, b *Runner) (*Comparison, erro
 	}
 	c := &Comparison{Suite: suite.Name, Manifest: suite.Manifest, A: ra, B: rb, Uniform: true, ByJudge: map[string]float64{}}
 	counts := map[string]int{}
-	var foldedA, foldedB bool
+	var foldedA, foldedB, failedA, failedB bool
 	for i := range ra.Results {
 		pa := &ra.Results[i]
 		pb, ok := rb.Result(pa.Task.ID)
@@ -150,13 +159,17 @@ func Compare(ctx context.Context, suite *Suite, a, b *Runner) (*Comparison, erro
 			if pair.Config.Empty() && differentFirstCall(ha, hb) {
 				pair.Config.BeyondSettings = true
 			}
-			if fa != fb {
-				pair.Config.Folded = &Change{A: fa, B: fb}
+			if fa.folded != fb.folded {
+				pair.Config.Folded = &Change{A: fa.folded, B: fb.folded}
 			}
-			foldedA, foldedB = foldedA || fa, foldedB || fb
+			if fa.failed != fb.failed {
+				pair.Config.FoldFailed = &Change{A: fa.failed, B: fb.failed}
+			}
+			foldedA, foldedB = foldedA || fa.folded, foldedB || fb.folded
+			failedA, failedB = failedA || fa.failed, failedB || fb.failed
 		}
 		settings := pair.Config
-		settings.Folded = nil
+		settings.Folded, settings.FoldFailed = nil, nil
 		if i == 0 {
 			c.Config = settings
 		} else if !reflect.DeepEqual(c.Config, settings) {
@@ -173,6 +186,9 @@ func Compare(ctx context.Context, suite *Suite, a, b *Runner) (*Comparison, erro
 	if foldedA != foldedB {
 		c.Config.Folded = &Change{A: foldedA, B: foldedB}
 	}
+	if failedA != failedB {
+		c.Config.FoldFailed = &Change{A: failedA, B: failedB}
+	}
 	return c, nil
 }
 
@@ -180,25 +196,29 @@ func Compare(ctx context.Context, suite *Suite, a, b *Runner) (*Comparison, erro
 // made under, the config entries on the path to the first response
 // entry, and returns the hash that response recorded for its request
 // and whether the path to the result's target holds a compaction
-// entry. A session with no response yields the settings at its leaf
-// and no hash.
-func initialCall(ctx context.Context, store agentsession.Store, res *Result) (agentsession.Settings, string, bool, error) {
+// entry and a failed fold. A session with no response yields the
+// settings at its leaf and no hash.
+func initialCall(ctx context.Context, store agentsession.Store, res *Result) (agentsession.Settings, string, folds, error) {
 	if res.SessionID == "" {
-		return agentsession.Settings{}, "", false, errors.New("agenteval: no session")
+		return agentsession.Settings{}, "", folds{}, errors.New("agenteval: no session")
 	}
 	s, err := store.Open(ctx, res.SessionID)
 	if err != nil {
-		return agentsession.Settings{}, "", false, err
+		return agentsession.Settings{}, "", folds{}, err
 	}
 	leaf := res.Target
 	if leaf == "" {
 		leaf = s.Leaf()
 	}
-	folded := false
+	var folded folds
 	for _, e := range s.Path(leaf) {
-		if _, ok := e.(*agentsession.CompactionEntry); ok {
-			folded = true
-			break
+		switch v := e.(type) {
+		case *agentsession.CompactionEntry:
+			folded.folded = true
+		case *agentsession.CustomEntry:
+			if v.NS == session.FailedFoldNS {
+				folded.failed = true
+			}
 		}
 	}
 	for _, e := range s.Path(leaf) {
@@ -210,6 +230,10 @@ func initialCall(ctx context.Context, store agentsession.Store, res *Result) (ag
 	cx, err := s.Context()
 	return cx.Settings, "", folded, err
 }
+
+// folds is what a run's path holds of compaction: a fold applied, and
+// a fold that failed.
+type folds struct{ folded, failed bool }
 
 // differentFirstCall reports whether two runs' first calls sent
 // different requests, from the hashes their responses recorded. Two
