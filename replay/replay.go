@@ -82,6 +82,17 @@ var ErrUnverifiable = errors.New("replay: the record cannot say what was sent")
 // [AllowSubstitution] serves the path anyway.
 var ErrSubstituted = fmt.Errorf("%w: the path changes workspace", ErrUnverifiable)
 
+// ErrCallIDRepeated is returned by a strict [NewModel] for a path on
+// which two function calls share a call ID, as a session recorded by
+// agentturn v0.0.11 or earlier holds when its provider numbered calls
+// per response. agentturn from v0.0.12 gives the second call an ID of
+// its own, so the request after it cannot hash to what the recording
+// sent, and a strict replay would diverge there naming two hashes and
+// nothing about call IDs. It wraps [ErrUnverifiable], and no option
+// serves such a path strictly; a lenient replay serves it, and
+// [Tools] serves the repeated call's recorded output.
+var ErrCallIDRepeated = fmt.Errorf("%w: the path repeats a call ID", ErrUnverifiable)
+
 // ErrExhausted is returned when the path holds no further recorded
 // call of the kind requested.
 var ErrExhausted = errors.New("replay: no further recorded call on the path")
@@ -457,7 +468,8 @@ func pathTo(s *agentsession.Session, leaf string) ([]agentsession.Entry, error) 
 // call it serves. It returns nil when it could, and an error wrapping
 // [ErrUnverifiable] when it could not: one naming how many responses
 // are unhashed, one wrapping [ErrSubstituted] naming the env entry that
-// changed workspace, or both joined. An error that does not wrap
+// changed workspace, one wrapping [ErrCallIDRepeated] naming the call
+// ID and both its calls' entries, or those that apply joined. An error that does not wrap
 // [ErrUnverifiable] is the failure to resolve leaf to a path at all,
 // which says nothing either way about the record. [AllowUnhashed] and
 // [AllowSubstitution] among opts leave out what they allow, as they do
@@ -494,7 +506,29 @@ func unverifiable(path []agentsession.Entry, o options) error {
 	if !o.allowSubst {
 		errs = append(errs, substituted(path))
 	}
+	errs = append(errs, repeatedCallID(path))
 	return errors.Join(errs...)
+}
+
+// repeatedCallID reports the first function call on path whose call ID
+// an earlier call on it has.
+func repeatedCallID(path []agentsession.Entry) error {
+	first := map[string]string{}
+	for _, e := range path {
+		item, ok := e.(*agentsession.ItemEntry)
+		if !ok {
+			continue
+		}
+		call, ok := item.Item.(*openresponses.FunctionCall)
+		if !ok {
+			continue
+		}
+		if id, seen := first[call.CallID]; seen {
+			return fmt.Errorf("%w: %s at %s and %s", ErrCallIDRepeated, call.CallID, id, item.ID)
+		}
+		first[call.CallID] = item.ID
+	}
+	return nil
 }
 
 // unhashed reports the responses on path that carry no request hash.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -129,11 +130,11 @@ func namesCalls(format string) bool {
 }
 
 // recording indexes the calls on a path by call ID and by name and
-// canonical arguments. Calls with the same name and arguments are
-// served in path order.
+// canonical arguments. Calls with the same call ID, or the same name
+// and arguments, are served in path order.
 type recording struct {
 	opts   options
-	byID   map[string]*recorded
+	byID   map[string][]*recorded
 	byArgs map[string][]*recorded
 
 	mu     sync.Mutex
@@ -166,11 +167,17 @@ type recording struct {
 // record is taken by position, when one call alone was waiting for its
 // output, so a call of a parallel batch, or any call after one that
 // never got an output, is served without one.
+// A session recorded by agentturn v0.0.11 or earlier may repeat a call
+// ID its provider numbered per response. There an output belongs to the
+// latest call before it with its ID, as RFC 0001 tells a reader, and
+// every call is served: the loop now renames the repeat, so it is
+// matched on its name and arguments rather than running its tool.
+//
 // A session with no path to the leaf named holds no recordings, so
 // every call falls through, or fails when Strict.
 func Tools(s *agentsession.Session, tools []agenttool.Tool, opts ...Option) []agenttool.Tool {
 	o := apply(opts)
-	rec := &recording{opts: o, byID: map[string]*recorded{}, byArgs: map[string][]*recorded{}}
+	rec := &recording{opts: o, byID: map[string][]*recorded{}, byArgs: map[string][]*recorded{}}
 	path, err := pathTo(s, o.leaf)
 	if err == nil {
 		rec.index(path, s.Header().Format)
@@ -230,9 +237,8 @@ func (r *recording) index(path []agentsession.Entry, format string) {
 		}
 		switch v := item.Item.(type) {
 		case *openresponses.FunctionCall:
-			if _, seen := calls[v.CallID]; seen {
-				continue
-			}
+			// A repeated ID makes this the call its next output
+			// answers; the earlier one keeps what it was given.
 			c := &recorded{call: v}
 			calls[v.CallID] = c
 			waiting[v.CallID] = c
@@ -249,7 +255,7 @@ func (r *recording) index(path []agentsession.Entry, format string) {
 		if c.output == nil {
 			continue
 		}
-		r.byID[c.call.CallID] = c
+		r.byID[c.call.CallID] = append(r.byID[c.call.CallID], c)
 		key := argsKey(c.call.Name, c.call.Arguments)
 		r.byArgs[key] = append(r.byArgs[key], c)
 	}
@@ -272,8 +278,9 @@ func argsKey(name, args string) string {
 func (r *recording) lookup(name, callID string, args json.RawMessage) (*recorded, bool, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if c, ok := r.byID[callID]; ok && c.call.Name == name {
-		delete(r.byID, callID)
+	if q := r.byID[callID]; len(q) > 0 && q[0].call.Name == name {
+		c := q[0]
+		r.byID[callID] = q[1:]
 		r.unqueue(c)
 		return c, true, true
 	}
@@ -284,7 +291,8 @@ func (r *recording) lookup(name, callID string, args json.RawMessage) (*recorded
 	}
 	c := queue[0]
 	r.byArgs[key] = queue[1:]
-	delete(r.byID, c.call.CallID)
+	q := r.byID[c.call.CallID]
+	r.byID[c.call.CallID] = slices.DeleteFunc(q, func(o *recorded) bool { return o == c })
 	return c, false, true
 }
 

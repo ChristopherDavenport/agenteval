@@ -24,6 +24,15 @@ versions may break the API.
   The estimates in a replayed too-large fold's error are the served
   summary's, not the recorded one's, which the record does not keep.
 
+- `replay.ErrCallIDRepeated`, wrapping `ErrUnverifiable`.
+  `Unverifiable` and a strict `NewModel` refuse a path on which two
+  function calls share a call ID, naming the ID and both calls'
+  entries. A session agentturn v0.0.11 or earlier recorded against a
+  provider that numbers its calls per response holds one, and from
+  v0.0.12 the loop renames the repeat, so a strict replay diverged at
+  the request after it naming two hashes and nothing about call IDs.
+  (#33)
+
 ### Changed
 
 - Requires agentsession v0.0.18, agenttool v0.0.12 and agentturn and
@@ -33,6 +42,16 @@ versions may break the API.
   `testdata/sessions` are re-recorded: the echo adapter's summaries
   are now too large, so the `compaction` fixture holds two failed
   folds before its first.
+
+### Fixed
+
+- `replay.Tools` serves every recorded call on a path that repeats a
+  call ID. It indexed only the first call with each ID and gave it
+  the first output, so the repeat, renamed by the loop, matched
+  nothing and a lenient replay ran its real tool. An output now
+  belongs to the latest call before it with its ID, as RFC 0001 tells
+  a reader, and calls sharing an ID are served by it in path order.
+  (#33)
 
 ## v0.0.7 - 2026-09-29
 
