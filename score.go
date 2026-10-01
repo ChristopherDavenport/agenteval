@@ -55,3 +55,45 @@ func (j JudgeFunc) Judge(ctx context.Context, t export.Trajectory, task Task) (S
 	}
 	return s, err
 }
+
+// GroupJudge scores the samples of one task together, once each has
+// been judged by the runner's judges: an advantage relative to the
+// group, or a length penalty that applies only when every sample
+// passed. The runner calls it once per task, over its
+// [Runner.Samples] samples, or the one run when it does not sample.
+type GroupJudge interface {
+	// Name identifies the judge in scores and outcome entries.
+	Name() string
+	// JudgeGroup returns one score per member, in the group's order.
+	// An error, or a count other than the group's, means the judge
+	// could not reach a verdict; the runner records the error on
+	// every member's result and writes no outcome for it.
+	JudgeGroup(ctx context.Context, group []Member, task Task) ([]Score, error)
+}
+
+// Member is one sample of a group: its trajectory, and what the
+// runner's judges said of it.
+type Member struct {
+	Trajectory export.Trajectory
+	Scores     []Score
+}
+
+// GroupJudgeFunc adapts a function to GroupJudge.
+type GroupJudgeFunc struct {
+	JudgeName string
+	Fn        func(ctx context.Context, group []Member, task Task) ([]Score, error)
+}
+
+// Name returns JudgeName.
+func (j GroupJudgeFunc) Name() string { return j.JudgeName }
+
+// JudgeGroup calls Fn and stamps each score with the judge's name.
+func (j GroupJudgeFunc) JudgeGroup(ctx context.Context, group []Member, task Task) ([]Score, error) {
+	scores, err := j.Fn(ctx, group, task)
+	for i := range scores {
+		if scores[i].Judge == "" {
+			scores[i].Judge = j.JudgeName
+		}
+	}
+	return scores, err
+}

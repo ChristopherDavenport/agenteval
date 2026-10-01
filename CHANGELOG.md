@@ -12,6 +12,19 @@ versions may break the API.
 - `Runner.JudgeFailedRuns`. Judges a task whose run failed, as the
   runner did before this release. (#39)
 
+- `Runner.Samples` and `Runner.GroupJudges`, with the `GroupJudge`
+  interface, `Member` and `GroupJudgeFunc`. A runner that samples runs
+  each task that many times, each in its own session, and marks each
+  run with `Result.Sample`, `Task.Meta["sample"]` and
+  `OutcomeDetails.Sample`. Group judges score a task's samples
+  together once all are judged, one score per sample, recorded as
+  outcomes on each sample's session. A group with an unjudged sample
+  is not group judged, and the other samples say so on `Err`. The
+  `agenteval:task` record carries `sample`, `samples` and
+  `group_judges`, so a store shows a group that was never scored.
+  `Report.Sample` looks up one sample, and `Compare` pairs by task and
+  sample. (#40)
+
 - `ConfigDiff.FoldFailed`, beside `Folded`: one run's path holds an
   `agentturn:compaction_failed` entry and the other's none. On a
   `Comparison` it is over all the runs of each side. (#37)

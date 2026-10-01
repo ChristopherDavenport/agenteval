@@ -18,13 +18,24 @@ type TaskRecord struct {
 	Task     string            `json:"task"`
 	Setup    map[string]string `json:"setup,omitempty"`
 	Meta     map[string]string `json:"meta,omitempty"`
+	// Sample is which of Samples runs of the task this is, from 1,
+	// when the runner sampled it. GroupJudges names the group judges
+	// the runner was to score the group with, so a reader can tell a
+	// group that was never scored, because the batch ended before its
+	// group step, by a session that holds no outcome from one of them.
+	Sample      int      `json:"sample,omitempty"`
+	Samples     int      `json:"samples,omitempty"`
+	GroupJudges []string `json:"group_judges,omitempty"`
 }
 
 // OutcomeDetails is the details member of an outcome entry the runner
 // writes, so a reader gets the task, the reason and the judge's own
 // session at known keys without knowing any judge's private JSON.
 type OutcomeDetails struct {
-	Task    string          `json:"task"`
+	Task string `json:"task"`
+	// Sample is the sample of the task scored, when the runner sampled
+	// it, as [Result.Sample] is.
+	Sample  int             `json:"sample,omitempty"`
 	Reason  string          `json:"reason,omitempty"`
 	Session string          `json:"session,omitempty"`
 	Judge   json.RawMessage `json:"judge,omitempty"`
@@ -35,7 +46,12 @@ type OutcomeDetails struct {
 // label from the score, and [OutcomeDetails] carrying the task. The
 // entry is not appended.
 func NewOutcome(score Score, target, task string) (*agentsession.OutcomeEntry, error) {
-	details, err := json.Marshal(OutcomeDetails{Task: task, Reason: score.Reason, Session: score.Session, Judge: score.Details})
+	return newOutcome(score, target, task, 0)
+}
+
+// newOutcome is NewOutcome for a sample of the task.
+func newOutcome(score Score, target, task string, sample int) (*agentsession.OutcomeEntry, error) {
+	details, err := json.Marshal(OutcomeDetails{Task: task, Sample: sample, Reason: score.Reason, Session: score.Session, Judge: score.Details})
 	if err != nil {
 		return nil, err
 	}

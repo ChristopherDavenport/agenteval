@@ -39,9 +39,12 @@ type Comparison struct {
 
 // Pair is one task under both configurations.
 type Pair struct {
-	Task string  `json:"task"`
-	A    *Result `json:"a"`
-	B    *Result `json:"b"`
+	Task string `json:"task"`
+	// Sample is the sample of the task both results are, when the
+	// runners sampled; the runs are paired by task and sample.
+	Sample int     `json:"sample,omitempty"`
+	A      *Result `json:"a"`
+	B      *Result `json:"b"`
 	// Delta is B's value minus A's, per judge that scored both.
 	Delta map[string]float64 `json:"delta"`
 	// Config is the difference between the settings B's run started
@@ -132,11 +135,11 @@ func Compare(ctx context.Context, suite *Suite, a, b *Runner) (*Comparison, erro
 	var foldedA, foldedB, failedA, failedB bool
 	for i := range ra.Results {
 		pa := &ra.Results[i]
-		pb, ok := rb.Result(pa.Task.ID)
+		pb, ok := rb.Sample(pa.Task.ID, pa.Sample)
 		if !ok {
 			continue
 		}
-		pair := Pair{Task: pa.Task.ID, A: pa, B: pb, Delta: map[string]float64{}}
+		pair := Pair{Task: pa.Task.ID, Sample: pa.Sample, A: pa, B: pb, Delta: map[string]float64{}}
 		byJudge := map[string]float64{}
 		for _, s := range pa.Scores {
 			byJudge[s.Judge] = s.Value

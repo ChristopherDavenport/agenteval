@@ -107,6 +107,18 @@ input, the rubric its instructions, and its answer is constrained to a
 score schema; with a store it records its own session, parented to the
 one it judged, so a judgement is as replayable as the run.
 
+## Samples and groups
+
+`Runner.Samples` runs each task several times, each in its own
+session, with `Result.Sample` and `Task.Meta["sample"]` saying which
+run it was. `Runner.GroupJudges` score a task's samples together once
+all of them are judged, as an RL producer computes advantages relative
+to the group, and each score is an `outcome` on its sample's session.
+A group with a sample that was not judged, because its run failed, is
+not group judged. Each session's task record names the group judges it
+expects, so a store tells a group that was never scored, because a
+batch ended before its group step, from one that was.
+
 ## Comparison and cost
 
 `Compare` runs a suite under two configurations, pairs the results by
@@ -122,7 +134,9 @@ compaction entry, when one did and the other did not.
 and the runner and the exporter take the same hook. A result's `usage`
 and `cost_usd` sum every model call on the run's path, the folds a
 compacting configuration made included, which is what the exported
-document's final metrics sum, so the two agree on the total. A run
+document's final metrics sum, so the two agree on the total. The one
+exception is a fold that failed: the result counts its summary calls,
+and the document does not yet (agentsession#184). A run
 with a call the hook cannot price has no `cost_usd`, where the
 document reports the sum of the calls it could.
 
