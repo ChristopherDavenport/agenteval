@@ -40,6 +40,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"reflect"
 	"regexp"
@@ -47,6 +48,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agentturn/compact"
@@ -283,7 +285,7 @@ type step struct {
 	// retry is the model_retry entry of a failed attempt, and failure
 	// the error it is served as.
 	retry   *agentsession.CustomEntry
-	failure *openresponses.Error
+	failure string
 	// failed is the compaction_failed entry of a fold that failed, and
 	// fold its data. A fold that asked twice is two steps, attempt 1
 	// and 2 of fold.Attempts.
@@ -399,7 +401,7 @@ func NewModel(s *agentsession.Session, opts ...Option) (*Model, error) {
 			if err := json.Unmarshal(v.Data, &rec); err != nil {
 				return nil, fmt.Errorf("replay: model retry %s: %w", v.ID, err)
 			}
-			m.steps = append(m.steps, step{retry: v, failure: failureOf(rec.Error), settings: settings})
+			m.steps = append(m.steps, step{retry: v, failure: rec.Error, settings: settings})
 		}
 	}
 	return m, nil
@@ -408,6 +410,75 @@ func NewModel(s *agentsession.Session, opts ...Option) (*Model, error) {
 // recordedError matches the text of an openresponses.Error:
 // "openresponses: <type> (<status>): <message>".
 var recordedError = regexp.MustCompile(`^openresponses: ([a-z_]+) \((\d{3})\)(?:: (.*))?$`)
+
+// servedFailure matches the prefix a [Failure] puts on the text, so a
+// replay of a replayed run rebuilds the error the first one served.
+var servedFailure = regexp.MustCompile(`^replay: recorded failure at step \d+ \([^)]*\): `)
+
+// Failure is the error a replay model serves for a failed attempt the
+// record holds: an agentturn:model_retry entry, or a fold's summary
+// call that failed. It names the step and the entry it was served
+// from, so a run that ends on it, under a configuration that gives up
+// where the recording retried, says it ended on a recorded failure
+// rather than reading as a provider outage. It unwraps to Err, the
+// openresponses error its recorded text spells or a 503 carrying the
+// text, so a Retry.Retryable that reads the status decides as it did,
+// and to Cause, the transport failure the text names when it names
+// one: openresponses.ErrTruncatedStream, io.ErrUnexpectedEOF, io.EOF,
+// syscall.ECONNRESET, ECONNREFUSED or EPIPE, the ones agentturn's
+// DefaultRetryable names, so a Retryable that retries only those
+// retries it too. A Retryable that declines every openresponses
+// error before asking about the transport declines it: the record
+// keeps the text alone, and the 503 is what gives it Retry-After.
+type Failure struct {
+	// N is the step, numbered as [Served.N] is, and EntryID the entry
+	// the failure was served from.
+	N       int
+	EntryID string
+	Err     *openresponses.Error
+	Cause   error
+}
+
+func (f *Failure) Error() string {
+	return fmt.Sprintf("replay: recorded failure at step %d (%s): %s", f.N, f.EntryID, f.Err.Error())
+}
+
+// Unwrap returns Err, and Cause when there is one.
+func (f *Failure) Unwrap() []error {
+	if f.Cause == nil {
+		return []error{f.Err}
+	}
+	return []error{f.Err, f.Cause}
+}
+
+// transportFailures are the errors a recorded text may end with that a
+// Failure unwraps to, longest text first so "unexpected EOF" is not
+// read as "EOF".
+var transportFailures = []error{
+	openresponses.ErrTruncatedStream,
+	syscall.ECONNREFUSED,
+	syscall.ECONNRESET,
+	io.ErrUnexpectedEOF,
+	syscall.EPIPE,
+	io.EOF,
+}
+
+// causeOf returns the transport failure text names, as the whole text
+// or as the last of its colon-separated parts, or nil.
+func causeOf(text string) error {
+	for _, err := range transportFailures {
+		if t := err.Error(); text == t || strings.HasSuffix(text, ": "+t) {
+			return err
+		}
+	}
+	return nil
+}
+
+// serveFailure returns the failure recorded as text at step n of entry.
+func serveFailure(n int, entryID, text string) *Failure {
+	text = servedFailure.ReplaceAllString(text, "")
+	return &Failure{N: n, EntryID: entryID, Err: failureOf(text), Cause: causeOf(text)}
+}
 
 // failureOf is the error a failed attempt is served as: the
 // openresponses error its recorded text spells, so a Retry.Retryable
@@ -745,15 +816,13 @@ func (m *Model) CreateStream(_ context.Context, req openresponses.Request, sink 
 	if err != nil {
 		return err
 	}
-	if st.failure != nil {
+	if st.retry != nil {
 		got, err := agentsession.RequestHash(session.Canonical(req))
 		if err != nil {
 			return err
 		}
 		m.observe(Served{Kind: KindFailure, N: n, EntryID: st.retry.ID, Got: got})
-		f := *st.failure
-		f.Headers = f.Headers.Clone()
-		return &f
+		return serveFailure(n, st.retry.ID, st.failure)
 	}
 	if st.comp != nil {
 		if isFoldRequest(req) {
@@ -823,7 +892,7 @@ func (m *Model) Compact(_ context.Context, req openresponses.CompactRequest) (*o
 		// as the error its text spells, unchecked as every endpoint
 		// fold is.
 		m.observe(Served{Kind: KindFailedFold, N: n, EntryID: st.failed.ID, Recorded: st.foldHash})
-		return nil, failureOf(strings.TrimPrefix(st.fold.Error, "compact: "))
+		return nil, serveFailure(n, st.failed.ID, strings.TrimPrefix(st.fold.Error, "compact: "))
 	case st.comp == nil:
 		return nil, fmt.Errorf("%w: response %s (step %d): the recording made a model call here and the request is a compaction", ErrDiverged, st.resp.ID, n)
 	}
@@ -974,7 +1043,7 @@ func (m *Model) serveFailedFold(st step, n int, req openresponses.Request, sink 
 	}
 	text := st.fold.Error
 	if rest, ok := strings.CutPrefix(text, foldCallFailed); ok {
-		return failureOf(rest)
+		return serveFailure(n, st.failed.ID, rest)
 	}
 	resp := openresponses.NewResponse(req)
 	if st.attempt == max(st.fold.Attempts, 1) {

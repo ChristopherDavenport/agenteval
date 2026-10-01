@@ -33,6 +33,16 @@ versions may break the API.
   the request after it naming two hashes and nothing about call IDs.
   (#33)
 
+- `replay.Failure`, the error a replay model serves for a failed
+  attempt: it names the step and the `agentturn:model_retry` or
+  `agentturn:compaction_failed` entry it was served from, and unwraps
+  to the rebuilt `openresponses.Error` and to the transport failure
+  the recorded text names, when it names one: `ErrTruncatedStream`,
+  `io.ErrUnexpectedEOF`, `io.EOF`, `ECONNRESET`, `ECONNREFUSED` or
+  `EPIPE`. A `Retry.Retryable` that retries only transport failures
+  declined the 503 a cut stream was served as, and the replay failed
+  there with an error that named no replay. (#34)
+
 ### Changed
 
 - Requires agentsession v0.0.18, agenttool v0.0.12 and agentturn and

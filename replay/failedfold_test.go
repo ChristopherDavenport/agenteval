@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -115,7 +116,7 @@ func TestStrictReplaysAFailedFold(t *testing.T) {
 				t.Fatal(err)
 			}
 			s, _, err := rerunWith(t, fixtureConfig(model), fold(model), "one", "two")
-			if (err != nil) != tt.fails || (err != nil && err.Error() != origErr.Error()) {
+			if (err != nil) != tt.fails || (err != nil && unserved(err.Error()) != origErr.Error()) {
 				t.Fatalf("strict replay: err = %v, want %v", err, origErr)
 			}
 			if model.Served() != model.Steps() {
@@ -155,11 +156,20 @@ func TestStrictReplaysAFailedFold(t *testing.T) {
 // one carries: the replay serves a summary of its own making, whose
 // size is not the recorded one's, only as sure to be too large.
 func foldError(text string) string {
+	text = unserved(text)
 	if strings.HasPrefix(text, compact.ErrSummaryTooLarge.Error()) {
 		return compact.ErrSummaryTooLarge.Error()
 	}
 	return text
 }
+
+// unserved is an error's text less what a replay.Failure adds, the
+// step and entry it was served from.
+func unserved(text string) string {
+	return servedPrefix.ReplaceAllString(text, "")
+}
+
+var servedPrefix = regexp.MustCompile(`replay: recorded failure at step \d+ \(sha256:[0-9a-f]+\): `)
 
 func sameUsage(a, b *openresponses.Usage) bool {
 	if a == nil || b == nil {

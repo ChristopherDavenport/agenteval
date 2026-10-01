@@ -3,10 +3,13 @@ package replay_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -56,6 +59,11 @@ func TestStrictReplaysARevisedRetry(t *testing.T) {
 		{"a rate limit", limited, nil, limited.Error()},
 		{"a rate limit, retried on its status", limited, onlyLimits, limited.Error()},
 		{"a truncated stream", io.ErrUnexpectedEOF, nil, io.ErrUnexpectedEOF.Error()},
+		// Issue 34: a product whose gateway retries status errors
+		// retries only transport failures in process.
+		{"a truncated stream, retried as transport", openresponses.ErrTruncatedStream, transportOnly, openresponses.ErrTruncatedStream.Error()},
+		{"a cut connection, retried as transport", io.ErrUnexpectedEOF, transportOnly, io.ErrUnexpectedEOF.Error()},
+		{"a reset, retried as transport", fmt.Errorf("read tcp 10.0.0.1:443: %w", syscall.ECONNRESET), transportOnly, syscall.ECONNRESET.Error()},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -125,7 +133,67 @@ func TestStrictReplaysARevisedRetry(t *testing.T) {
 			if !strings.Contains(rec, tt.want) || !strings.Contains(rec, `"revised":true`) {
 				t.Errorf("replayed retry = %s, want the text %q, revised", rec, tt.want)
 			}
+			// A replayed run replays as the recording did.
+			again, err := replay.NewModel(s, replay.Strict())
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg = fixtureConfig(again)
+			cfg.Retry = retry
+			if _, _, err := rerun(t, cfg, "first", "second"); err != nil {
+				t.Fatalf("strict replay of the replay: %v", err)
+			}
 		})
+	}
+}
+
+// transportOnly retries the transport failures alone, leaving status
+// errors to a gateway.
+func transportOnly(err error) bool {
+	var ne net.Error
+	return errors.Is(err, openresponses.ErrTruncatedStream) || errors.Is(err, io.ErrUnexpectedEOF) || errors.As(err, &ne)
+}
+
+// Issue 34: a replay under a configuration that does not retry ends on
+// the recorded failure, and the error says which step and entry it
+// was, and still unwraps to what the recorded text names.
+func TestAReplayThatStopsAtARecordedFailure(t *testing.T) {
+	cfg := fixtureConfig(&flaky{fail: map[int]bool{1: true}, err: io.ErrUnexpectedEOF})
+	cfg.Retry = agentturn.Retry{MaxAttempts: 2, Backoff: func(int, error) time.Duration { return 0 }}
+	orig, _, err := rerun(t, cfg, "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var retryID string
+	for _, e := range orig.Path(orig.Leaf()) {
+		if c, ok := e.(*agentsession.CustomEntry); ok && c.NS == session.ModelRetryNS {
+			retryID = c.ID
+		}
+	}
+	for _, strict := range []bool{true, false} {
+		var opts []replay.Option
+		if strict {
+			opts = append(opts, replay.Strict())
+		}
+		model, err := replay.NewModel(orig, opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, err = rerun(t, fixtureConfig(model), "first")
+		var f *replay.Failure
+		if !errors.As(err, &f) {
+			t.Fatalf("strict %v: err = %v, want a replay.Failure", strict, err)
+		}
+		if f.N != 1 || f.EntryID != retryID {
+			t.Errorf("strict %v: failure at step %d entry %s, want step 1 entry %s", strict, f.N, f.EntryID, retryID)
+		}
+		if !errors.Is(err, io.ErrUnexpectedEOF) || !strings.Contains(err.Error(), retryID) {
+			t.Errorf("strict %v: err = %v, want it to unwrap to io.ErrUnexpectedEOF and name %s", strict, err, retryID)
+		}
+		var oe *openresponses.Error
+		if !errors.As(err, &oe) || oe.HTTPStatus() != http.StatusServiceUnavailable {
+			t.Errorf("strict %v: err = %v, want the 503 it is served as", strict, err)
+		}
 	}
 }
 
