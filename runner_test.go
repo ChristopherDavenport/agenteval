@@ -464,7 +464,7 @@ func (failingModel) CreateStream(context.Context, openresponses.Request, openres
 // given, is where the folds are reported.
 func foldingConfig(rec *session.Recorder) agentturn.Config {
 	cfg := echoConfig()
-	opts := []compact.Option{compact.WithBudget(1), compact.WithKeepLast(2)}
+	opts := []compact.Option{compact.WithBudget(1), compact.WithKeepLast(2), compact.WithMinFold(0)}
 	if rec != nil {
 		opts = append(opts, compact.WithOnFold(rec.Fold))
 	}
@@ -504,7 +504,7 @@ func replayStrictly(t *testing.T, s *agentsession.Session, leaf string, prompts 
 	}
 	cfg := echoConfig()
 	cfg.Model = model
-	cfg.Transform = compact.NewLocal(model, compact.WithBudget(1), compact.WithKeepLast(2), compact.WithOnFold(rec.Fold)).Transform
+	cfg.Transform = compact.NewLocal(model, compact.WithBudget(1), compact.WithKeepLast(2), compact.WithMinFold(0), compact.WithOnFold(rec.Fold)).Transform
 	cfg.Tools = replay.Tools(s, cfg.Tools, replay.Strict(), replay.WithLeaf(leaf))
 	a := agentturn.New(cfg)
 	defer rec.Attach(a)()

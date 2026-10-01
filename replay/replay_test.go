@@ -448,7 +448,7 @@ func TestStrictRefusesAFoldWithNoRecordedHash(t *testing.T) {
 	ran := 0
 	cfg := fixtureConfig(model, replay.Tools(orig, []agenttool.Tool{upperTool(&ran)}, replay.Strict())...)
 	_, _, err = rerunWith(t, cfg, func(cfg *agentturn.Config, rec *session.Recorder) {
-		cfg.Transform = compact.NewLocal(model, compact.WithBudget(1), compact.WithKeepLast(2), compact.WithOnFold(rec.Fold)).Transform
+		cfg.Transform = compact.NewLocal(model, compact.WithBudget(1), compact.WithKeepLast(2), compact.WithMinFold(0), compact.WithOnFold(rec.Fold)).Transform
 	}, "one", "two", "three")
 	if !errors.Is(err, replay.ErrUnverifiable) {
 		t.Fatalf("err = %v, want ErrUnverifiable", err)
@@ -561,7 +561,7 @@ func TestCompactedRunReplays(t *testing.T) {
 		transform func(*replay.Model, *session.Recorder) *compact.Transform
 	}{
 		{"compaction", func(m *replay.Model, rec *session.Recorder) *compact.Transform {
-			return compact.NewLocal(m, compact.WithBudget(1), compact.WithKeepLast(2), compact.WithOnFold(rec.Fold))
+			return compact.NewLocal(m, compact.WithBudget(1), compact.WithKeepLast(2), compact.WithMinFold(0), compact.WithOnFold(rec.Fold))
 		}},
 		{"endpoint", func(m *replay.Model, rec *session.Recorder) *compact.Transform {
 			return compact.New(m, compact.WithBudget(1), compact.WithKeepLast(2), compact.WithOnFold(rec.Fold))
@@ -703,7 +703,7 @@ func TestStrictChecksTheFold(t *testing.T) {
 			ran := 0
 			cfg := fixtureConfig(model, replay.Tools(orig, []agenttool.Tool{upperTool(&ran)})...)
 			_, _, err = rerunWith(t, cfg, func(cfg *agentturn.Config, rec *session.Recorder) {
-				copts := []compact.Option{compact.WithBudget(1), compact.WithKeepLast(2), compact.WithOnFold(rec.Fold)}
+				copts := []compact.Option{compact.WithBudget(1), compact.WithKeepLast(2), compact.WithMinFold(0), compact.WithOnFold(rec.Fold)}
 				if tt.prompt != "" {
 					copts = append(copts, compact.WithSummaryPrompt(tt.prompt))
 				}

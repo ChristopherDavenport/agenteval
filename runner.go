@@ -287,12 +287,11 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task, sample in
 	// would hash none of them.
 	var seed []agentturn.Option
 	if s.Header().Base != "" {
-		cx, err := s.Context()
+		seed, err = session.AgentOptions(s, rec.ReadOptions()...)
 		if err != nil {
 			res.Err = fmt.Errorf("agenteval: task %s: base %s: %w", task.ID, s.Header().Base, err)
 			return res
 		}
-		seed = append(seed, agentturn.WithTranscript(cx.Items))
 	}
 	if err := r.describe(ctx, s, suite, task, sample); err != nil {
 		res.Err = fmt.Errorf("agenteval: task %s: %w", task.ID, err)

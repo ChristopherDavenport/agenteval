@@ -266,7 +266,7 @@ func TestCompareSeesFailedFolds(t *testing.T) {
 	a := &agenteval.Runner{Store: newStableStore(), Cost: flatRate, ConfigWith: func(agenteval.Task, *session.Recorder) agentturn.Config { return echoConfig() }}
 	b := &agenteval.Runner{Store: newStableStore(), Cost: flatRate, ConfigWith: func(_ agenteval.Task, rec *session.Recorder) agentturn.Config {
 		cfg := echoConfig()
-		cfg.Transform = compact.NewLocal(verbose{}, compact.WithBudget(1), compact.WithKeepLast(2), compact.WithOnFold(rec.Fold)).Transform
+		cfg.Transform = compact.NewLocal(verbose{}, compact.WithBudget(1), compact.WithKeepLast(2), compact.WithMinFold(0), compact.WithOnFold(rec.Fold)).Transform
 		return cfg
 	}}
 	c, err := agenteval.Compare(context.Background(), suite, a, b)

@@ -34,7 +34,7 @@ var fixtures = map[string]func(t *testing.T) *agentsession.Session{
 	"compaction": func(t *testing.T) *agentsession.Session {
 		cfg := echoConfig()
 		return record(t, cfg, func(cfg *agentturn.Config, rec *session.Recorder) {
-			c := compact.NewLocal(cfg.Model, compact.WithBudget(1), compact.WithKeepLast(2), compact.WithOnFold(rec.Fold))
+			c := compact.NewLocal(cfg.Model, compact.WithBudget(1), compact.WithKeepLast(2), compact.WithMinFold(0), compact.WithOnFold(rec.Fold))
 			cfg.Transform = c.Transform
 		}, "one", "two", "three")
 	},
