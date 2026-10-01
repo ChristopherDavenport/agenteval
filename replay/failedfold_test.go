@@ -86,16 +86,18 @@ func TestStrictReplaysAFailedFold(t *testing.T) {
 		{"incomplete", func(req openresponses.Request, sink openresponses.EventSink) error {
 			return emptyResponse(req, sink, openresponses.IncompleteReasonMaxOutputTokens)
 		}, false},
+		// From agentturn v0.0.15 a summary with no text is sent
+		// unfolded, as the two above are.
 		{"no text", func(req openresponses.Request, sink openresponses.EventSink) error {
 			return emptyResponse(req, sink, "")
-		}, true},
+		}, false},
 		{"the call failed", func(openresponses.Request, openresponses.EventSink) error {
 			return &openresponses.Error{StatusCode: http.StatusBadGateway, Type: openresponses.ErrorTypeServerError, Message: "bad gateway"}
 		}, true},
 	}
 	fold := func(model openresponses.Streamer) func(*agentturn.Config, *session.Recorder) {
 		return func(cfg *agentturn.Config, rec *session.Recorder) {
-			cfg.Transform = compact.NewLocal(model, compact.WithBudget(1), compact.WithKeepLast(2), compact.WithOnFold(rec.Fold)).Transform
+			cfg.Transform = compact.NewLocal(model, compact.WithBudget(1), compact.WithKeepLast(2), compact.WithMinFold(0), compact.WithOnFold(rec.Fold)).Transform
 		}
 	}
 	for _, tt := range tests {
@@ -184,7 +186,7 @@ func TestStrictChecksAFailedFold(t *testing.T) {
 	live := summarizer{summary: echoSummary}
 	setup := func(model openresponses.Streamer, opts ...compact.Option) func(*agentturn.Config, *session.Recorder) {
 		return func(cfg *agentturn.Config, rec *session.Recorder) {
-			opts = append(opts, compact.WithBudget(1), compact.WithKeepLast(2), compact.WithOnFold(rec.Fold))
+			opts = append(opts, compact.WithBudget(1), compact.WithKeepLast(2), compact.WithMinFold(0), compact.WithOnFold(rec.Fold))
 			cfg.Transform = compact.NewLocal(model, opts...).Transform
 		}
 	}

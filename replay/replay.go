@@ -844,6 +844,13 @@ func (m *Model) take() (step, int, error) {
 	return st, m.next, nil
 }
 
+// skippedFold is what a divergence at a local fold the replay did not
+// make adds: from agentturn v0.0.15 compact.NewLocal skips a fold whose
+// input is below its minimum, and backs off from a prefix whose fold
+// failed, so a recording made before then folds where a replay under
+// the same options does not.
+const skippedFold = "; from agentturn v0.0.15 compact.NewLocal skips a fold whose input is below its minimum, by default the larger of an eighth of the budget and twice an empty summary's estimate, which compact.WithMinFold(0) removes, and does not fold again a prefix whose fold failed"
+
 // isFoldRequest reports whether a request is shaped like a local
 // fold's summary call: no tools and no instructions, which is what
 // compact.NewLocal sends.
@@ -877,13 +884,17 @@ func (m *Model) CreateStream(_ context.Context, req openresponses.Request, sink 
 		}
 		// The configuration under test sent a turn where the
 		// recording folded.
-		return fmt.Errorf("%w: compaction %s (step %d): the recording folded here and the request did not", ErrDiverged, st.comp.ID, n)
+		hint := ""
+		if st.foldHash != "" {
+			hint = skippedFold
+		}
+		return fmt.Errorf("%w: compaction %s (step %d): the recording folded here and the request did not%s", ErrDiverged, st.comp.ID, n, hint)
 	}
 	if st.failed != nil {
 		if isFoldRequest(req) {
 			return m.serveFailedFold(st, n, req, sink)
 		}
-		return fmt.Errorf("%w: failed fold %s (step %d): the recording tried to fold here and the request did not", ErrDiverged, st.failed.ID, n)
+		return fmt.Errorf("%w: failed fold %s (step %d): the recording tried to fold here and the request did not%s", ErrDiverged, st.failed.ID, n, skippedFold)
 	}
 	// Got is computed whether or not the entry recorded a hash to
 	// compare it against: it is what this replay sent, and for a call
@@ -1091,13 +1102,14 @@ func outputLimitOnly(req openresponses.Request, recorded string) string {
 	return "; the request differs only in its max_output_tokens, which compact.NewLocal sets from agentturn v0.0.13 and a recording made before it never sent: compact.WithRequest can clear it"
 }
 
-// Errors a failed fold's text may begin with. The first two are the
-// ones compact.NewLocal reports after asking twice; the third is its
-// unexported error for a summary with no text, which fails the turn.
+// Errors a failed fold's text may begin with: the three compact.NewLocal
+// reports for a summary it could not apply, after which the transcript
+// is sent unfolded, and the prefix of a summary call that failed. A
+// summary with no text failed the turn before agentturn v0.0.15.
 var (
 	foldTooLarge   = compact.ErrSummaryTooLarge.Error()
 	foldIncomplete = compact.ErrSummaryIncomplete.Error()
-	foldNoText     = "compact: summary response has no text"
+	foldNoText     = compact.ErrSummaryNoText.Error()
 	foldCallFailed = "compact: summary: "
 )
 

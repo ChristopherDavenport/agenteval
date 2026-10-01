@@ -40,8 +40,24 @@ versions may break the API.
   failure. (#39)
 
 - Requires agentsession v0.0.19, agenttool v0.0.14 and agentturn and
-  its `session` module v0.0.14. From agentturn v0.0.14,
-  `compact.WithOnFold` adds a callback rather than replacing one.
+  its `session` module v0.0.15. From agentturn v0.0.14,
+  `compact.WithOnFold` adds a callback rather than replacing one. From
+  v0.0.15, `compact.NewLocal` skips a fold whose input is below
+  `WithMinFold` (by default the larger of an eighth of the budget and
+  twice an empty summary's estimate), backs off from a prefix whose
+  fold failed, and sends the transcript unfolded after a summary with
+  no text rather than failing the turn.
+
+- The runner seeds a task forked from a base with
+  `session.AgentOptions`, as agentturn v0.0.15 says a fork's agent is
+  seeded. Before, it seeded with the context's items alone, which
+  left out the items the filter keeps from the model, the reasoning
+  items' models, and the call IDs reserved elsewhere in the session.
+
+- A replay's divergence at a local fold it did not make, "the
+  recording folded here and the request did not", now says that
+  agentturn v0.0.15 skips a fold below its minimum and does not fold
+  again a prefix whose fold failed, and names `compact.WithMinFold(0)`.
 
 ### Fixed
 
@@ -86,6 +102,9 @@ diverges at its folds, for two reasons the divergence now names. (#38)
   refused, and the second call reaches the next step. The divergence
   there says the request is the fold's, sent again. Such a recording
   does not replay strictly under v0.0.13.
+- Under agentturn v0.0.15 a fold whose summary had no text no longer
+  fails the turn, so a replay of a recording whose turn failed there
+  goes on past the point where the recording stopped.
 
 ## v0.0.8 - 2026-10-01
 

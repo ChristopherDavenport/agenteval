@@ -29,7 +29,7 @@ func shortSummary(req openresponses.Request, sink openresponses.EventSink) error
 // half of it.
 func localFold(model openresponses.Streamer, opts ...compact.Option) func(*agentturn.Config, *session.Recorder) {
 	return func(cfg *agentturn.Config, rec *session.Recorder) {
-		opts := append(opts, compact.WithBudget(2), compact.WithKeepLast(2), compact.WithOnFold(rec.Fold))
+		opts := append(opts, compact.WithBudget(2), compact.WithKeepLast(2), compact.WithMinFold(0), compact.WithOnFold(rec.Fold))
 		cfg.Transform = compact.NewLocal(model, opts...).Transform
 	}
 }
@@ -115,14 +115,17 @@ func TestAFoldTheLoopRefused(t *testing.T) {
 
 // Issue 38: agentturn v0.0.12 recorded no attempt count, and asked a
 // summary with no text twice before the fold failed. Such a record is
-// served as two calls, and the replay goes on as recorded.
+// served as two calls, and the replay goes on as recorded. The record
+// is made here under agentturn v0.0.15, which sends the transcript
+// unfolded after such a fold where v0.0.12 failed the turn, and its
+// attempt count is then taken out.
 func TestANoTextFoldBeforeAttempts(t *testing.T) {
 	live := summarizer{summary: func(req openresponses.Request, sink openresponses.EventSink) error {
 		return emptyResponse(req, sink, "")
 	}}
-	orig, _, origErr := rerunWith(t, fixtureConfig(live), localFold(live), "one", "two")
-	if origErr == nil {
-		t.Fatal("the recording did not fail")
+	orig, _, err := rerunWith(t, fixtureConfig(live), localFold(live), "one", "two")
+	if err != nil {
+		t.Fatal(err)
 	}
 	before, err := replay.NewModel(orig, replay.Strict())
 	if err != nil {
@@ -157,11 +160,32 @@ func TestANoTextFoldBeforeAttempts(t *testing.T) {
 	if model.Steps() != before.Steps() {
 		t.Errorf("%d steps without the attempt count, %d with it", model.Steps(), before.Steps())
 	}
-	_, _, err = rerunWith(t, fixtureConfig(model), localFold(model), "one", "two")
-	if err == nil || unserved(err.Error()) != origErr.Error() {
-		t.Fatalf("strict replay: err = %v, want %v", err, origErr)
+	if _, _, err = rerunWith(t, fixtureConfig(model), localFold(model), "one", "two"); err != nil {
+		t.Fatalf("strict replay: %v", err)
 	}
 	if model.Served() != model.Steps() {
 		t.Errorf("served %d of %d steps", model.Served(), model.Steps())
+	}
+}
+
+// A fold recorded before agentturn v0.0.15 may be one compact.NewLocal
+// now skips as too small; the divergence says so and names the option
+// that restores the fold.
+func TestAFoldTheReplaySkipped(t *testing.T) {
+	live := summarizer{summary: shortSummary}
+	orig, _, err := rerunWith(t, fixtureConfig(live), localFold(live), "one", "two")
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, err := replay.NewModel(orig, replay.Strict())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaults := func(cfg *agentturn.Config, rec *session.Recorder) {
+		cfg.Transform = compact.NewLocal(model, compact.WithBudget(2), compact.WithKeepLast(2), compact.WithOnFold(rec.Fold)).Transform
+	}
+	_, _, err = rerunWith(t, fixtureConfig(model), defaults, "one", "two")
+	if !errors.Is(err, replay.ErrDiverged) || !strings.Contains(err.Error(), "the recording folded here") || !strings.Contains(err.Error(), "compact.WithMinFold(0)") {
+		t.Fatalf("err = %v, want a divergence naming WithMinFold", err)
 	}
 }
