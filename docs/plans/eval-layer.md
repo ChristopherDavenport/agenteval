@@ -336,6 +336,67 @@ context is better spent once. It runs under the same loop and records
 its own session when given a store, so a judgement is as replayable as
 the run it judged.
 
+### Samples and groups
+
+An RL producer runs one prompt several times and scores the samples
+together: Atropos computes advantages relative to the group, and drops
+a group that is incomplete or whose scores are all equal. The runner
+runs a group, and a group judge scores it; what a group means for
+training stays with the product.
+
+```go
+type Runner struct {
+    // ...
+    Samples     int          // runs per task; zero or one means one, a group of one
+    GroupJudges []GroupJudge // score each task's samples together, after its judges
+}
+
+type Result struct {
+    // ...
+    Sample int // 1 to Samples; 0 when the runner does not sample
+}
+
+// GroupJudge scores the samples of one task together, once each has been
+// judged. It returns one score per member, in order.
+type GroupJudge interface {
+    Name() string
+    JudgeGroup(ctx context.Context, group []Member, task Task) ([]Score, error)
+}
+
+type Member struct {
+    Trajectory export.Trajectory
+    Scores     []Score // what the runner's judges said of this sample
+}
+```
+
+- **Identity.** A sample keeps its task's ID and is told apart by
+  `Result.Sample`, so a suite's own IDs need no reserved character. The
+  `Task` each sample runs, and every hook sees, carries
+  `Meta["sample"]`, so a `Header` that fixes session IDs can fix one per
+  sample; a suite whose task already sets that key is refused.
+- **Order.** Results are task-major, sample-minor. Samples run under
+  `Parallel` like tasks; a task's group judges run once its last sample
+  is judged, on that sample's goroutine.
+- **Recording.** A group score is an `outcome` entry on each member's
+  session, targeting that member's run, like any other score.
+  `OutcomeDetails.Sample` names the sample. Each session's
+  `agenteval:task` entry records `sample`, `samples` and
+  `group_judges`, so a reader of a store can tell a group that was
+  never scored, because a batch was killed before its group step, from
+  one that was: a session whose record names a group judge it holds no
+  outcome from.
+- **Incomplete groups.** A group with a member that was not judged, a
+  run that failed under the default of leaving it unjudged, is not
+  group-judged, as Atropos drops it. Every other member's result says
+  so on `Err`. With `JudgeFailedRuns` the failed member is judged and
+  the group is complete.
+- **Errors.** A group judge that errs, or returns a score count other
+  than the group's, writes nothing, and the error is on every member's
+  result.
+- **Report and comparison.** Each sample is a result, so `Summarize`
+  counts samples, and a group judge is summarised like any other.
+  `Compare` pairs results by task and sample.
+
 ### Report and comparison
 
 ```go

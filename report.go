@@ -64,10 +64,22 @@ func (r *Report) Judges() []string {
 	return names
 }
 
-// Result returns the result for a task ID.
+// Result returns the result for a task ID: its first sample, when the
+// runner sampled it.
 func (r *Report) Result(task string) (*Result, bool) {
 	for i := range r.Results {
 		if r.Results[i].Task.ID == task {
+			return &r.Results[i], true
+		}
+	}
+	return nil, false
+}
+
+// Sample returns the result of one sample of a task, numbered as
+// [Result.Sample] is: 0 for a runner that does not sample.
+func (r *Report) Sample(task string, sample int) (*Result, bool) {
+	for i := range r.Results {
+		if r.Results[i].Task.ID == task && r.Results[i].Sample == sample {
 			return &r.Results[i], true
 		}
 	}

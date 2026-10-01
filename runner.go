@@ -5,7 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/ChristopherDavenport/agenteval/replay"
 	"github.com/ChristopherDavenport/agentsession"
@@ -64,6 +69,21 @@ type Runner struct {
 	// JudgeFailedRuns judges a task whose run failed as one that ended,
 	// for an evaluation where a crash counts against the configuration.
 	JudgeFailedRuns bool
+	// Samples is how many times each task is run, each in a session of
+	// its own: the group an RL producer scores together. Zero or one
+	// means once. Each sample's Task, as every hook and judge sees it,
+	// carries Meta["sample"], from "1", so a Header that fixes session
+	// IDs can fix one per sample; a suite whose task sets that key
+	// itself is refused.
+	Samples int
+	// GroupJudges score each task's samples together once all of them
+	// are judged, on the goroutine of the last to finish. Each score is
+	// appended to its sample's session as an outcome entry, like any
+	// other. A group with a sample that was not judged, a run that
+	// failed under the default of leaving it unjudged, is not group
+	// judged, as an RL producer drops an incomplete group; every other
+	// sample's result says so on Err.
+	GroupJudges []GroupJudge
 	// Answer answers the calls a run left pending when it ended
 	// input_required, so an evaluation of a product whose policy asks
 	// measures the whole run rather than the part before the first
@@ -95,6 +115,9 @@ type Runner struct {
 // Result is one task's run and its scores.
 type Result struct {
 	Task Task `json:"task"`
+	// Sample is which run of the task this is, from 1, when
+	// [Runner.Samples] is above one; 0 otherwise.
+	Sample int `json:"sample,omitempty"`
 	// SessionID is the session the run was recorded in.
 	SessionID string `json:"session_id"`
 	// Target is the entry every score of this result targets: the last
@@ -135,6 +158,11 @@ type Result struct {
 	// error, a store failure, or a judge that could not reach a
 	// verdict. A result with an error may still carry scores.
 	Err error `json:"-"`
+
+	// trajectory is what the judges read, and judged says they did,
+	// for the group step.
+	trajectory export.Trajectory
+	judged     bool
 }
 
 // MarshalJSON writes the result with Err as an "error" string.
@@ -186,22 +214,45 @@ func (r *Runner) Run(ctx context.Context, suite *Suite) (*Report, error) {
 	if suite == nil || len(suite.Tasks) == 0 {
 		return nil, errors.New("agenteval: suite has no tasks")
 	}
-	report := &Report{Suite: suite.Name, Manifest: suite.Manifest, Results: make([]Result, len(suite.Tasks))}
+	n := max(r.Samples, 1)
+	if n > 1 {
+		for _, task := range suite.Tasks {
+			if _, ok := task.Meta[SampleMeta]; ok {
+				return nil, fmt.Errorf("agenteval: task %s sets Meta[%q], which the runner sets on each sample", task.ID, SampleMeta)
+			}
+		}
+	}
+	report := &Report{Suite: suite.Name, Manifest: suite.Manifest, Results: make([]Result, len(suite.Tasks)*n)}
+	// left counts each task's samples still running; the one that
+	// takes it to zero runs the group step, and the atomic orders the
+	// other samples' results before its reads.
+	left := make([]atomic.Int32, len(suite.Tasks))
 	width := max(r.Parallel, 1)
 	sem := make(chan struct{}, width)
 	var wg sync.WaitGroup
 	for i, task := range suite.Tasks {
-		if ctx.Err() != nil {
-			report.Results[i] = Result{Task: task, Err: ctx.Err()}
-			continue
+		left[i].Store(int32(n))
+		group := report.Results[i*n : (i+1)*n]
+		for k := range n {
+			sample, run := 0, task
+			if n > 1 {
+				sample, run = k+1, withSample(task, k+1)
+			}
+			if ctx.Err() != nil {
+				group[k] = Result{Task: run, Sample: sample, Err: ctx.Err()}
+				continue
+			}
+			wg.Add(1)
+			sem <- struct{}{}
+			go func() {
+				defer wg.Done()
+				defer func() { <-sem }()
+				group[k] = r.runTask(ctx, suite, run, sample)
+				if left[i].Add(-1) == 0 {
+					r.judgeGroup(ctx, task, group)
+				}
+			}()
 		}
-		wg.Add(1)
-		sem <- struct{}{}
-		go func() {
-			defer wg.Done()
-			defer func() { <-sem }()
-			report.Results[i] = r.runTask(ctx, suite, task)
-		}()
 	}
 	wg.Wait()
 	report.ByJudge = Summarize(report.Results)
@@ -209,8 +260,8 @@ func (r *Runner) Run(ctx context.Context, suite *Suite) (*Report, error) {
 }
 
 // runTask runs one task in a fresh session and judges it.
-func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task) (res Result) {
-	res.Task = task
+func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task, sample int) (res Result) {
+	res.Task, res.Sample = task, sample
 	inputs := task.Inputs()
 	if len(inputs) == 0 {
 		res.Err = fmt.Errorf("agenteval: task %s has nothing to send", task.ID)
@@ -243,7 +294,7 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task) (res Resu
 		}
 		seed = append(seed, agentturn.WithTranscript(cx.Items))
 	}
-	if err := r.describe(ctx, s, suite, task); err != nil {
+	if err := r.describe(ctx, s, suite, task, sample); err != nil {
 		res.Err = fmt.Errorf("agenteval: task %s: %w", task.ID, err)
 		return res
 	}
@@ -306,6 +357,7 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task) (res Resu
 		res.Err = errors.Join(res.Err, fmt.Errorf("task %s: %w", task.ID, err))
 		return res
 	}
+	res.trajectory, res.judged = t, true
 	for _, j := range r.Judges {
 		score, err := j.Judge(ctx, t, task)
 		if err != nil {
@@ -315,7 +367,7 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task) (res Resu
 		if score.Judge == "" {
 			score.Judge = j.Name()
 		}
-		entry, err := NewOutcome(score, res.Target, task.ID)
+		entry, err := newOutcome(score, res.Target, task.ID, sample)
 		if err != nil {
 			res.Err = errors.Join(res.Err, fmt.Errorf("agenteval: task %s: judge %s: %w", task.ID, j.Name(), err))
 			continue
@@ -440,7 +492,7 @@ func replayable(s *agentsession.Session, leaf string) error {
 // base's responses an env entry that named no workspace where the base
 // ran in one would read as a substitution, which a strict replay
 // refuses.
-func (r *Runner) describe(ctx context.Context, s *agentsession.Session, suite *Suite, task Task) error {
+func (r *Runner) describe(ctx context.Context, s *agentsession.Session, suite *Suite, task Task, sample int) error {
 	sessionID := s.ID()
 	if _, err := r.Store.Append(ctx, sessionID, &agentsession.InfoEntry{Name: task.ID}); err != nil {
 		return err
@@ -457,12 +509,88 @@ func (r *Runner) describe(ctx context.Context, s *agentsession.Session, suite *S
 			return err
 		}
 	}
-	data, err := json.Marshal(TaskRecord{Suite: suite.Name, Location: suite.Manifest.Location, Task: task.ID, Setup: task.Setup, Meta: task.Meta})
+	rec := TaskRecord{Suite: suite.Name, Location: suite.Manifest.Location, Task: task.ID, Setup: task.Setup, Meta: task.Meta, Sample: sample}
+	if sample > 0 {
+		rec.Samples = r.Samples
+	}
+	for _, j := range r.GroupJudges {
+		rec.GroupJudges = append(rec.GroupJudges, j.Name())
+	}
+	data, err := json.Marshal(rec)
 	if err != nil {
 		return err
 	}
 	_, err = r.Store.Append(ctx, sessionID, &agentsession.CustomEntry{NS: TaskNS, Data: data})
 	return err
+}
+
+// SampleMeta is the Task.Meta key the runner sets on each sample of a
+// task when [Runner.Samples] is above one, to the sample's number from
+// "1".
+const SampleMeta = "sample"
+
+// withSample returns task as its sample'th run sees it: Meta copied,
+// with SampleMeta set.
+func withSample(task Task, sample int) Task {
+	meta := make(map[string]string, len(task.Meta)+1)
+	maps.Copy(meta, task.Meta)
+	meta[SampleMeta] = strconv.Itoa(sample)
+	task.Meta = meta
+	return task
+}
+
+// judgeGroup runs the group judges over a task's samples, once each
+// has run and been judged, and records each score on its sample.
+func (r *Runner) judgeGroup(ctx context.Context, task Task, group []Result) {
+	if len(r.GroupJudges) == 0 {
+		return
+	}
+	var unjudged []string
+	for _, res := range group {
+		if !res.judged {
+			unjudged = append(unjudged, strconv.Itoa(res.Sample))
+		}
+	}
+	if len(unjudged) > 0 {
+		err := fmt.Errorf("agenteval: task %s: group not judged: sample %s was not judged", task.ID, strings.Join(unjudged, ", "))
+		for k := range group {
+			if group[k].judged {
+				group[k].Err = errors.Join(group[k].Err, err)
+			}
+		}
+		return
+	}
+	members := make([]Member, len(group))
+	for k, res := range group {
+		members[k] = Member{Trajectory: res.trajectory, Scores: slices.Clone(res.Scores)}
+	}
+	for _, j := range r.GroupJudges {
+		scores, err := j.JudgeGroup(ctx, members, task)
+		if err == nil && len(scores) != len(group) {
+			err = fmt.Errorf("%d scores for %d samples", len(scores), len(group))
+		}
+		if err != nil {
+			for k := range group {
+				group[k].Err = errors.Join(group[k].Err, fmt.Errorf("agenteval: task %s: group judge %s: %w", task.ID, j.Name(), err))
+			}
+			continue
+		}
+		for k, score := range scores {
+			res := &group[k]
+			if score.Judge == "" {
+				score.Judge = j.Name()
+			}
+			entry, err := newOutcome(score, res.Target, task.ID, res.Sample)
+			if err == nil {
+				_, err = r.Store.Append(ctx, res.SessionID, entry)
+			}
+			if err != nil {
+				res.Err = errors.Join(res.Err, fmt.Errorf("agenteval: task %s: group judge %s: %w", task.ID, j.Name(), err))
+				continue
+			}
+			res.Scores = append(res.Scores, score)
+		}
+	}
 }
 
 // lastEnv returns the env entry in force at the session's leaf, or nil
