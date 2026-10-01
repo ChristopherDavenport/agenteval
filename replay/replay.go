@@ -290,10 +290,11 @@ type step struct {
 	failure string
 	// failed is the compaction_failed entry of a fold that failed, and
 	// fold its data. A fold that asked twice is two steps, attempt 1
-	// and 2 of fold.Attempts.
+	// and 2 of calls, which foldCalls reads from the record.
 	failed  *agentsession.CustomEntry
 	fold    session.FailedFold
 	attempt int
+	calls   int
 	// settings are the settings in force at this step: what the config
 	// entries on the path up to it say the request was made under.
 	settings agentsession.Settings
@@ -314,6 +315,10 @@ type Model struct {
 
 	mu   sync.Mutex
 	next int
+	// folded is the hash of the request the last fold step served
+	// answered, and foldedAt that step.
+	folded   string
+	foldedAt int
 }
 
 // NewModel builds a model over the path from the root to the leaf
@@ -382,11 +387,10 @@ func NewModel(s *agentsession.Session, opts ...Option) (*Model, error) {
 				if err := json.Unmarshal(v.Data, &f); err != nil {
 					return nil, fmt.Errorf("replay: failed fold %s: %w", v.ID, err)
 				}
-				// Each summary call the fold made is a step. A record
-				// before agentturn v0.0.13 counts none, and is taken
-				// to have made one.
-				for a := range max(f.Attempts, 1) {
-					m.steps = append(m.steps, step{failed: v, fold: f, attempt: a + 1, foldHash: f.RequestHash, settings: settings})
+				// Each summary call the fold made is a step.
+				calls := foldCalls(f)
+				for a := range calls {
+					m.steps = append(m.steps, step{failed: v, fold: f, attempt: a + 1, calls: calls, foldHash: f.RequestHash, settings: settings})
 				}
 				continue
 			}
@@ -825,6 +829,7 @@ func (m *Model) Reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.next = 0
+	m.folded, m.foldedAt = "", 0
 }
 
 // take returns the next step and advances, or ErrExhausted.
@@ -898,7 +903,7 @@ func (m *Model) CreateStream(_ context.Context, req openresponses.Request, sink 
 	// only under AllowUnhashed, because NewModel refuses such a path
 	// outright.
 	if m.opts.strict && sv.Recorded != "" && !sv.Match {
-		return fmt.Errorf("%w: response %s (step %d): recorded %s, received %s", ErrDiverged, st.resp.ID, n, sv.Recorded, sv.Got)
+		return fmt.Errorf("%w: response %s (step %d): recorded %s, received %s%s", ErrDiverged, st.resp.ID, n, sv.Recorded, sv.Got, m.refolded(got, n))
 	}
 	return serveResponse(st, n, req, sink)
 }
@@ -948,9 +953,30 @@ func (m *Model) Compact(_ context.Context, req openresponses.CompactRequest) (*o
 }
 
 func (m *Model) observe(sv Served) {
+	if sv.Kind == KindFold {
+		m.mu.Lock()
+		m.folded, m.foldedAt = sv.Got, sv.N
+		m.mu.Unlock()
+	}
 	if m.opts.observer != nil {
 		m.opts.observer(sv)
 	}
+}
+
+// refolded says, for a response step that received got, whether got is
+// the request of the fold served at the step before: the loop asked
+// for the summary again rather than applying the one served. From
+// agentturn v0.0.13 compact.NewLocal refuses a summary no smaller than
+// what it folds and asks again, and a fold recorded before then with
+// such a summary is served and refused. It returns the sentence to add
+// to the divergence, or "".
+func (m *Model) refolded(got string, n int) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.folded == "" || m.folded != got || m.foldedAt != n-1 {
+		return ""
+	}
+	return fmt.Sprintf("; that is the request of the fold served at step %d, sent again: the loop did not apply the summary served there, as compact.NewLocal from agentturn v0.0.13 refuses one no smaller than what it folds, which a recording made before it may have applied", n-1)
 }
 
 // serveResponse streams a recorded response: its items, complete and
@@ -1029,7 +1055,7 @@ func (m *Model) serveFold(st step, n int, req openresponses.Request, sink openre
 		return fmt.Errorf("%w: compaction %s (step %d): the entry records no hash for the fold's own request", ErrUnverifiable, st.comp.ID, n)
 	}
 	if m.opts.strict && sv.Recorded != "" && !sv.Match {
-		return fmt.Errorf("%w: compaction %s (step %d): the fold's request: recorded %s, received %s", ErrDiverged, st.comp.ID, n, sv.Recorded, sv.Got)
+		return fmt.Errorf("%w: compaction %s (step %d): the fold's request: recorded %s, received %s%s", ErrDiverged, st.comp.ID, n, sv.Recorded, sv.Got, outputLimitOnly(req, sv.Recorded))
 	}
 	resp := openresponses.NewResponse(req)
 	resp.Usage = st.comp.Usage
@@ -1047,6 +1073,24 @@ func (m *Model) serveFold(st step, n int, req openresponses.Request, sink openre
 	return em.Complete()
 }
 
+// outputLimitOnly says, for a fold's request that did not match the
+// hash recorded for it, whether the request without max_output_tokens
+// does. agentturn v0.0.13 sets it on every local fold's summary call,
+// and a recording made before it never sent one, so without this every
+// fold such a recording holds diverges naming two hashes and no
+// member. It returns the sentence to add to the divergence, or "".
+func outputLimitOnly(req openresponses.Request, recorded string) string {
+	if req.MaxOutputTokens == nil {
+		return ""
+	}
+	req.MaxOutputTokens = nil
+	got, err := agentsession.RequestHash(session.Canonical(req))
+	if err != nil || got != recorded {
+		return ""
+	}
+	return "; the request differs only in its max_output_tokens, which compact.NewLocal sets from agentturn v0.0.13 and a recording made before it never sent: compact.WithRequest can clear it"
+}
+
 // Errors a failed fold's text may begin with. The first two are the
 // ones compact.NewLocal reports after asking twice; the third is its
 // unexported error for a summary with no text, which fails the turn.
@@ -1056,6 +1100,19 @@ var (
 	foldNoText     = "compact: summary response has no text"
 	foldCallFailed = "compact: summary: "
 )
+
+// foldCalls is how many summary calls a failed fold made. A record
+// before agentturn v0.0.13 counts none: a summary with no text was
+// asked twice before the fold failed, and anything else once.
+func foldCalls(f session.FailedFold) int {
+	if f.Attempts > 0 {
+		return f.Attempts
+	}
+	if strings.HasPrefix(f.Error, foldNoText) {
+		return 2
+	}
+	return 1
+}
 
 // serveFailedFold answers one summary call of a fold that failed, so
 // that compact.NewLocal fails it the way the record says it did. The
@@ -1083,14 +1140,14 @@ func (m *Model) serveFailedFold(st step, n int, req openresponses.Request, sink 
 		return fmt.Errorf("%w: failed fold %s (step %d): the entry records no hash for the fold's own request", ErrUnverifiable, st.failed.ID, n)
 	}
 	if m.opts.strict && sv.Recorded != "" && !sv.Match {
-		return fmt.Errorf("%w: failed fold %s (step %d): the fold's request: recorded %s, received %s", ErrDiverged, st.failed.ID, n, sv.Recorded, sv.Got)
+		return fmt.Errorf("%w: failed fold %s (step %d): the fold's request: recorded %s, received %s%s", ErrDiverged, st.failed.ID, n, sv.Recorded, sv.Got, outputLimitOnly(req, sv.Recorded))
 	}
 	text := st.fold.Error
 	if rest, ok := strings.CutPrefix(text, foldCallFailed); ok {
 		return serveFailure(n, st.failed.ID, rest)
 	}
 	resp := openresponses.NewResponse(req)
-	if st.attempt == max(st.fold.Attempts, 1) {
+	if st.attempt == st.calls {
 		resp.Usage = st.fold.Usage
 		if st.fold.ResponseID != "" {
 			resp.ID = st.fold.ResponseID
