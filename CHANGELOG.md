@@ -5,6 +5,35 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+### Added
+
+- `replay.KindFailedFold`. A replay model serves each
+  `agentturn:compaction_failed` entry on the path as the fold that
+  failed there, one step per summary call it made, so the fold fails
+  again as recorded and the transcript goes on unfolded: a summary
+  too large is answered with the request's own input as text, an
+  incomplete one with an empty response ended incomplete with the
+  recorded reason, one with no text with an empty response, and a
+  call that failed with the error its text spells. A strict replay
+  checks each call against the request hash the entry records, and
+  refuses one with no hash unless `AllowUnhashed`. Under agentturn
+  v0.0.13 a summary no smaller than what it folds fails the fold, and
+  a strict replay of such a run diverged at the fold's first call.
+  The estimates in a replayed too-large fold's error are the served
+  summary's, not the recorded one's, which the record does not keep.
+
+### Changed
+
+- Requires agentsession v0.0.18, agenttool v0.0.12 and agentturn and
+  its `session` module v0.0.13. Runs are recorded as
+  `agentsession/0.10`, and agentsession v0.0.17 and earlier refuse
+  the sessions the runner writes. The fixtures under
+  `testdata/sessions` are re-recorded: the echo adapter's summaries
+  are now too large, so the `compaction` fixture holds two failed
+  folds before its first.
+
 ## v0.0.7 - 2026-09-29
 
 ### Added
