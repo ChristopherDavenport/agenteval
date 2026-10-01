@@ -41,7 +41,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"os"
 	"reflect"
 	"regexp"
 	"slices"
@@ -416,20 +418,29 @@ var recordedError = regexp.MustCompile(`^openresponses: ([a-z_]+) \((\d{3})\)(?:
 var servedFailure = regexp.MustCompile(`^replay: recorded failure at step \d+ \([^)]*\): `)
 
 // Failure is the error a replay model serves for a failed attempt the
-// record holds: an agentturn:model_retry entry, or a fold's summary
-// call that failed. It names the step and the entry it was served
-// from, so a run that ends on it, under a configuration that gives up
-// where the recording retried, says it ended on a recorded failure
-// rather than reading as a provider outage. It unwraps to Err, the
-// openresponses error its recorded text spells or a 503 carrying the
-// text, so a Retry.Retryable that reads the status decides as it did,
-// and to Cause, the transport failure the text names when it names
-// one: openresponses.ErrTruncatedStream, io.ErrUnexpectedEOF, io.EOF,
-// syscall.ECONNRESET, ECONNREFUSED or EPIPE, the ones agentturn's
-// DefaultRetryable names, so a Retryable that retries only those
-// retries it too. A Retryable that declines every openresponses
-// error before asking about the transport declines it: the record
-// keeps the text alone, and the 503 is what gives it Retry-After.
+// record holds: an agentturn:model_retry entry, a fold's summary call
+// that failed, or a response entry that recorded a failed response,
+// the last attempt of a run whose retries ran out. It names the step
+// and the entry it was served from, so a run that ends on it, under a
+// configuration that gives up where the recording retried, says it
+// ended on a recorded failure rather than reading as a provider
+// outage. It unwraps to Err, the openresponses error its recorded text
+// spells or a 503 carrying the text, so a Retry.Retryable that reads
+// the status decides as it did, and to Cause, the transport failure
+// the text names when it names one, so a Retryable that retries only
+// transport failures retries it too. The texts recognised, as the
+// whole text or its last colon-separated part, are those of
+// openresponses.ErrTruncatedStream, io.ErrUnexpectedEOF, io.EOF,
+// os.ErrDeadlineExceeded ("i/o timeout"), context.DeadlineExceeded,
+// and syscall.ECONNRESET, ECONNREFUSED, EPIPE, ETIMEDOUT, ENETUNREACH
+// and EHOSTUNREACH, each served as itself; "no such host", served as
+// a *net.DNSError; and a net/http client timeout, served as a
+// net.Error whose Timeout is true. Each is a net.Error or one of the
+// errors agentturn's DefaultRetryable names. A Retryable that declines
+// every openresponses error before asking about the transport
+// declines it: the record keeps the text alone, and the 503 is what
+// gives it Retry-After. A failed response has no Cause and is served
+// as the error it recorded.
 type Failure struct {
 	// N is the step, numbered as [Served.N] is, and EntryID the entry
 	// the failure was served from.
@@ -456,12 +467,25 @@ func (f *Failure) Unwrap() []error {
 // read as "EOF".
 var transportFailures = []error{
 	openresponses.ErrTruncatedStream,
+	context.DeadlineExceeded,
 	syscall.ECONNREFUSED,
+	syscall.EHOSTUNREACH,
+	syscall.ENETUNREACH,
+	syscall.ETIMEDOUT,
 	syscall.ECONNRESET,
 	io.ErrUnexpectedEOF,
+	os.ErrDeadlineExceeded,
 	syscall.EPIPE,
 	io.EOF,
 }
+
+// lookupFailure matches the text of a *net.DNSError for a host that
+// does not resolve: "lookup <name>[ on <server>]: no such host".
+var lookupFailure = regexp.MustCompile(`lookup (\S+?)(?: on (\S+))?: no such host$`)
+
+// clientTimeout is the text net/http's Client puts on a request its
+// Timeout ended, after the error it wraps.
+const clientTimeout = "(Client.Timeout exceeded while awaiting headers)"
 
 // causeOf returns the transport failure text names, as the whole text
 // or as the last of its colon-separated parts, or nil.
@@ -471,8 +495,26 @@ func causeOf(text string) error {
 			return err
 		}
 	}
+	if m := lookupFailure.FindStringSubmatch(text); m != nil {
+		return &net.DNSError{Err: "no such host", Name: m[1], Server: m[2], IsNotFound: true}
+	}
+	if strings.HasSuffix(text, clientTimeout) {
+		return timeoutError(text)
+	}
 	return nil
 }
+
+// timeoutError is a net.Error that timed out, for a recorded timeout
+// whose own type the text does not name.
+type timeoutError string
+
+func (e timeoutError) Error() string { return string(e) }
+
+// Timeout reports true.
+func (timeoutError) Timeout() bool { return true }
+
+// Temporary reports true, as net/http's own timeout does.
+func (timeoutError) Temporary() bool { return true }
 
 // serveFailure returns the failure recorded as text at step n of entry.
 func serveFailure(n int, entryID, text string) *Failure {
@@ -858,7 +900,7 @@ func (m *Model) CreateStream(_ context.Context, req openresponses.Request, sink 
 	if m.opts.strict && sv.Recorded != "" && !sv.Match {
 		return fmt.Errorf("%w: response %s (step %d): recorded %s, received %s", ErrDiverged, st.resp.ID, n, sv.Recorded, sv.Got)
 	}
-	return serveResponse(st, req, sink)
+	return serveResponse(st, n, req, sink)
 }
 
 // Create serves the next recorded call as a complete response.
@@ -913,7 +955,7 @@ func (m *Model) observe(sv Served) {
 
 // serveResponse streams a recorded response: its items, complete and
 // without deltas, then the terminal event the entry recorded.
-func serveResponse(st step, req openresponses.Request, sink openresponses.EventSink) error {
+func serveResponse(st step, n int, req openresponses.Request, sink openresponses.EventSink) error {
 	resp := openresponses.NewResponse(req)
 	resp.ID = st.resp.ResponseID
 	if st.resp.Model != "" {
@@ -922,9 +964,9 @@ func serveResponse(st step, req openresponses.Request, sink openresponses.EventS
 	resp.Usage = st.resp.Usage
 	if st.resp.Status == openresponses.ResponseStatusFailed {
 		if st.resp.Error != nil {
-			return st.resp.Error.Err(0)
+			return &Failure{N: n, EntryID: st.resp.ID, Err: st.resp.Error.Err(0)}
 		}
-		return errors.New("replay: recorded response failed")
+		return fmt.Errorf("replay: recorded response failed at step %d (%s)", n, st.resp.ID)
 	}
 	em := openresponses.NewEmitter(sink, resp)
 	if err := em.Start(); err != nil {
