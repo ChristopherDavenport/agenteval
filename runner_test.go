@@ -401,18 +401,41 @@ func TestRunnerErrors(t *testing.T) {
 		t.Errorf("two = reason %s runs %d err %v scores %d", two.Reason, two.Runs, two.Err, len(two.Scores))
 	}
 
-	// A model that fails ends the task with the error and no scores
-	// beyond what the judges can still say about the recorded path.
-	r = basicRunner(newStableStore())
-	r.Config = func(agenteval.Task) agentturn.Config {
-		return agentturn.Config{Model: failingModel{}}
-	}
-	report, err = r.Run(ctx, suite)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res := report.Results[0]; res.Reason != agentturn.ReasonError || res.Err == nil || !strings.Contains(res.Err.Error(), "run 1") {
-		t.Errorf("failing model: %+v", res)
+	// A model that fails ends the task with the error, and the task is
+	// not judged: no scores, no outcome entries and nothing summarised,
+	// unless JudgeFailedRuns says a crash counts as a failure.
+	for _, judgeFailed := range []bool{false, true} {
+		store := newStableStore()
+		r = basicRunner(store)
+		r.JudgeFailedRuns = judgeFailed
+		r.Config = func(agenteval.Task) agentturn.Config {
+			return agentturn.Config{Model: failingModel{}}
+		}
+		report, err = r.Run(ctx, suite)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res := report.Results[0]
+		if res.Reason != agentturn.ReasonError || res.Err == nil || !strings.Contains(res.Err.Error(), "run 1") {
+			t.Errorf("failing model, JudgeFailedRuns %v: %+v", judgeFailed, res)
+		}
+		s, err := store.Open(ctx, res.SessionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		outcomes := 0
+		for _, e := range s.Entries() {
+			if _, ok := e.(*agentsession.OutcomeEntry); ok {
+				outcomes++
+			}
+		}
+		want := 0
+		if judgeFailed {
+			want = len(r.Judges)
+		}
+		if len(res.Scores) != want || outcomes != want || (len(report.ByJudge) == 0) != (want == 0) {
+			t.Errorf("failing model, JudgeFailedRuns %v: %d scores, %d outcomes, by judge %v; want %d", judgeFailed, len(res.Scores), outcomes, report.ByJudge, want)
+		}
 	}
 
 	// A cancelled context stops the suite; the report holds what ran.

@@ -244,6 +244,7 @@ type Runner struct {
     Answer     func(context.Context, *agentturn.RunEnd) ([]agentturn.Answer, error)
     MaxResumes int
     Judges   []Judge
+    JudgeFailedRuns bool // judge a task whose run failed; otherwise it is left unscored
     Parallel int
     Header   func(Task) agentsession.Header          // optional: harness, cwd, a fixed ID, a base to fork
     Cost     func(model string, usage openresponses.Usage) (float64, bool) // optional: price.Hook
@@ -278,6 +279,13 @@ entry in the `agenteval:task` namespace carrying the suite name, its
 location, the task ID and the task's setup and metadata. The exporter
 lifts the `env` entry to the document's `extra.environment`, so a
 trajectory a judge reads names the suite version it came from.
+
+A task whose run failed, because the loop or `Answer` returned an
+error, is not judged: its result keeps the error and has no scores,
+and the report's summaries leave it out. A failed inference is not the
+configuration's answer, and a product that takes scores as rewards
+would otherwise train on a 0 it never earned. `JudgeFailedRuns` judges
+it anyway, for an evaluation where a crash counts as a failure.
 
 Each score is appended as an `outcome` entry in the shape RFC 0001
 draft 0.2 defines:

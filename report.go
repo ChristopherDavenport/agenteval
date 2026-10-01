@@ -8,7 +8,9 @@ import (
 
 // Summary is one judge's numbers over the tasks it scored.
 type Summary struct {
-	// Count is how many results the judge scored.
+	// Count is how many results the judge scored. A task whose run
+	// failed is not scored unless [Runner.JudgeFailedRuns], so it counts
+	// here only then; its result carries the error.
 	Count int `json:"count"`
 	// Mean is the mean of the judge's values over those results.
 	Mean float64 `json:"mean"`

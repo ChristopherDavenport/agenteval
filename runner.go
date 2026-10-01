@@ -54,8 +54,16 @@ type Runner struct {
 	// it through a closure over what Build builds a moment later.
 	SessionOptions func(Task) []session.Option
 	// Judges score each run once it has ended. Each score is appended
-	// to the run's session as an outcome entry.
+	// to the run's session as an outcome entry. A task whose run failed,
+	// because the loop or Answer returned an error, is not judged unless
+	// JudgeFailedRuns is set: an inference server that went away is not
+	// the configuration's answer, and a score of 0 for it would count
+	// in the report's mean and, for a product that takes scores as
+	// rewards, as a reward.
 	Judges []Judge
+	// JudgeFailedRuns judges a task whose run failed as one that ended,
+	// for an evaluation where a crash counts against the configuration.
+	JudgeFailedRuns bool
 	// Answer answers the calls a run left pending when it ended
 	// input_required, so an evaluation of a product whose policy asks
 	// measures the whole run rather than the part before the first
@@ -116,7 +124,8 @@ type Result struct {
 	// priced.
 	CostUSD *float64 `json:"cost_usd,omitempty"`
 	// Scores are the judges' verdicts, in the runner's judge order. A
-	// judge that failed is missing here and named in Err.
+	// judge that failed is missing here and named in Err; a task whose
+	// run failed has none, unless [Runner.JudgeFailedRuns].
 	Scores []Score `json:"scores"`
 	// Ends are the run ends, in order, for consumers in memory.
 	Ends []*agentturn.RunEnd `json:"-"`
@@ -250,6 +259,7 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task) (res Resu
 	}
 	a := agentturn.New(cfg, seed...)
 	unsubscribe := rec.Attach(a)
+	failed := false
 	for _, item := range inputs {
 		end, err := a.Prompt(ctx, item)
 		if end != nil {
@@ -262,6 +272,7 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task) (res Resu
 		}
 		if err != nil {
 			res.Err = fmt.Errorf("agenteval: task %s: run %d: %w", task.ID, res.Runs, err)
+			failed = true
 			break
 		}
 		if end.Reason != agentturn.ReasonDone && end.Reason != agentturn.ReasonStopped {
@@ -284,6 +295,9 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task) (res Resu
 	// name this one because nothing else would.
 	if err := replayable(s, res.Target); err != nil {
 		res.Err = errors.Join(res.Err, fmt.Errorf("task %s: %w", task.ID, err))
+	}
+	if failed && !r.JudgeFailedRuns {
+		return res
 	}
 	t, err := trajectoryAt(s, res.Target)
 	if err != nil {
