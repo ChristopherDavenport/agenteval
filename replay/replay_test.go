@@ -583,11 +583,17 @@ func TestCompactedRunReplays(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// A failed fold is one step per summary call it made: the
+			// echo adapter's summary repeats what it folds, so under a
+			// local fold the early ones are too large and fail twice.
 			folds, responses := 0, 0
 			for _, sv := range seen {
 				switch sv.Kind {
-				case replay.KindFold:
+				case replay.KindFold, replay.KindFailedFold:
 					folds++
+					if sv.Recorded != "" && !sv.Match {
+						t.Errorf("fold at step %d diverged", sv.N)
+					}
 				case replay.KindResponse:
 					responses++
 					if !sv.Match {
@@ -619,7 +625,7 @@ func TestFoldWhereTheRecordingDidNot(t *testing.T) {
 	}
 	ran := 0
 	_, _, err = rerun(t, fixtureConfig(model, replay.Tools(orig, []agenttool.Tool{upperTool(&ran)})...), "one")
-	if !errors.Is(err, replay.ErrDiverged) || !strings.Contains(err.Error(), "compaction") {
+	if !errors.Is(err, replay.ErrDiverged) || !strings.Contains(err.Error(), "fold") {
 		t.Fatalf("err = %v", err)
 	}
 	// And a compaction request where the recording made a model call.
@@ -707,7 +713,7 @@ func TestStrictChecksTheFold(t *testing.T) {
 			var folds, mismatched int
 			var first replay.Served
 			for _, sv := range seen {
-				if sv.Kind != replay.KindFold {
+				if sv.Kind != replay.KindFold && sv.Kind != replay.KindFailedFold {
 					continue
 				}
 				folds++
@@ -743,7 +749,7 @@ func TestStrictChecksTheFold(t *testing.T) {
 				t.Errorf("the observer did not report both hashes: %+v", first)
 			}
 			msg := err.Error()
-			for _, want := range []string{"compaction", "fold", first.EntryID, first.Recorded, first.Got} {
+			for _, want := range []string{"fold", first.EntryID, first.Recorded, first.Got} {
 				if !strings.Contains(msg, want) {
 					t.Errorf("the error does not name %q: %s", want, msg)
 				}

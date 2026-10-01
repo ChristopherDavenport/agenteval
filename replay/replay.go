@@ -3,8 +3,10 @@
 // nothing behind them.
 //
 // [Model] serves the session's recorded model calls in path order:
-// each response entry on the path is one call, and each compaction
-// entry is the fold that preceded the call after it. In strict mode a
+// each response entry on the path is one call, each compaction entry
+// is the fold that preceded the call after it, and each
+// agentturn:compaction_failed entry is a fold that failed there, one
+// call per attempt it made. In strict mode a
 // request whose hash differs from the one recorded on the entry about
 // to be served is refused with [ErrDiverged], a fold's own request
 // included, so a summary prompt, a budget or a filter that changed is
@@ -38,6 +40,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"reflect"
 	"regexp"
@@ -45,8 +48,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/ChristopherDavenport/agentsession"
+	"github.com/ChristopherDavenport/agentturn/compact"
 	"github.com/ChristopherDavenport/agentturn/session"
 	"github.com/ChristopherDavenport/openresponses"
 )
@@ -79,6 +84,17 @@ var ErrUnverifiable = errors.New("replay: the record cannot say what was sent")
 // [AllowSubstitution] serves the path anyway.
 var ErrSubstituted = fmt.Errorf("%w: the path changes workspace", ErrUnverifiable)
 
+// ErrCallIDRepeated is returned by a strict [NewModel] for a path on
+// which two function calls share a call ID, as a session recorded by
+// agentturn v0.0.11 or earlier holds when its provider numbered calls
+// per response. agentturn from v0.0.12 gives the second call an ID of
+// its own, so the request after it cannot hash to what the recording
+// sent, and a strict replay would diverge there naming two hashes and
+// nothing about call IDs. It wraps [ErrUnverifiable], and no option
+// serves such a path strictly; a lenient replay serves it, and
+// [Tools] serves the repeated call's recorded output.
+var ErrCallIDRepeated = fmt.Errorf("%w: the path repeats a call ID", ErrUnverifiable)
+
 // ErrExhausted is returned when the path holds no further recorded
 // call of the kind requested.
 var ErrExhausted = errors.New("replay: no further recorded call on the path")
@@ -95,6 +111,10 @@ const (
 	// KindFailure is a failed attempt served from an
 	// agentturn:model_retry entry, as the error the loop retries.
 	KindFailure Kind = "failure"
+	// KindFailedFold is one summary call of a fold that failed, served
+	// from an agentturn:compaction_failed entry so the fold fails
+	// again as it did.
+	KindFailedFold Kind = "failed_fold"
 	// KindCall is a tool call served from a recorded output.
 	KindCall Kind = "call"
 )
@@ -134,7 +154,8 @@ type Served struct {
 	// or its arguments rather than on a hash.
 	//
 	// Match reports whether the two agree, and is false when there was
-	// nothing to compare. A model call — [KindResponse] or [KindFold] —
+	// nothing to compare. A model call — [KindResponse], [KindFold] or
+	// [KindFailedFold] —
 	// was checked exactly when Recorded and Got are both set, so Match
 	// on its own is not a statement that it was. A tool call is the
 	// other way round: it is reported only when a recorded output was
@@ -262,9 +283,15 @@ type step struct {
 	comp    *agentsession.CompactionEntry
 	summary openresponses.Item
 	// retry is the model_retry entry of a failed attempt, and failure
-	// the error it is served as.
+	// the error text it recorded, which it is served as.
 	retry   *agentsession.CustomEntry
-	failure *openresponses.Error
+	failure string
+	// failed is the compaction_failed entry of a fold that failed, and
+	// fold its data. A fold that asked twice is two steps, attempt 1
+	// and 2 of fold.Attempts.
+	failed  *agentsession.CustomEntry
+	fold    session.FailedFold
+	attempt int
 	// settings are the settings in force at this step: what the config
 	// entries on the path up to it say the request was made under.
 	settings agentsession.Settings
@@ -348,6 +375,19 @@ func NewModel(s *agentsession.Session, opts ...Option) (*Model, error) {
 		case *agentsession.CompactionEntry:
 			m.steps = append(m.steps, step{comp: v, summary: openresponses.Items{v.Summary}.Clone()[0], foldHash: foldHash(v), settings: settings})
 		case *agentsession.CustomEntry:
+			if v.NS == session.FailedFoldNS {
+				var f session.FailedFold
+				if err := json.Unmarshal(v.Data, &f); err != nil {
+					return nil, fmt.Errorf("replay: failed fold %s: %w", v.ID, err)
+				}
+				// Each summary call the fold made is a step. A record
+				// before agentturn v0.0.13 counts none, and is taken
+				// to have made one.
+				for a := range max(f.Attempts, 1) {
+					m.steps = append(m.steps, step{failed: v, fold: f, attempt: a + 1, foldHash: f.RequestHash, settings: settings})
+				}
+				continue
+			}
 			// A failed attempt is served as a failure so the loop
 			// retries it, and a Retry.Revise that changed the next
 			// request, to a fallback model say, changes it again:
@@ -361,7 +401,7 @@ func NewModel(s *agentsession.Session, opts ...Option) (*Model, error) {
 			if err := json.Unmarshal(v.Data, &rec); err != nil {
 				return nil, fmt.Errorf("replay: model retry %s: %w", v.ID, err)
 			}
-			m.steps = append(m.steps, step{retry: v, failure: failureOf(rec.Error), settings: settings})
+			m.steps = append(m.steps, step{retry: v, failure: rec.Error, settings: settings})
 		}
 	}
 	return m, nil
@@ -370,6 +410,75 @@ func NewModel(s *agentsession.Session, opts ...Option) (*Model, error) {
 // recordedError matches the text of an openresponses.Error:
 // "openresponses: <type> (<status>): <message>".
 var recordedError = regexp.MustCompile(`^openresponses: ([a-z_]+) \((\d{3})\)(?:: (.*))?$`)
+
+// servedFailure matches the prefix a [Failure] puts on the text, so a
+// replay of a replayed run rebuilds the error the first one served.
+var servedFailure = regexp.MustCompile(`^replay: recorded failure at step \d+ \([^)]*\): `)
+
+// Failure is the error a replay model serves for a failed attempt the
+// record holds: an agentturn:model_retry entry, or a fold's summary
+// call that failed. It names the step and the entry it was served
+// from, so a run that ends on it, under a configuration that gives up
+// where the recording retried, says it ended on a recorded failure
+// rather than reading as a provider outage. It unwraps to Err, the
+// openresponses error its recorded text spells or a 503 carrying the
+// text, so a Retry.Retryable that reads the status decides as it did,
+// and to Cause, the transport failure the text names when it names
+// one: openresponses.ErrTruncatedStream, io.ErrUnexpectedEOF, io.EOF,
+// syscall.ECONNRESET, ECONNREFUSED or EPIPE, the ones agentturn's
+// DefaultRetryable names, so a Retryable that retries only those
+// retries it too. A Retryable that declines every openresponses
+// error before asking about the transport declines it: the record
+// keeps the text alone, and the 503 is what gives it Retry-After.
+type Failure struct {
+	// N is the step, numbered as [Served.N] is, and EntryID the entry
+	// the failure was served from.
+	N       int
+	EntryID string
+	Err     *openresponses.Error
+	Cause   error
+}
+
+func (f *Failure) Error() string {
+	return fmt.Sprintf("replay: recorded failure at step %d (%s): %s", f.N, f.EntryID, f.Err.Error())
+}
+
+// Unwrap returns Err, and Cause when there is one.
+func (f *Failure) Unwrap() []error {
+	if f.Cause == nil {
+		return []error{f.Err}
+	}
+	return []error{f.Err, f.Cause}
+}
+
+// transportFailures are the errors a recorded text may end with that a
+// Failure unwraps to, longest text first so "unexpected EOF" is not
+// read as "EOF".
+var transportFailures = []error{
+	openresponses.ErrTruncatedStream,
+	syscall.ECONNREFUSED,
+	syscall.ECONNRESET,
+	io.ErrUnexpectedEOF,
+	syscall.EPIPE,
+	io.EOF,
+}
+
+// causeOf returns the transport failure text names, as the whole text
+// or as the last of its colon-separated parts, or nil.
+func causeOf(text string) error {
+	for _, err := range transportFailures {
+		if t := err.Error(); text == t || strings.HasSuffix(text, ": "+t) {
+			return err
+		}
+	}
+	return nil
+}
+
+// serveFailure returns the failure recorded as text at step n of entry.
+func serveFailure(n int, entryID, text string) *Failure {
+	text = servedFailure.ReplaceAllString(text, "")
+	return &Failure{N: n, EntryID: entryID, Err: failureOf(text), Cause: causeOf(text)}
+}
 
 // failureOf is the error a failed attempt is served as: the
 // openresponses error its recorded text spells, so a Retry.Retryable
@@ -430,9 +539,10 @@ func pathTo(s *agentsession.Session, leaf string) ([]agentsession.Entry, error) 
 // call it serves. It returns nil when it could, and an error wrapping
 // [ErrUnverifiable] when it could not: one naming how many responses
 // are unhashed, one wrapping [ErrSubstituted] naming the env entry that
-// changed workspace, or both joined. An error that does not wrap
-// [ErrUnverifiable] is the failure to resolve leaf to a path at all,
-// which says nothing either way about the record. [AllowUnhashed] and
+// changed workspace, one wrapping [ErrCallIDRepeated] naming the call
+// ID and both its calls' entries, or those that apply joined. An error
+// that does not wrap [ErrUnverifiable] is the failure to resolve leaf
+// to a path at all, which says nothing either way about the record. [AllowUnhashed] and
 // [AllowSubstitution] among opts leave out what they allow, as they do
 // for [NewModel]; the other options are ignored.
 //
@@ -467,7 +577,29 @@ func unverifiable(path []agentsession.Entry, o options) error {
 	if !o.allowSubst {
 		errs = append(errs, substituted(path))
 	}
+	errs = append(errs, repeatedCallID(path))
 	return errors.Join(errs...)
+}
+
+// repeatedCallID reports the first function call on path whose call ID
+// an earlier call on it has.
+func repeatedCallID(path []agentsession.Entry) error {
+	first := map[string]string{}
+	for _, e := range path {
+		item, ok := e.(*agentsession.ItemEntry)
+		if !ok {
+			continue
+		}
+		call, ok := item.Item.(*openresponses.FunctionCall)
+		if !ok {
+			continue
+		}
+		if id, seen := first[call.CallID]; seen {
+			return fmt.Errorf("%w: %s at %s and %s", ErrCallIDRepeated, call.CallID, id, item.ID)
+		}
+		first[call.CallID] = item.ID
+	}
+	return nil
 }
 
 // unhashed reports the responses on path that carry no request hash.
@@ -684,15 +816,13 @@ func (m *Model) CreateStream(_ context.Context, req openresponses.Request, sink 
 	if err != nil {
 		return err
 	}
-	if st.failure != nil {
+	if st.retry != nil {
 		got, err := agentsession.RequestHash(session.Canonical(req))
 		if err != nil {
 			return err
 		}
 		m.observe(Served{Kind: KindFailure, N: n, EntryID: st.retry.ID, Got: got})
-		f := *st.failure
-		f.Headers = f.Headers.Clone()
-		return &f
+		return serveFailure(n, st.retry.ID, st.failure)
 	}
 	if st.comp != nil {
 		if isFoldRequest(req) {
@@ -701,6 +831,12 @@ func (m *Model) CreateStream(_ context.Context, req openresponses.Request, sink 
 		// The configuration under test sent a turn where the
 		// recording folded.
 		return fmt.Errorf("%w: compaction %s (step %d): the recording folded here and the request did not", ErrDiverged, st.comp.ID, n)
+	}
+	if st.failed != nil {
+		if isFoldRequest(req) {
+			return m.serveFailedFold(st, n, req, sink)
+		}
+		return fmt.Errorf("%w: failed fold %s (step %d): the recording tried to fold here and the request did not", ErrDiverged, st.failed.ID, n)
 	}
 	// Got is computed whether or not the entry recorded a hash to
 	// compare it against: it is what this replay sent, and for a call
@@ -751,6 +887,12 @@ func (m *Model) Compact(_ context.Context, req openresponses.CompactRequest) (*o
 	switch {
 	case st.retry != nil:
 		return nil, fmt.Errorf("%w: model retry %s (step %d): the recording failed a model call here and the request is a compaction", ErrDiverged, st.retry.ID, n)
+	case st.failed != nil:
+		// The endpoint's fold failed as the call did, and is served
+		// as the error its text spells, unchecked as every endpoint
+		// fold is.
+		m.observe(Served{Kind: KindFailedFold, N: n, EntryID: st.failed.ID, Recorded: st.foldHash})
+		return nil, serveFailure(n, st.failed.ID, strings.TrimPrefix(st.fold.Error, "compact: "))
 	case st.comp == nil:
 		return nil, fmt.Errorf("%w: response %s (step %d): the recording made a model call here and the request is a compaction", ErrDiverged, st.resp.ID, n)
 	}
@@ -861,4 +1003,86 @@ func (m *Model) serveFold(st step, n int, req openresponses.Request, sink openre
 		return err
 	}
 	return em.Complete()
+}
+
+// Errors a failed fold's text may begin with. The first two are the
+// ones compact.NewLocal reports after asking twice; the third is its
+// unexported error for a summary with no text, which fails the turn.
+var (
+	foldTooLarge   = compact.ErrSummaryTooLarge.Error()
+	foldIncomplete = compact.ErrSummaryIncomplete.Error()
+	foldNoText     = "compact: summary response has no text"
+	foldCallFailed = "compact: summary: "
+)
+
+// serveFailedFold answers one summary call of a fold that failed, so
+// that compact.NewLocal fails it the way the record says it did. The
+// record keeps the error, not the summary, so the answer is rebuilt
+// from the error: a summary too large is the request's own input as
+// JSON text, which compact's default estimate weighs above that input,
+// so a configuration with an estimator of its own may fold where the
+// recording did not and diverge at the call after; an incomplete one is
+// an empty response ended incomplete with the recorded reason; one
+// with no text is an empty response; and a call that failed is the
+// error its text spells, as a model_retry entry's is. Every call of
+// the fold is checked against the one hash the record keeps, the last
+// call's: NewLocal sends the same request each time. The usage and
+// response ID are served on the last call, so a record of the replay
+// sums to the recording's.
+func (m *Model) serveFailedFold(st step, n int, req openresponses.Request, sink openresponses.EventSink) error {
+	got, err := agentsession.RequestHash(session.Canonical(req))
+	if err != nil {
+		return err
+	}
+	sv := Served{Kind: KindFailedFold, N: n, EntryID: st.failed.ID, Recorded: st.foldHash, Got: got}
+	sv.Match = sv.Recorded != "" && got == sv.Recorded
+	m.observe(sv)
+	if m.opts.strict && sv.Recorded == "" && !m.opts.allowUnhashed {
+		return fmt.Errorf("%w: failed fold %s (step %d): the entry records no hash for the fold's own request", ErrUnverifiable, st.failed.ID, n)
+	}
+	if m.opts.strict && sv.Recorded != "" && !sv.Match {
+		return fmt.Errorf("%w: failed fold %s (step %d): the fold's request: recorded %s, received %s", ErrDiverged, st.failed.ID, n, sv.Recorded, sv.Got)
+	}
+	text := st.fold.Error
+	if rest, ok := strings.CutPrefix(text, foldCallFailed); ok {
+		return serveFailure(n, st.failed.ID, rest)
+	}
+	resp := openresponses.NewResponse(req)
+	if st.attempt == max(st.fold.Attempts, 1) {
+		resp.Usage = st.fold.Usage
+		if st.fold.ResponseID != "" {
+			resp.ID = st.fold.ResponseID
+		}
+	}
+	em := openresponses.NewEmitter(sink, resp)
+	switch {
+	case strings.HasPrefix(text, foldTooLarge):
+		input, err := json.Marshal(req.Input)
+		if err != nil {
+			return err
+		}
+		msg, err := em.Message(openresponses.PhaseFinalAnswer)
+		if err != nil {
+			return err
+		}
+		if err := msg.Text(string(input)); err != nil {
+			return err
+		}
+		if err := msg.Close(); err != nil {
+			return err
+		}
+		return em.Complete()
+	case strings.HasPrefix(text, foldIncomplete):
+		reason := strings.TrimPrefix(strings.TrimPrefix(text, foldIncomplete), ": ")
+		if err := em.Start(); err != nil {
+			return err
+		}
+		return em.Incomplete(openresponses.IncompleteReason(reason))
+	case strings.HasPrefix(text, foldNoText):
+		if err := em.Start(); err != nil {
+			return err
+		}
+		return em.Complete()
+	}
+	return fmt.Errorf("replay: failed fold %s (step %d): the recorded error is not one a fold can be served as: %s", st.failed.ID, n, text)
 }
