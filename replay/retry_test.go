@@ -7,6 +7,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"syscall"
@@ -64,6 +66,11 @@ func TestStrictReplaysARevisedRetry(t *testing.T) {
 		{"a truncated stream, retried as transport", openresponses.ErrTruncatedStream, transportOnly, openresponses.ErrTruncatedStream.Error()},
 		{"a cut connection, retried as transport", io.ErrUnexpectedEOF, transportOnly, io.ErrUnexpectedEOF.Error()},
 		{"a reset, retried as transport", fmt.Errorf("read tcp 10.0.0.1:443: %w", syscall.ECONNRESET), transportOnly, syscall.ECONNRESET.Error()},
+		// Issue 36: any net.Error, as net/http wraps them.
+		{"a read timeout, retried as transport", readTimeout, transportOnly, "i/o timeout"},
+		{"a DNS failure, retried as transport", dnsFailure, transportOnly, "no such host"},
+		{"a dial timeout, retried as transport", fmt.Errorf("dial tcp 10.0.0.1:443: %w", syscall.ETIMEDOUT), transportOnly, syscall.ETIMEDOUT.Error()},
+		{"a client timeout, retried as transport", &url.Error{Op: "Post", URL: endpoint, Err: clientTimedOut{}}, transportOnly, "Client.Timeout exceeded"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -147,6 +154,26 @@ func TestStrictReplaysARevisedRetry(t *testing.T) {
 	}
 }
 
+// endpoint is the URL the transport failures below name.
+const endpoint = "http://localhost:11434/v1/responses"
+
+// readTimeout and dnsFailure are the errors net/http returns for a read
+// that timed out and a host that does not resolve.
+var (
+	readTimeout = &url.Error{Op: "Post", URL: endpoint, Err: &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}}
+	dnsFailure  = &url.Error{Op: "Post", URL: "http://ollama.internal:11434/v1/responses", Err: &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{Err: "no such host", Name: "ollama.internal", IsNotFound: true}}}
+)
+
+// clientTimedOut is the error net/http's Client wraps when its Timeout
+// ends a request.
+type clientTimedOut struct{}
+
+func (clientTimedOut) Error() string {
+	return "context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
+}
+func (clientTimedOut) Timeout() bool   { return true }
+func (clientTimedOut) Temporary() bool { return true }
+
 // transportOnly retries the transport failures alone, leaving status
 // errors to a gateway.
 func transportOnly(err error) bool {
@@ -211,5 +238,97 @@ func TestCompactWhereTheRecordingFailed(t *testing.T) {
 	}
 	if _, err := model.Compact(context.Background(), openresponses.CompactRequest{}); !errors.Is(err, replay.ErrDiverged) {
 		t.Errorf("Compact = %v, want ErrDiverged", err)
+	}
+}
+
+// Issue 36: a served failure names the transport failure its text
+// names by type, so a Retryable reading the type decides as it did.
+func TestAFailureNamesItsCause(t *testing.T) {
+	tests := []struct {
+		name  string
+		err   error
+		check func(error) bool
+	}{
+		{"a read timeout", readTimeout, func(err error) bool {
+			var ne net.Error
+			return errors.Is(err, os.ErrDeadlineExceeded) && errors.As(err, &ne) && ne.Timeout()
+		}},
+		{"a DNS failure", dnsFailure, func(err error) bool {
+			var de *net.DNSError
+			return errors.As(err, &de) && de.Name == "ollama.internal" && de.IsNotFound
+		}},
+		{"a client timeout", &url.Error{Op: "Post", URL: endpoint, Err: clientTimedOut{}}, func(err error) bool {
+			var ne net.Error
+			return errors.As(err, &ne) && ne.Timeout()
+		}},
+		{"a context deadline", fmt.Errorf("stream: %w", context.DeadlineExceeded), func(err error) bool {
+			return errors.Is(err, context.DeadlineExceeded)
+		}},
+		{"a refused connection", fmt.Errorf("dial tcp: %w", syscall.ECONNREFUSED), func(err error) bool {
+			return errors.Is(err, syscall.ECONNREFUSED)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := fixtureConfig(&flaky{fail: map[int]bool{1: true}, err: tt.err})
+			cfg.Retry = agentturn.Retry{MaxAttempts: 2, Backoff: func(int, error) time.Duration { return 0 }}
+			orig, _, err := rerun(t, cfg, "first")
+			if err != nil {
+				t.Fatal(err)
+			}
+			model, err := replay.NewModel(orig, replay.Strict())
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _, err = rerun(t, fixtureConfig(model), "first")
+			var f *replay.Failure
+			if !errors.As(err, &f) || f.Cause == nil || !tt.check(err) {
+				t.Errorf("err = %v (%T cause), want a failure whose cause is the recorded one", err, causeOf(f))
+			}
+		})
+	}
+}
+
+// causeOf is f's cause, for a message.
+func causeOf(f *replay.Failure) error {
+	if f == nil {
+		return nil
+	}
+	return f.Cause
+}
+
+// Issue 36: the last attempt of a run whose retries ran out is a failed
+// response, served as a Failure naming its step and entry.
+func TestAFailedResponseIsAFailure(t *testing.T) {
+	busy := &openresponses.Error{StatusCode: http.StatusInternalServerError, Type: openresponses.ErrorTypeServerError, Message: "upstream busy"}
+	cfg := fixtureConfig(&flaky{fail: map[int]bool{1: true, 2: true}, err: busy})
+	cfg.Retry = agentturn.Retry{MaxAttempts: 2, Backoff: func(int, error) time.Duration { return 0 }}
+	orig, _, err := rerun(t, cfg, "first")
+	if err == nil {
+		t.Fatal("the recording did not fail")
+	}
+	var failedID string
+	for _, e := range orig.Path(orig.Leaf()) {
+		if r, ok := e.(*agentsession.ResponseEntry); ok && r.Status == openresponses.ResponseStatusFailed {
+			failedID = r.ID
+		}
+	}
+	if failedID == "" {
+		t.Fatal("the recording holds no failed response")
+	}
+	model, err := replay.NewModel(orig, replay.Strict())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg = fixtureConfig(model)
+	cfg.Retry = agentturn.Retry{MaxAttempts: 2, Backoff: func(int, error) time.Duration { return 0 }}
+	_, _, err = rerun(t, cfg, "first")
+	var f *replay.Failure
+	if !errors.As(err, &f) || f.EntryID != failedID || f.N != 2 {
+		t.Fatalf("err = %v, want a failure at step 2 naming %s", err, failedID)
+	}
+	var oe *openresponses.Error
+	if !errors.As(err, &oe) || oe.HTTPStatus() != http.StatusInternalServerError || f.Cause != nil {
+		t.Errorf("err = %v, want the recorded 500 and no cause", err)
 	}
 }

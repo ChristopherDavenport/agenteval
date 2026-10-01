@@ -242,6 +242,52 @@ func TestCompareSeesTheFolds(t *testing.T) {
 	}
 }
 
+// verbose answers every summary request at length, so agentturn
+// refuses each summary as no smaller than what it folds and every fold
+// fails, reporting usage for each call.
+type verbose struct{}
+
+func (verbose) CreateStream(_ context.Context, req openresponses.Request, sink openresponses.EventSink) error {
+	resp := openresponses.NewResponse(req)
+	resp.Usage = &openresponses.Usage{InputTokens: 200, OutputTokens: 400, TotalTokens: 600}
+	em := openresponses.NewEmitter(sink, resp)
+	if err := em.Item(openresponses.AssistantText(strings.Repeat("a long summary ", 2000))); err != nil {
+		return err
+	}
+	return em.Complete()
+}
+
+// TestCompareSeesFailedFolds is #37: a configuration whose every fold
+// fails leaves no compaction entry, and still differs from one that
+// never compacts, and pays for its summary calls.
+func TestCompareSeesFailedFolds(t *testing.T) {
+	prompts := openresponses.Items{openresponses.UserText("one"), openresponses.UserText("two"), openresponses.UserText("three"), openresponses.UserText("four")}
+	suite := &agenteval.Suite{Name: "long", Tasks: []agenteval.Task{{ID: "chat", Prompts: prompts}}}
+	a := &agenteval.Runner{Store: newStableStore(), Cost: flatRate, ConfigWith: func(agenteval.Task, *session.Recorder) agentturn.Config { return echoConfig() }}
+	b := &agenteval.Runner{Store: newStableStore(), Cost: flatRate, ConfigWith: func(_ agenteval.Task, rec *session.Recorder) agentturn.Config {
+		cfg := echoConfig()
+		cfg.Transform = compact.NewLocal(verbose{}, compact.WithBudget(1), compact.WithKeepLast(2), compact.WithOnFold(rec.Fold)).Transform
+		return cfg
+	}}
+	c, err := agenteval.Compare(context.Background(), suite, a, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Config.Folded != nil {
+		t.Fatalf("folded = %+v; the test needs every fold to fail", c.Config.Folded)
+	}
+	if c.Config.Empty() || c.Config.FoldFailed == nil || c.Config.FoldFailed.A != false || c.Config.FoldFailed.B != true {
+		t.Errorf("config = %+v, want B's folds to have failed and A's not", c.Config)
+	}
+	if p := c.Pairs[0]; p.Config.FoldFailed == nil {
+		t.Errorf("the pair's config = %+v", p.Config)
+	}
+	pa, pb := c.Pairs[0].A, c.Pairs[0].B
+	if pb.Usage.OutputTokens < pa.Usage.OutputTokens+400 || pa.CostUSD == nil || pb.CostUSD == nil || *pb.CostUSD <= *pa.CostUSD {
+		t.Errorf("A used %+v at %v, B %+v at %v; B's summary calls are not counted", pa.Usage, pa.CostUSD, pb.Usage, pb.CostUSD)
+	}
+}
+
 // TestCompareFoldsKeepTheSuiteUniform: a compacting side folds on a
 // long task and not on a short one, which is the task and not the
 // configuration, so the settings both sides differ by for every task

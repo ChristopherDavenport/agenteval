@@ -401,18 +401,41 @@ func TestRunnerErrors(t *testing.T) {
 		t.Errorf("two = reason %s runs %d err %v scores %d", two.Reason, two.Runs, two.Err, len(two.Scores))
 	}
 
-	// A model that fails ends the task with the error and no scores
-	// beyond what the judges can still say about the recorded path.
-	r = basicRunner(newStableStore())
-	r.Config = func(agenteval.Task) agentturn.Config {
-		return agentturn.Config{Model: failingModel{}}
-	}
-	report, err = r.Run(ctx, suite)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res := report.Results[0]; res.Reason != agentturn.ReasonError || res.Err == nil || !strings.Contains(res.Err.Error(), "run 1") {
-		t.Errorf("failing model: %+v", res)
+	// A model that fails ends the task with the error, and the task is
+	// not judged: no scores, no outcome entries and nothing summarised,
+	// unless JudgeFailedRuns says a crash counts as a failure.
+	for _, judgeFailed := range []bool{false, true} {
+		store := newStableStore()
+		r = basicRunner(store)
+		r.JudgeFailedRuns = judgeFailed
+		r.Config = func(agenteval.Task) agentturn.Config {
+			return agentturn.Config{Model: failingModel{}}
+		}
+		report, err = r.Run(ctx, suite)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res := report.Results[0]
+		if res.Reason != agentturn.ReasonError || res.Err == nil || !strings.Contains(res.Err.Error(), "run 1") {
+			t.Errorf("failing model, JudgeFailedRuns %v: %+v", judgeFailed, res)
+		}
+		s, err := store.Open(ctx, res.SessionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		outcomes := 0
+		for _, e := range s.Entries() {
+			if _, ok := e.(*agentsession.OutcomeEntry); ok {
+				outcomes++
+			}
+		}
+		want := 0
+		if judgeFailed {
+			want = len(r.Judges)
+		}
+		if len(res.Scores) != want || outcomes != want || (len(report.ByJudge) == 0) != (want == 0) {
+			t.Errorf("failing model, JudgeFailedRuns %v: %d scores, %d outcomes, by judge %v; want %d", judgeFailed, len(res.Scores), outcomes, report.ByJudge, want)
+		}
 	}
 
 	// A cancelled context stops the suite; the report holds what ran.
@@ -571,7 +594,8 @@ func echoRate(model string, u openresponses.Usage) (float64, bool) {
 
 // TestRunnerCostCountsFolds is issue 18: a result's usage and cost
 // count the folds a compacting configuration made, so the report and
-// the document the same run exports agree on what the run spent.
+// the document the same run exports agree on what the run spent. It is
+// also #37: the summary calls of a fold that failed are counted too.
 func TestRunnerCostCountsFolds(t *testing.T) {
 	prompts := openresponses.Items{openresponses.UserText("one"), openresponses.UserText("two"), openresponses.UserText("three")}
 	suite := &agenteval.Suite{Name: "long", Tasks: []agenteval.Task{{ID: "chat", Prompts: prompts}}}
@@ -595,15 +619,28 @@ func TestRunnerCostCountsFolds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The echo adapter's summaries repeat what they fold, so some folds
+	// fail; their summary calls are paid for all the same (#37).
 	var folded int
+	var failed openresponses.Usage
 	for _, e := range s.Path(res.Target) {
-		if c, ok := e.(*agentsession.CompactionEntry); ok && c.Usage != nil {
-			folded += c.Usage.InputTokens
+		switch v := e.(type) {
+		case *agentsession.CompactionEntry:
+			if v.Usage != nil {
+				folded += v.Usage.InputTokens
+			}
+		case *agentsession.CustomEntry:
+			var f session.FailedFold
+			if v.NS == session.FailedFoldNS && json.Unmarshal(v.Data, &f) == nil && f.Usage != nil {
+				failed.InputTokens += f.Usage.InputTokens
+				failed.OutputTokens += f.Usage.OutputTokens
+			}
 		}
 	}
-	if folded == 0 {
-		t.Fatal("no fold on the path reported usage")
+	if folded == 0 || failed.InputTokens == 0 {
+		t.Fatalf("the path reports %d tokens folded and %d in failed folds; want both", folded, failed.InputTokens)
 	}
+	failedUSD, _ := echoRate("echo/echo-1", failed)
 	tr, err := export.At(s, res.Target)
 	if err != nil {
 		t.Fatal(err)
@@ -616,14 +653,16 @@ func TestRunnerCostCountsFolds(t *testing.T) {
 	if m == nil || m.TotalPromptTokens == nil || m.TotalCompletionTokens == nil || m.TotalCostUSD == nil {
 		t.Fatalf("the document has no totals: %+v", m)
 	}
-	if res.Usage.InputTokens != *m.TotalPromptTokens || res.Usage.OutputTokens != *m.TotalCompletionTokens {
-		t.Errorf("usage %d in, %d out; the document %d in, %d out", res.Usage.InputTokens, res.Usage.OutputTokens, *m.TotalPromptTokens, *m.TotalCompletionTokens)
+	// The exporter leaves the failed folds out (agentsession#184); the
+	// result is the document's totals and theirs.
+	if res.Usage.InputTokens != *m.TotalPromptTokens+failed.InputTokens || res.Usage.OutputTokens != *m.TotalCompletionTokens+failed.OutputTokens {
+		t.Errorf("usage %d in, %d out; the document %d in, %d out, and failed folds %d in, %d out", res.Usage.InputTokens, res.Usage.OutputTokens, *m.TotalPromptTokens, *m.TotalCompletionTokens, failed.InputTokens, failed.OutputTokens)
 	}
 	if res.CostUSD == nil {
 		t.Fatal("the run was not priced")
 	}
-	if *res.CostUSD != *m.TotalCostUSD {
-		t.Errorf("cost %v, the document %v", *res.CostUSD, *m.TotalCostUSD)
+	if *res.CostUSD != *m.TotalCostUSD+failedUSD {
+		t.Errorf("cost %v, the document %v and failed folds %v", *res.CostUSD, *m.TotalCostUSD, failedUSD)
 	}
 }
 

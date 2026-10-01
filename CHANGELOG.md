@@ -5,6 +5,75 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+### Added
+
+- `Runner.JudgeFailedRuns`. Judges a task whose run failed, as the
+  runner did before this release. (#39)
+
+- `ConfigDiff.FoldFailed`, beside `Folded`: one run's path holds an
+  `agentturn:compaction_failed` entry and the other's none. On a
+  `Comparison` it is over all the runs of each side. (#37)
+
+### Changed
+
+- A task whose run failed, because the loop or `Answer` returned an
+  error, is no longer judged. Its result keeps the error and has no
+  scores, no outcome entries are written, and `Summarize` leaves it
+  out. An inference failure was scored 0 and counted in the mean, and
+  a product taking scores as rewards trained on it. Set
+  `JudgeFailedRuns` for an evaluation where a crash counts as a
+  failure. (#39)
+
+- Requires agentsession v0.0.19, agenttool v0.0.14 and agentturn and
+  its `session` module v0.0.14. From agentturn v0.0.14,
+  `compact.WithOnFold` adds a callback rather than replacing one.
+
+### Fixed
+
+- `Result.Usage` and `CostUSD` count the summary calls of a fold that
+  failed, from the usage its `agentturn:compaction_failed` entry
+  records, priced under its recorded model or the model in force. A
+  configuration whose every fold failed was priced as one that never
+  compacts. The exported document's `final_metrics` still leaves
+  those calls out, so the two disagree by them until agentsession
+  counts them (agentsession#184). (#37)
+
+- A served `replay.Failure` unwraps to a recorded network failure:
+  `os.ErrDeadlineExceeded` ("i/o timeout"), `context.DeadlineExceeded`,
+  `syscall.ETIMEDOUT`, `ENETUNREACH` and `EHOSTUNREACH` as themselves,
+  a host that does not resolve as a `*net.DNSError`, and net/http's
+  client timeout as a `net.Error` that timed out. Each was a bare 503,
+  so a `Retryable` retrying transport failures alone declined it and
+  the replay failed where the recording retried. (#36)
+
+- A failed response entry, the last attempt of a run whose retries
+  ran out, is served as a `replay.Failure` naming its step and entry,
+  and unwraps to the error it recorded. It was that error alone,
+  naming neither replay nor step. (#36)
+
+- A `compaction_failed` record from before agentturn v0.0.13, with no
+  attempt count, whose error is "compact: summary response has no
+  text" is served as two summary calls, as agentturn v0.0.12 made
+  them. It was served as one, and the second call took the next
+  step. (#38)
+
+### Upgrading recordings made before agentturn v0.0.13
+
+A strict replay of such a recording under agentturn v0.0.13 or later
+diverges at its folds, for two reasons the divergence now names. (#38)
+
+- `compact.NewLocal` sets `max_output_tokens` on a fold's summary
+  call, which v0.0.12 never sent. When that is the only difference
+  the divergence says so; clear it with `compact.WithRequest`.
+- `compact.NewLocal` refuses a summary no smaller than what it folds
+  and asks again. A fold v0.0.12 applied with such a summary, as any
+  fold on the echo adapter or on a verbose model, is served and
+  refused, and the second call reaches the next step. The divergence
+  there says the request is the fold's, sent again. Such a recording
+  does not replay strictly under v0.0.13.
+
 ## v0.0.8 - 2026-10-01
 
 ### Added

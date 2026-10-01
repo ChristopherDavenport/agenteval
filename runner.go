@@ -54,8 +54,16 @@ type Runner struct {
 	// it through a closure over what Build builds a moment later.
 	SessionOptions func(Task) []session.Option
 	// Judges score each run once it has ended. Each score is appended
-	// to the run's session as an outcome entry.
+	// to the run's session as an outcome entry. A task whose run failed,
+	// because the loop or Answer returned an error, is not judged unless
+	// JudgeFailedRuns is set: an inference server that went away is not
+	// the configuration's answer, and a score of 0 for it would count
+	// in the report's mean and, for a product that takes scores as
+	// rewards, as a reward.
 	Judges []Judge
+	// JudgeFailedRuns judges a task whose run failed as one that ended,
+	// for an evaluation where a crash counts against the configuration.
+	JudgeFailedRuns bool
 	// Answer answers the calls a run left pending when it ended
 	// input_required, so an evaluation of a product whose policy asks
 	// measures the whole run rather than the part before the first
@@ -106,17 +114,20 @@ type Result struct {
 	// or it had nothing to say or failed.
 	ResumeBound bool `json:"resume_bound,omitempty"`
 	// Usage is the sum over the model calls on the run's path: every
-	// response, and every fold or branch summary that reported usage.
-	// It is the path the exported document's final metrics sum, and the
-	// runner prices each call under the model the exporter does, so
-	// with the same price hook the two agree on the total whenever
-	// every call was priced.
+	// response, every fold or branch summary that reported usage, and
+	// the summary calls of every fold that failed. It is the path the
+	// exported document's final metrics sum, and the runner prices
+	// each call under the model the exporter does, so with the same
+	// price hook the two agree on the total whenever every call was
+	// priced, except that the exporter as of agentsession v0.0.19
+	// leaves a failed fold's calls out (agentsession#184).
 	Usage openresponses.Usage `json:"usage"`
 	// CostUSD is the run's cost under Runner.Cost, when every call was
 	// priced.
 	CostUSD *float64 `json:"cost_usd,omitempty"`
 	// Scores are the judges' verdicts, in the runner's judge order. A
-	// judge that failed is missing here and named in Err.
+	// judge that failed is missing here and named in Err; a task whose
+	// run failed has none, unless [Runner.JudgeFailedRuns].
 	Scores []Score `json:"scores"`
 	// Ends are the run ends, in order, for consumers in memory.
 	Ends []*agentturn.RunEnd `json:"-"`
@@ -250,6 +261,7 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task) (res Resu
 	}
 	a := agentturn.New(cfg, seed...)
 	unsubscribe := rec.Attach(a)
+	failed := false
 	for _, item := range inputs {
 		end, err := a.Prompt(ctx, item)
 		if end != nil {
@@ -262,6 +274,7 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task) (res Resu
 		}
 		if err != nil {
 			res.Err = fmt.Errorf("agenteval: task %s: run %d: %w", task.ID, res.Runs, err)
+			failed = true
 			break
 		}
 		if end.Reason != agentturn.ReasonDone && end.Reason != agentturn.ReasonStopped {
@@ -284,6 +297,9 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task) (res Resu
 	// name this one because nothing else would.
 	if err := replayable(s, res.Target); err != nil {
 		res.Err = errors.Join(res.Err, fmt.Errorf("task %s: %w", task.ID, err))
+	}
+	if failed && !r.JudgeFailedRuns {
+		return res
 	}
 	t, err := trajectoryAt(s, res.Target)
 	if err != nil {
@@ -462,7 +478,8 @@ func lastEnv(s *agentsession.Session) *agentsession.EnvEntry {
 }
 
 // usage sums the usage of the model calls on the path to leaf, the
-// responses and the folds, and prices them when the runner can.
+// responses and the folds, failed or not, and prices them when the
+// runner can.
 func (r *Runner) usage(s *agentsession.Session, leaf string) (openresponses.Usage, *float64) {
 	var u openresponses.Usage
 	cost, priced := 0.0, r.Cost != nil
@@ -492,6 +509,21 @@ func (r *Runner) usage(s *agentsession.Session, leaf string) (openresponses.Usag
 			eu, m = v.Usage, v.Config.Model
 		case *agentsession.BranchSummaryEntry:
 			eu = v.Usage
+		case *agentsession.CustomEntry:
+			// A fold that failed still made its summary calls, and
+			// paid for them; the entry holds their usage summed.
+			// It leaves the model in force as it was.
+			if v.NS != session.FailedFoldNS {
+				continue
+			}
+			var f session.FailedFold
+			if json.Unmarshal(v.Data, &f) != nil {
+				continue
+			}
+			eu = f.Usage
+			if f.Model != "" {
+				m = f.Model
+			}
 		default:
 			continue
 		}
