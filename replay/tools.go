@@ -167,6 +167,7 @@ type recording struct {
 // record is taken by position, when one call alone was waiting for its
 // output, so a call of a parallel batch, or any call after one that
 // never got an output, is served without one.
+//
 // A session recorded by agentturn v0.0.11 or earlier may repeat a call
 // ID its provider numbered per response. There an output belongs to the
 // latest call before it with its ID, as RFC 0001 tells a reader, and

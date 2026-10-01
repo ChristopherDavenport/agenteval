@@ -283,7 +283,7 @@ type step struct {
 	comp    *agentsession.CompactionEntry
 	summary openresponses.Item
 	// retry is the model_retry entry of a failed attempt, and failure
-	// the error it is served as.
+	// the error text it recorded, which it is served as.
 	retry   *agentsession.CustomEntry
 	failure string
 	// failed is the compaction_failed entry of a fold that failed, and
@@ -375,12 +375,6 @@ func NewModel(s *agentsession.Session, opts ...Option) (*Model, error) {
 		case *agentsession.CompactionEntry:
 			m.steps = append(m.steps, step{comp: v, summary: openresponses.Items{v.Summary}.Clone()[0], foldHash: foldHash(v), settings: settings})
 		case *agentsession.CustomEntry:
-			// A failed attempt is served as a failure so the loop
-			// retries it, and a Retry.Revise that changed the next
-			// request, to a fallback model say, changes it again:
-			// the response after it is hashed over the revised
-			// request, and a replay that never failed would send the
-			// unrevised one and diverge there.
 			if v.NS == session.FailedFoldNS {
 				var f session.FailedFold
 				if err := json.Unmarshal(v.Data, &f); err != nil {
@@ -394,6 +388,12 @@ func NewModel(s *agentsession.Session, opts ...Option) (*Model, error) {
 				}
 				continue
 			}
+			// A failed attempt is served as a failure so the loop
+			// retries it, and a Retry.Revise that changed the next
+			// request, to a fallback model say, changes it again:
+			// the response after it is hashed over the revised
+			// request, and a replay that never failed would send the
+			// unrevised one and diverge there.
 			if v.NS != session.ModelRetryNS {
 				continue
 			}
@@ -540,9 +540,9 @@ func pathTo(s *agentsession.Session, leaf string) ([]agentsession.Entry, error) 
 // [ErrUnverifiable] when it could not: one naming how many responses
 // are unhashed, one wrapping [ErrSubstituted] naming the env entry that
 // changed workspace, one wrapping [ErrCallIDRepeated] naming the call
-// ID and both its calls' entries, or those that apply joined. An error that does not wrap
-// [ErrUnverifiable] is the failure to resolve leaf to a path at all,
-// which says nothing either way about the record. [AllowUnhashed] and
+// ID and both its calls' entries, or those that apply joined. An error
+// that does not wrap [ErrUnverifiable] is the failure to resolve leaf
+// to a path at all, which says nothing either way about the record. [AllowUnhashed] and
 // [AllowSubstitution] among opts leave out what they allow, as they do
 // for [NewModel]; the other options are ignored.
 //
@@ -1019,7 +1019,9 @@ var (
 // that compact.NewLocal fails it the way the record says it did. The
 // record keeps the error, not the summary, so the answer is rebuilt
 // from the error: a summary too large is the request's own input as
-// text, which no estimate of that input exceeds; an incomplete one is
+// JSON text, which compact's default estimate weighs above that input,
+// so a configuration with an estimator of its own may fold where the
+// recording did not and diverge at the call after; an incomplete one is
 // an empty response ended incomplete with the recorded reason; one
 // with no text is an empty response; and a call that failed is the
 // error its text spells, as a model_retry entry's is. Every call of
