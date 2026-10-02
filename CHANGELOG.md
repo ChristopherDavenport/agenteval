@@ -58,6 +58,12 @@ versions may break the API.
   listing or an exported document's name included; a runner that does
   not sample names the session by the task alone, as before. (#51)
 
+- `Result.Usage` and `CostUSD` and the exported document's totals now
+  agree for a run with a failed fold: agentsession v0.0.20's exporter
+  counts a custom entry whose data carries `usage`, which a failed
+  fold's summary calls are, where v0.0.9 documented that the document
+  left them out. The runner's own sum is unchanged. (agentsession#184)
+
 ### Fixed
 
 - A strict replay serves a model output the filter kept from the
@@ -109,12 +115,6 @@ versions may break the API.
   beside `compact.WithOnFold(rec.Fold)`, so a fork of a base whose last
   fold failed does not ask for that summary again and write a
   `compaction_failed` the product resuming the session would not. (#48)
-
-- `Result.Usage` and `CostUSD` and the exported document's totals now
-  agree for a run with a failed fold: agentsession v0.0.20's exporter
-  counts a custom entry whose data carries `usage`, which a failed
-  fold's summary calls are, where v0.0.9 documented that the document
-  left them out. The runner's own sum is unchanged. (agentsession#184)
 
 ## v0.0.9 - 2026-10-01
 
