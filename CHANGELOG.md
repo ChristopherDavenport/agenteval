@@ -61,6 +61,13 @@ versions may break the API.
 
 ### Changed
 
+- Requires agentsession v0.0.20, agenttool v0.0.15, openresponses
+  v0.0.14 and agentturn and its `session` module v0.0.16. agentsession
+  v0.0.20 is format 0.11, which defines the `judged_by` link above;
+  under agentturn v0.0.16 a run that switches model writes the omit
+  setting and hashes every later response, so a strict replay of it
+  needs no `AllowUnhashed`.
+
 - A sampling runner names each sample's session `task#n`
   (`SampleName`), where every sample was named by the task ID alone, so
   a store listing with names tells the samples of a task apart. The
