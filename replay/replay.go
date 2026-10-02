@@ -983,12 +983,62 @@ func (m *Model) take() (step, int, error) {
 	return st, m.next, nil
 }
 
-// skippedFold is what a divergence at a local fold the replay did not
-// make adds: from agentturn v0.0.15 compact.NewLocal skips a fold whose
-// input is below its minimum, and backs off from a prefix whose fold
-// failed, so a recording made before then folds where a replay under
-// the same options does not.
-const skippedFold = "; from agentturn v0.0.15 compact.NewLocal skips a fold whose input is below its minimum, by default the larger of an eighth of the budget and twice an empty summary's estimate, which compact.WithMinFold(0) removes, and does not fold again a prefix whose fold failed"
+// What a divergence at a local fold the replay did not make adds, by
+// cause (#49). A recording made before agentturn v0.0.15 folds where a
+// replay under the same options does not, for three reasons the record
+// tells apart: the step before is a fold that failed on a summary with
+// no text, which failed the turn then and sends it on unfolded now;
+// the fold is one the transform remembers failing, which the recording
+// asked about again after a restart and a replay in one process backs
+// off from; or the fold's input is below the minimum v0.0.15 skips by
+// default. The last is the residual: the record holds tokens_before,
+// the estimate of the whole transcript, and not the budget or the
+// estimate of the part to fold, so whether the input was below the
+// minimum cannot be read from it.
+const (
+	noTextFold  = "; the step before is a fold that failed on a summary with no text, which failed the recording's turn there: from agentturn v0.0.15 compact.NewLocal sends the transcript unfolded instead and the turn goes on, so the request here is that turn's and not the fold the recording made next, and such a recording does not replay strictly past this point"
+	backedOff   = "; the recording asked again about a prefix whose fold had failed, as a host that restarted, or resumed, without session.CompactOptions does: compact.NewLocal from agentturn v0.0.13 backs off from that prefix in one process until the part to fold has grown by the keep-last count of items, at least one, or the estimate by a quarter of the budget, and no released agentturn option turns the back-off off (agentturn#211)"
+	skippedFold = "; from agentturn v0.0.15 compact.NewLocal skips a fold whose input is below its minimum, by default the larger of an eighth of the budget and twice an empty summary's estimate, which compact.WithMinFold(0) removes, and does not fold again a prefix whose fold failed"
+)
+
+// unfoldedFold reports whether a failed fold's recorded error is one
+// compact.NewLocal sends the transcript unfolded after and backs off
+// from: a summary too large, incomplete or with no text. A summary call
+// that failed is neither.
+func unfoldedFold(text string) bool {
+	return strings.HasPrefix(text, foldTooLarge) || strings.HasPrefix(text, foldIncomplete) || strings.HasPrefix(text, foldNoText)
+}
+
+// skippedHint is what the divergence at step n, a fold or a failed fold
+// the request did not match, adds. The step before it being a no-text
+// fold is the first cause. Otherwise the last fold step before it says
+// whether the replay's transform was backing off: a failed fold it
+// remembers, one with an unfolded send, means it was, since nothing
+// the record holds would have released it; a fold that succeeded means
+// the replay folded since and so was not. The minimum is the residual.
+// hashed says whether the recording hashed the skipped fold's request,
+// which the residual is given only for: an entry without the fold
+// member is older than the behaviour the residual describes.
+func (m *Model) skippedHint(n int, hashed bool) string {
+	if n >= 2 {
+		if prev := m.steps[n-2]; prev.failed != nil && strings.HasPrefix(prev.fold.Error, foldNoText) {
+			return noTextFold
+		}
+	}
+	for i := n - 2; i >= 0; i-- {
+		st := m.steps[i]
+		if st.comp != nil {
+			break
+		}
+		if st.failed != nil && unfoldedFold(st.fold.Error) {
+			return backedOff
+		}
+	}
+	if hashed {
+		return skippedFold
+	}
+	return ""
+}
 
 // isFoldRequest reports whether a request is shaped like a local
 // fold's summary call: no tools and no instructions, which is what
@@ -1023,17 +1073,13 @@ func (m *Model) CreateStream(_ context.Context, req openresponses.Request, sink 
 		}
 		// The configuration under test sent a turn where the
 		// recording folded.
-		hint := ""
-		if st.foldHash != "" {
-			hint = skippedFold
-		}
-		return fmt.Errorf("%w: compaction %s (step %d): the recording folded here and the request did not%s", ErrDiverged, st.comp.ID, n, hint)
+		return fmt.Errorf("%w: compaction %s (step %d): the recording folded here and the request did not%s", ErrDiverged, st.comp.ID, n, m.skippedHint(n, st.foldHash != ""))
 	}
 	if st.failed != nil {
 		if isFoldRequest(req) {
 			return m.serveFailedFold(st, n, req, sink)
 		}
-		return fmt.Errorf("%w: failed fold %s (step %d): the recording tried to fold here and the request did not%s", ErrDiverged, st.failed.ID, n, skippedFold)
+		return fmt.Errorf("%w: failed fold %s (step %d): the recording tried to fold here and the request did not%s", ErrDiverged, st.failed.ID, n, m.skippedHint(n, true))
 	}
 	// Got is computed whether or not the entry recorded a hash to
 	// compare it against: it is what this replay sent, and for a call
