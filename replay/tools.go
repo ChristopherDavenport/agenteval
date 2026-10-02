@@ -178,13 +178,19 @@ type recording struct {
 // matched on its name and arguments rather than running its tool.
 //
 // A session with no path to the leaf named holds no recordings, so
-// every call falls through, or fails when Strict.
+// every call falls through, or fails when Strict. [From] and
+// [AfterBase] serve the outputs recorded after the entry they name,
+// and one that is not on the path, or a base the header does not
+// name, is the same as no path: nothing is served.
 func Tools(s *agentsession.Session, tools []agenttool.Tool, opts ...Option) []agenttool.Tool {
 	o := apply(opts)
 	rec := &recording{opts: o, byID: map[string][]*recorded{}, byArgs: map[string][]*recorded{}}
 	path, err := pathTo(s, o.leaf)
 	if err == nil {
-		rec.index(path, s.Header().Format)
+		var start int
+		if start, err = startOf(s, path, o); err == nil {
+			rec.index(path, start, s.Header().Format)
+		}
 	}
 	out := make([]agenttool.Tool, len(tools))
 	for i, t := range tools {
@@ -195,9 +201,12 @@ func Tools(s *agentsession.Session, tools []agenttool.Tool, opts ...Option) []ag
 	return out
 }
 
-// index collects every function call with an output on the path, and
-// the records beside each, in a session of the given format.
-func (r *recording) index(path []agentsession.Entry, format string) {
+// index collects every function call with an output on the path from
+// start on, and the records beside each, in a session of the given
+// format. A call before start is indexed so an output after it is
+// matched to it, as a call left pending at a fork's base and answered
+// in the fork; one whose output is before start is not served.
+func (r *recording) index(path []agentsession.Entry, start int, format string) {
 	calls := map[string]*recorded{}
 	var order []*recorded
 	byPosition := !namesCalls(format)
@@ -206,7 +215,7 @@ func (r *recording) index(path []agentsession.Entry, format string) {
 	// nestedEnd is the call whose nested call's end was the previous
 	// entry, whose record, if one follows, is the nested call's.
 	nestedEnd := ""
-	for _, e := range path {
+	for i, e := range path {
 		// An item the filter in force kept from the model is a custom
 		// entry marked with its response ID from agentturn v0.0.15, a
 		// function call's output among them when a filter drops those;
@@ -259,7 +268,7 @@ func (r *recording) index(path []agentsession.Entry, format string) {
 			waiting[v.CallID] = c
 			order = append(order, c)
 		case *openresponses.FunctionCallOutput:
-			if c, ok := calls[v.CallID]; ok && c.output == nil {
+			if c, ok := calls[v.CallID]; ok && c.output == nil && i >= start {
 				c.output = v
 				c.entryID = entryID
 				delete(waiting, v.CallID)

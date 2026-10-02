@@ -104,7 +104,10 @@ type Runner struct {
 	// are filled by the store. A header that names a Base and its
 	// ParentSession forks that session, and the agent starts from the
 	// context at the base, so a task runs as a continuation of a
-	// recorded run and its session replays strictly like any other.
+	// recorded run and its session replays strictly like any other:
+	// through a runner with the same Header under replay.AfterBase(),
+	// since the agent starts after the base and never sends the
+	// base's requests, or whole, from an agent that sends them.
 	Header func(Task) agentsession.Header
 	// Cost prices one model call, as export.Options.Cost does; see
 	// price.Hook. When set, and every call of a run is priced, the

@@ -129,6 +129,14 @@ func (m *Model) SettingsAt(n int) (agentsession.Settings, bool)
 // rather than a model output, so a replay of a judged session names
 // the leaf it wants.
 func WithLeaf(id string) Option
+// From serves only the steps after the entry named, for NewModel and
+// Tools alike; the settings still accumulate from the whole path, and
+// a strict model counts the unhashed responses it refuses among the
+// steps served. AfterBase is From over the header's Base: a task
+// forked through Runner.Header, whose agent starts at the base and
+// never sends the base's requests, replays through the runner with it.
+func From(entryID string) Option
+func AfterBase() Option
 func WithObserver(fn func(Served)) Option
 // WithFoldText says how a local fold's summary item becomes the text
 // the model answered with; the default undoes compact.SummaryMessage.

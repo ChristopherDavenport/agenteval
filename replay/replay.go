@@ -179,6 +179,8 @@ type options struct {
 	allowUnhashed bool
 	allowSubst    bool
 	leaf          string
+	from          string
+	afterBase     bool
 	observer      func(Served)
 	foldText      func(openresponses.Item) string
 	details       map[string]func(json.RawMessage) (any, error)
@@ -243,6 +245,29 @@ func AllowSubstitution() Option { return func(o *options) { o.allowSubst = true 
 // model output; a branched session has several leaves and a replay
 // names the one it wants.
 func WithLeaf(id string) Option { return func(o *options) { o.leaf = id } }
+
+// From serves only the steps after the entry named, which must be on
+// the path: for [NewModel] the model calls recorded after it, for
+// [Tools] the outputs recorded after it. The settings still accumulate
+// from the whole path, so a config entry before it is in force at the
+// steps served, and a strict model checks substitution and repeated
+// call IDs over the whole path too; only the unhashed responses it
+// refuses are counted among the steps served. It is how a session
+// whose first part another agent sent is replayed from an agent seeded
+// with that part: a fork, whose agent starts at the base and never
+// sends the base's requests, is [AfterBase]. [NewModel] returns an error
+// for an entry that is not on the path; [Tools], which has no error to
+// return, then serves no recorded output, so under [Strict] every call
+// diverges.
+func From(entryID string) Option { return func(o *options) { o.from = entryID } }
+
+// AfterBase is [From] over the session header's Base: it serves the
+// steps a fork recorded after the base it was forked at. A task forked
+// through Runner.Header replays through the runner with it, since the
+// runner seeds the fork's agent at the base. [NewModel] returns an
+// error for a session whose header names no base; [Tools] then serves
+// no recorded output, as for a [From] entry not on the path.
+func AfterBase() Option { return func(o *options) { o.afterBase = true } }
 
 // WithObserver sets a function called for everything served.
 func WithObserver(fn func(Served)) Option { return func(o *options) { o.observer = fn } }
@@ -325,19 +350,24 @@ type Model struct {
 }
 
 // NewModel builds a model over the path from the root to the leaf
-// named by [WithLeaf], or to the session's current leaf. A strict
-// model over a path a strict replay could not check is refused here
-// with [ErrUnverifiable], rather than at the call it could not check:
-// see [Unverifiable], and [AllowUnhashed] and [AllowSubstitution] to
-// serve it anyway.
+// named by [WithLeaf], or to the session's current leaf, serving the
+// steps after the entry [From] or [AfterBase] names when one is given.
+// A strict model over a path a strict replay could not check is
+// refused here with [ErrUnverifiable], rather than at the call it
+// could not check: see [Unverifiable], and [AllowUnhashed] and
+// [AllowSubstitution] to serve it anyway.
 func NewModel(s *agentsession.Session, opts ...Option) (*Model, error) {
 	o := apply(opts)
 	path, err := pathTo(s, o.leaf)
 	if err != nil {
 		return nil, err
 	}
+	start, err := startOf(s, path, o)
+	if err != nil {
+		return nil, err
+	}
 	if o.strict {
-		if err := unverifiable(path, o); err != nil {
+		if err := unverifiable(path, start, o); err != nil {
 			return nil, err
 		}
 	}
@@ -346,9 +376,13 @@ func NewModel(s *agentsession.Session, opts ...Option) (*Model, error) {
 	// path applied in order, which is what a product whose layers
 	// re-read state each turn must send to replay strictly: the
 	// recording's instructions, not the ones those layers would build
-	// again today.
+	// again today. They accumulate from the root whatever From names;
+	// only the steps are taken from after it.
 	var settings agentsession.Settings
 	for i, e := range path {
+		if _, ok := e.(*agentsession.ConfigEntry); !ok && i < start {
+			continue
+		}
 		switch v := e.(type) {
 		case *agentsession.ConfigEntry:
 			settings = settings.Apply(v)
@@ -601,6 +635,31 @@ func markedItem(c *agentsession.CustomEntry) (openresponses.Item, string, bool) 
 	return item, responseID, true
 }
 
+// startOf returns the index on path of the first entry to serve: 0 for
+// the whole path, or the index after the entry [From] or [AfterBase]
+// names. An entry not on the path, or AfterBase on a session whose
+// header names no base, is an error.
+func startOf(s *agentsession.Session, path []agentsession.Entry, o options) (int, error) {
+	from := o.from
+	if o.afterBase {
+		if from = s.Header().Base; from == "" {
+			return 0, errors.New("replay: AfterBase: the session names no base")
+		}
+	}
+	if from == "" {
+		return 0, nil
+	}
+	if id, ok := s.Resolve(from); ok {
+		from = id
+	}
+	for i, e := range path {
+		if e.Base().ID == from {
+			return i + 1, nil
+		}
+	}
+	return 0, fmt.Errorf("replay: From: %w: %s is not on the path", agentsession.ErrNoEntry, from)
+}
+
 // pathTo returns the root-first path to leaf, or to the current leaf
 // when leaf is empty.
 func pathTo(s *agentsession.Session, leaf string) ([]agentsession.Entry, error) {
@@ -633,7 +692,8 @@ func pathTo(s *agentsession.Session, leaf string) ([]agentsession.Entry, error) 
 // that does not wrap [ErrUnverifiable] is the failure to resolve leaf
 // to a path at all, which says nothing either way about the record. [AllowUnhashed] and
 // [AllowSubstitution] among opts leave out what they allow, as they do
-// for [NewModel]; the other options are ignored.
+// for [NewModel], and [From] or [AfterBase] counts the unhashed
+// responses among the steps served; the other options are ignored.
 //
 // The recorder writes a response without a request hash when the path
 // it wrote does not rebuild that request's input: what a compacting
@@ -647,21 +707,26 @@ func pathTo(s *agentsession.Session, leaf string) ([]agentsession.Entry, error) 
 // so a caller can ask before building a model or running a suite
 // rather than find out at the call.
 func Unverifiable(s *agentsession.Session, leaf string, opts ...Option) error {
+	o := apply(opts)
 	path, err := pathTo(s, leaf)
 	if err != nil {
 		return err
 	}
-	return unverifiable(path, apply(opts))
+	start, err := startOf(s, path, o)
+	if err != nil {
+		return err
+	}
+	return unverifiable(path, start, o)
 }
 
-// unverifiable is [Unverifiable] over a path already in hand. Folds
-// are not counted here: a compaction entry with no fold hash matters
-// only if the replay folds locally, which is not known until the call,
-// so serveFold decides that one.
-func unverifiable(path []agentsession.Entry, o options) error {
+// unverifiable is [Unverifiable] over a path already in hand, serving
+// from start. Folds are not counted here: a compaction entry with no
+// fold hash matters only if the replay folds locally, which is not
+// known until the call, so serveFold decides that one.
+func unverifiable(path []agentsession.Entry, start int, o options) error {
 	var errs []error
 	if !o.allowUnhashed {
-		errs = append(errs, unhashed(path))
+		errs = append(errs, unhashed(path, start))
 	}
 	if !o.allowSubst {
 		errs = append(errs, substituted(path))
@@ -691,10 +756,11 @@ func repeatedCallID(path []agentsession.Entry) error {
 	return nil
 }
 
-// unhashed reports the responses on path that carry no request hash.
-func unhashed(path []agentsession.Entry) error {
+// unhashed reports the responses on path from start on that carry no
+// request hash.
+func unhashed(path []agentsession.Entry, start int) error {
 	n, responses := 0, 0
-	for _, e := range path {
+	for _, e := range path[start:] {
 		r, ok := e.(*agentsession.ResponseEntry)
 		if !ok {
 			continue
