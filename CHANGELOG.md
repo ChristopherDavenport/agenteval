@@ -5,6 +5,66 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+### Added
+
+- `replay.From(entryID)` and `replay.AfterBase()`. `From` serves only
+  the steps after the named entry on the path, for `NewModel` and
+  `Tools` alike; `AfterBase` is `From` over the session header's
+  `Base`. The settings still accumulate from the whole path, as do the
+  substitution and repeated-call-ID checks; a strict model counts the
+  unhashed responses it refuses among the steps served. A task forked
+  through `Runner.Header` replays through the runner with the same
+  `Header` under `AfterBase`, since the runner seeds the fork's agent
+  at the base and the agent never sends the base's requests; without
+  it the model served the base's first response against the fork's
+  first request and diverged at step 1. `NewModel` refuses an entry
+  not on the path and `AfterBase` on a session with no base; `Tools`
+  then serves no recorded output. (#45)
+
+### Fixed
+
+- A strict replay serves a model output the filter kept from the
+  model, which agentturn v0.0.15 records as a custom entry in the
+  namespace of its type marked with `session.ResponseIDMember`, in its
+  place among the response's items; `Tools` indexes a marked function
+  call or output the same way. The output walk took item entries
+  alone, so a replayed response was short of such an item, a text-call
+  parser's raw item say, and nothing said so, since the filter keeps
+  it out of every request. (#50)
+
+- A recorded failure of the shape `<Op> "<url>": <rest>`, which
+  net/http's client gives every error it returns, is served with a
+  `*url.Error` as its `Cause`, wrapping the error the rest names or,
+  when it names none, a `net.Error` whose `Timeout` reports whether the
+  rest says timeout. net/http's response-header and TLS-handshake
+  timeouts, unexported `net.Error`s named only by their text, were
+  served as a bare 503 with no `Cause`, and a transport-only
+  `Retryable` that retried them live declined the replay. (#47)
+
+- A divergence at a local fold the replay did not make names its
+  cause rather than always `compact.WithMinFold(0)`: after a fold that
+  failed on a summary with no text, it says the recording's turn
+  failed there, that agentturn v0.0.15 sends the transcript unfolded
+  instead, and that such a recording does not replay strictly past
+  that point; at a fold the recording asked for again about a prefix
+  whose fold had failed, as a host that restarted without
+  `session.CompactOptions` does, it says `compact.NewLocal` backs off
+  from it, and that no released agentturn option turns the back-off
+  off, naming agentturn#211 until that option is released; the minimum
+  fold remains the residual. (#49)
+
+- `ErrUnverifiable` for a path with unhashed responses quotes the
+  `agentturn:unhashed` entry before the first of them: its reason, the
+  index where the sent and recorded inputs part and the item each
+  holds there, and, for a reasoning item, that agentturn v0.0.15
+  leaves another model's reasoning out of a request and the format
+  cannot describe it (agentsession#56). The runner's `ErrUnreplayable`
+  no longer tells a fork run under another model than its base's to
+  bind `compact.WithOnFold`; an unbound fold, which writes such an
+  entry too, keeps that diagnosis. (#46)
+
 ## v0.0.9 - 2026-10-01
 
 ### Added
