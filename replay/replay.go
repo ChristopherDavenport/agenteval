@@ -262,8 +262,9 @@ func WithLeaf(id string) Option { return func(o *options) { o.leaf = id } }
 // diverges.
 func From(entryID string) Option { return func(o *options) { o.from = entryID } }
 
-// AfterBase is [From] over the session header's Base: it serves the
-// steps a fork recorded after the base it was forked at. A task forked
+// AfterBase is [From] over the session header's Base, and wins over
+// [From] when both are given: it serves the steps a fork recorded
+// after the base it was forked at. A task forked
 // through Runner.Header replays through the runner with it, since the
 // runner seeds the fork's agent at the base. [NewModel] returns an
 // error for a session whose header names no base; [Tools] then serves

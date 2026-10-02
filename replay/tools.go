@@ -21,6 +21,9 @@ type recorded struct {
 	entryID string
 	call    *openresponses.FunctionCall
 	output  *openresponses.FunctionCallOutput
+	// before is set when the output is before the entry From names,
+	// so the call is answered but not served.
+	before bool
 	// records are the records beside the call that may be its
 	// result's, in path order.
 	records []*agentsession.CustomEntry
@@ -268,15 +271,16 @@ func (r *recording) index(path []agentsession.Entry, start int, format string) {
 			waiting[v.CallID] = c
 			order = append(order, c)
 		case *openresponses.FunctionCallOutput:
-			if c, ok := calls[v.CallID]; ok && c.output == nil && i >= start {
+			if c, ok := calls[v.CallID]; ok && c.output == nil {
 				c.output = v
 				c.entryID = entryID
+				c.before = i < start
 				delete(waiting, v.CallID)
 			}
 		}
 	}
 	for _, c := range order {
-		if c.output == nil {
+		if c.output == nil || c.before {
 			continue
 		}
 		r.byID[c.call.CallID] = append(r.byID[c.call.CallID], c)
