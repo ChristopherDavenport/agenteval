@@ -20,6 +20,16 @@ versions may break the API.
   that answered it. An evaluation where a crash counts as a failure
   sets `JudgeFailedRuns` on both runners. (#44)
 
+- `CompactOptions(ctx, rec)`, the options that seed a compacting
+  configuration's transform with the session the recorder writes, as
+  the runner seeds a fork's agent with `session.AgentOptions`: for a
+  task forked from a base whose last fold failed, the fold to back off
+  from. A fork made two summary calls and wrote a `compaction_failed`
+  the product resuming the same session would not; `ConfigWith`'s
+  example passes the options beside `compact.WithOnFold(rec.Fold)`.
+  It reads the session through the recorder's store until agentturn
+  releases `Recorder.CompactOptions`, which it then wraps. (#48)
+
 ## v0.0.9 - 2026-10-01
 
 ### Added
