@@ -2,7 +2,9 @@ package agenteval_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/ChristopherDavenport/agenteval"
@@ -150,6 +152,26 @@ func TestForkOfAnUnhashedBaseIsReplayable(t *testing.T) {
 	origin := first.Results[0]
 	if !errors.Is(origin.Err, agenteval.ErrUnreplayable) {
 		t.Fatalf("base: err %v, want ErrUnreplayable for the edited request", origin.Err)
+	}
+	// Issue 46: the error quotes the agentturn:unhashed entry's reason.
+	bs, err := store.Open(ctx, origin.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var why *session.Unhashed
+	for _, e := range bs.Path(origin.Target) {
+		if c, ok := e.(*agentsession.CustomEntry); ok && c.NS == session.UnhashedNS {
+			why = &session.Unhashed{}
+			if err := json.Unmarshal(c.Data, why); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if why == nil || why.Reason == "" {
+		t.Fatalf("base: no agentturn:unhashed entry with a reason: %+v", why)
+	}
+	if msg := origin.Err.Error(); !strings.Contains(msg, why.Reason) {
+		t.Errorf("base: the error does not quote the unhashed entry's reason %q:\n%s", why.Reason, msg)
 	}
 	r := &agenteval.Runner{
 		Store:  store,
