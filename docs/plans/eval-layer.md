@@ -359,6 +359,12 @@ type Runner struct {
     GroupJudges []GroupJudge // score each task's samples together, after its judges
 }
 
+// JudgeGroups finishes the groups already in the Store: per task and
+// sample, the latest judged session whose run ended, judged together once
+// every sample has one, and recorded as Run records a group. The report's
+// results are the members.
+func (r *Runner) JudgeGroups(ctx context.Context, suite *Suite) (*Report, error)
+
 type Result struct {
     // ...
     Sample int // 1 to Samples; 0 when the runner does not sample
@@ -381,7 +387,16 @@ type Member struct {
   `Result.Sample`, so a suite's own IDs need no reserved character. The
   `Task` each sample runs, and every hook sees, carries
   `Meta["sample"]`, so a `Header` that fixes session IDs can fix one per
-  sample; a suite whose task already sets that key is refused.
+  sample. Its session is named `task#n` (`SampleName`), so a store
+  listing with names tells the samples apart; a runner that does not
+  sample names the session by the task alone, as before.
+- **One sample.** A suite task whose `Meta["sample"]` is set while
+  `Samples` is above one runs that sample alone, numbered as it says on
+  the result, the task record and each outcome's details: how a batch
+  that was killed, or lost a sample to its inference server, is
+  resumed without paying again for the samples that finished. Its
+  group step is not run, since one sample is not the group; a value
+  that is not a number from 1 to `Samples` is refused.
 - **Order.** Results are task-major, sample-minor. Samples run under
   `Parallel` like tasks; a task's group judges run once its last sample
   is judged, on that sample's goroutine.
@@ -398,6 +413,17 @@ type Member struct {
   group-judged, as Atropos drops it. Every other member's result says
   so on `Err`. With `JudgeFailedRuns` the failed member is judged and
   the group is complete.
+- **Finishing a group from the store.** `JudgeGroups(ctx, suite)` is
+  the group step over sessions already recorded: for each task it
+  takes, per sample, the latest session found by name or by its
+  `agenteval:task` record that the runner's judges scored and whose
+  scores target a run end that is not an error (any end under
+  `JudgeFailedRuns`), and once every sample has one runs the group
+  judges no member already holds an outcome from, recording the scores
+  as `Run` does. A group with a sample still missing, or judged by
+  every group judge already, is left out, so a second call does
+  nothing. Sessions are read without being held where the store is a
+  `Reader`.
 - **Errors.** A group judge that errs, or returns a score count other
   than the group's, writes nothing, and the error is on every member's
   result.

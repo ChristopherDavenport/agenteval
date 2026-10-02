@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -249,5 +250,173 @@ func TestCompareSamples(t *testing.T) {
 		if p.Sample == 0 || p.A.Sample != p.Sample || p.B.Sample != p.Sample || p.A.Task.ID != p.Task || p.B.Task.ID != p.Task {
 			t.Errorf("pair %s#%d pairs %s#%d with %s#%d", p.Task, p.Sample, p.A.Task.ID, p.A.Sample, p.B.Task.ID, p.B.Sample)
 		}
+	}
+}
+
+// sessionNames lists the store's session names, sorted.
+func sessionNames(t *testing.T, store agentsession.Store) []string {
+	t.Helper()
+	var names []string
+	for sum, err := range store.List(context.Background(), agentsession.ListFilter{WithNames: true}) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, sum.Name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// TestRunnerResumesAGroup is #51: a batch whose last sample failed is
+// resumed by running that sample alone, through Meta["sample"], and
+// the group is finished from the store by JudgeGroups. Before it a
+// single sample was refused while Samples was set, a rerun without
+// Samples was a group of one recorded as sample 0, every sample's
+// session was named by the task alone, and nothing group judged
+// samples already in the store.
+func TestRunnerResumesAGroup(t *testing.T) {
+	ctx := context.Background()
+	suite := &agenteval.Suite{Name: "s", Tasks: basicSuite(t).Tasks[:1]}
+	task := suite.Tasks[0]
+	store := newStableStore()
+	var calls atomic.Int32
+	r := basicRunner(store)
+	r.Samples = 3
+	r.GroupJudges = []agenteval.GroupJudge{advantage(&calls)}
+	r.Config = func(task agenteval.Task) agentturn.Config {
+		if task.Meta[agenteval.SampleMeta] == "3" {
+			return agentturn.Config{Model: failingModel{}}
+		}
+		return basicConfig(task)
+	}
+	// The batch: sample 3's inference fails, so the group is not judged.
+	first, err := r.Run(ctx, suite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Results) != 3 || first.Results[2].Err == nil || calls.Load() != 0 {
+		t.Fatalf("the batch: %d results, sample 3 err %v, %d group calls", len(first.Results), first.Results[2].Err, calls.Load())
+	}
+	// Each sample's session is told apart in a listing.
+	if got := sessionNames(t, store); strings.Join(got, " ") != "greet#1 greet#2 greet#3" {
+		t.Errorf("names = %v", got)
+	}
+
+	// The resume: sample 3 alone, as the task's Meta names it, under the
+	// same runner. It is numbered as it says and is not a group of one.
+	r.Config = basicConfig
+	resume := &agenteval.Suite{Name: "s", Tasks: []agenteval.Task{withMeta(task, agenteval.SampleMeta, "3")}}
+	second, err := r.Run(ctx, resume)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Results) != 1 {
+		t.Fatalf("the resume ran %d results, want sample 3 alone", len(second.Results))
+	}
+	res := second.Results[0]
+	if res.Err != nil || res.Sample != 3 || res.Task.Meta[agenteval.SampleMeta] != "3" || len(res.Scores) != len(r.Judges) {
+		t.Errorf("resumed sample: err %v, sample %d, meta %v, %d scores", res.Err, res.Sample, res.Task.Meta, len(res.Scores))
+	}
+	rec, outcomes := sessionRecord(t, store, res)
+	if rec.Sample != 3 || rec.Samples != 3 || len(rec.GroupJudges) != 1 {
+		t.Errorf("resumed sample's record %+v", rec)
+	}
+	if _, ok := outcomes["advantage"]; ok || calls.Load() != 0 {
+		t.Errorf("the resumed sample was group judged alone: outcomes %v, %d group calls", outcomes, calls.Load())
+	}
+	for _, d := range outcomes {
+		if d.Sample != 3 {
+			t.Errorf("outcome details %+v, want sample 3", d)
+		}
+	}
+	if got := sessionNames(t, store); strings.Join(got, " ") != "greet#1 greet#2 greet#3 greet#3" {
+		t.Errorf("names = %v", got)
+	}
+
+	// The group step over the store: each sample's latest judged
+	// session, the failed one passed over, judged together once.
+	report, err := r.JudgeGroups(ctx, suite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Results) != 3 || calls.Load() != 1 {
+		t.Fatalf("JudgeGroups: %d results, %d group calls", len(report.Results), calls.Load())
+	}
+	want := map[int]string{1: first.Results[0].SessionID, 2: first.Results[1].SessionID, 3: res.SessionID}
+	for k, m := range report.Results {
+		if m.Err != nil {
+			t.Errorf("member %d: %v", k, m.Err)
+		}
+		if m.Sample != k+1 || m.Task.ID != task.ID || m.SessionID != want[k+1] || m.Target == "" || m.Reason != agentturn.ReasonDone {
+			t.Errorf("member %d = %s#%d in %s at %q, reason %s; want sample %d in %s", k, m.Task.ID, m.Sample, m.SessionID, m.Target, m.Reason, k+1, want[k+1])
+		}
+		// The judges' scores read back, then the group's.
+		if len(m.Scores) != len(r.Judges)+1 || m.Scores[0].Judge != "contains" || m.Scores[len(m.Scores)-1].Judge != "advantage" {
+			t.Errorf("member %d scores %+v", k, m.Scores)
+		}
+		_, outcomes := sessionRecord(t, store, m)
+		if d, ok := outcomes["advantage"]; !ok || d.Sample != k+1 || d.Task != task.ID {
+			t.Errorf("member %d outcomes %+v", k, outcomes)
+		}
+	}
+	if sum := report.ByJudge["advantage"]; sum.Count != 3 || sum.Unjudged != 0 || sum.Mean > 1e-9 || sum.Mean < -1e-9 {
+		t.Errorf("advantage summary %+v", sum)
+	}
+	// The failed session holds no group outcome, and a second pass
+	// finds every group judged and does nothing.
+	if _, outcomes := sessionRecord(t, store, first.Results[2]); len(outcomes) != 0 {
+		t.Errorf("the failed sample's session holds outcomes %v", outcomes)
+	}
+	again, err := r.JudgeGroups(ctx, suite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again.Results) != 0 || calls.Load() != 1 {
+		t.Errorf("a second JudgeGroups: %d results, %d group calls", len(again.Results), calls.Load())
+	}
+	// A group with a sample still missing is left out.
+	missing := &agenteval.Suite{Name: "s", Tasks: basicSuite(t).Tasks}
+	if report, err := r.JudgeGroups(ctx, missing); err != nil || len(report.Results) != 0 || calls.Load() != 1 {
+		t.Errorf("a suite with an unrun task: %d results, %d group calls, %v", len(report.Results), calls.Load(), err)
+	}
+}
+
+// withMeta returns task with one Meta key set, its Meta copied.
+func withMeta(task agenteval.Task, key, value string) agenteval.Task {
+	meta := make(map[string]string, len(task.Meta)+1)
+	for k, v := range task.Meta {
+		meta[k] = v
+	}
+	meta[key] = value
+	task.Meta = meta
+	return task
+}
+
+// A sample that is not one of 1..Samples is refused with a clear error,
+// and JudgeGroups needs group judges and a store.
+func TestRunnerRefusesABadSample(t *testing.T) {
+	task := basicSuite(t).Tasks[0]
+	tests := []struct {
+		value string
+		want  string
+	}{
+		{"x", `Meta["sample"] = "x"`},
+		{"0", `Meta["sample"] = "0"`},
+		{"4", `Meta["sample"] = "4"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.value, func(t *testing.T) {
+			r := basicRunner(newStableStore())
+			r.Samples = 3
+			suite := &agenteval.Suite{Name: "s", Tasks: []agenteval.Task{withMeta(task, agenteval.SampleMeta, tt.value)}}
+			_, err := r.Run(context.Background(), suite)
+			if err == nil || !strings.Contains(err.Error(), tt.want) || !strings.Contains(err.Error(), "1 to 3") {
+				t.Errorf("err = %v", err)
+			}
+		})
+	}
+	r := basicRunner(newStableStore())
+	if _, err := r.JudgeGroups(context.Background(), &agenteval.Suite{Name: "s", Tasks: []agenteval.Task{task}}); err == nil || !strings.Contains(err.Error(), "no group judges") {
+		t.Errorf("no group judges: %v", err)
 	}
 }

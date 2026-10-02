@@ -30,6 +30,19 @@ versions may break the API.
   It reads the session through the recorder's store until agentturn
   releases `Recorder.CompactOptions`, which it then wraps. (#48)
 
+- `Runner.JudgeGroups(ctx, suite)`, the group step over sessions
+  already in the store: per task and sample, the latest session the
+  runner's judges scored whose run ended, judged together once every
+  sample has one and recorded as `Run` records a group; groups with a
+  sample missing or already group judged are left out. With it a task
+  whose `Meta["sample"]` is set while `Samples` is above one is no
+  longer refused: it runs that sample alone, numbered as it says, and
+  without a group step, so a killed batch is resumed by rerunning the
+  samples that did not finish and then calling `JudgeGroups`. Each
+  sample's session is named `task#n`, `SampleName`, so a store listing
+  tells the samples apart; a runner that does not sample names the
+  session by the task alone, as before. (#51)
+
 ## v0.0.9 - 2026-10-01
 
 ### Added
