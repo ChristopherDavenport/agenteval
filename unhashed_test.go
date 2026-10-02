@@ -2,12 +2,11 @@ package agenteval_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"strings"
 	"testing"
 
 	"github.com/ChristopherDavenport/agenteval"
+	"github.com/ChristopherDavenport/agenteval/replay"
 	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/agentturn/session"
@@ -40,14 +39,13 @@ func (reasoner) CreateStream(_ context.Context, req openresponses.Request, sink 
 	return em.Complete()
 }
 
-// Issue 46: a fork of a base recorded on a reasoning model, run under
-// another model, leaves the base's reasoning out of its request, which
-// the format cannot describe; the recorder writes the response without
-// a hash and an agentturn:unhashed entry saying why. The result's
-// ErrUnreplayable quotes that entry rather than diagnosing a compacting
-// configuration that never bound compact.WithOnFold, which this run
-// does not have.
-func TestUnreplayableQuotesTheUnhashedEntry(t *testing.T) {
+// A fork of a base recorded on a reasoning model, run under another
+// model, no longer leaves its responses unhashed: agentsession format
+// 0.11 lets the recorder write an omit of the reasoning at the config
+// entry that switches the model and hash later requests against the
+// context rebuilt under that rule. A strict replay of the fork serves
+// every response, without AllowUnhashed.
+func TestModelSwitchReplaysStrictWithoutAllowUnhashed(t *testing.T) {
 	ctx := context.Background()
 	store := newStableStore()
 	base := echoConfig()
@@ -60,63 +58,72 @@ func TestUnreplayableQuotesTheUnhashedEntry(t *testing.T) {
 	if origin.Err != nil {
 		t.Fatalf("base: %v", origin.Err)
 	}
+	baseSession, err := store.Open(ctx, origin.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reasoning := false
+	for _, e := range baseSession.Path(origin.Target) {
+		if it, ok := e.(*agentsession.ItemEntry); ok && it.Item.ItemType() == openresponses.ItemTypeReasoning {
+			reasoning = true
+		}
+	}
+	if !reasoning {
+		t.Fatal("the base path holds no reasoning item, so the fork would not exercise the switch")
+	}
 	suite := &agenteval.Suite{Name: "fork", Tasks: []agenteval.Task{{ID: "next", Prompts: openresponses.Items{openresponses.UserText("go on")}}}}
-	fork := func(t *testing.T, modelName string) (agenteval.Result, *session.Unhashed) {
-		t.Helper()
-		r := &agenteval.Runner{
-			Store: store,
-			ConfigWith: func(agenteval.Task, *session.Recorder) agentturn.Config {
-				c := base
-				c.ModelName = modelName
-				return c
-			},
-			Header: func(agenteval.Task) agentsession.Header {
-				return agentsession.Header{ParentSession: origin.SessionID, Base: origin.Target}
-			},
-		}
-		rep, err := r.Run(ctx, suite)
-		if err != nil {
-			t.Fatal(err)
-		}
-		res := rep.Results[0]
-		s, err := store.Open(ctx, res.SessionID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var why *session.Unhashed
-		for _, e := range s.Path(res.Target) {
-			if c, ok := e.(*agentsession.CustomEntry); ok && c.NS == session.UnhashedNS {
-				why = &session.Unhashed{}
-				if err := json.Unmarshal(c.Data, why); err != nil {
-					t.Fatal(err)
+	r := &agenteval.Runner{
+		Store: store,
+		ConfigWith: func(agenteval.Task, *session.Recorder) agentturn.Config {
+			c := base
+			c.ModelName = "other/model-2"
+			return c
+		},
+		Header: func(agenteval.Task) agentsession.Header {
+			return agentsession.Header{ParentSession: origin.SessionID, Base: origin.Target}
+		},
+	}
+	rep, err := r.Run(ctx, suite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := rep.Results[0]
+	if res.Err != nil {
+		t.Fatalf("fork under another model: %v", res.Err)
+	}
+	s, err := store.Open(ctx, res.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Every response after the switch carries a hash, not just one.
+	omitted, after := false, 0
+	for _, e := range s.Path(res.Target) {
+		switch e := e.(type) {
+		case *agentsession.CustomEntry:
+			if e.NS == session.UnhashedNS {
+				t.Errorf("an agentturn:unhashed entry was recorded: %s", e.Data)
+			}
+		case *agentsession.ResponseEntry:
+			if omitted {
+				after++
+				if e.RequestHash == "" {
+					t.Errorf("response %s after the switch has no request_hash", e.ID)
 				}
 			}
+		case *agentsession.ConfigEntry:
+			if e.Omit != nil && e.Omit.Reasoning == agentsession.OmitOtherModels {
+				omitted = true
+			}
 		}
-		return res, why
 	}
-
-	// Under the base's model the reasoning goes back and every
-	// response is hashed.
-	same, why := fork(t, "echo/echo-1")
-	if same.Err != nil || why != nil {
-		t.Fatalf("fork under the base's model: err %v, unhashed entry %+v", same.Err, why)
+	if !omitted || after == 0 {
+		t.Errorf("omit entry %v, responses after it %d; want an omit and a response after it", omitted, after)
 	}
-
-	other, why := fork(t, "other/model-2")
-	if why == nil || why.Recorded == nil || why.Recorded.Type != openresponses.ItemTypeReasoning {
-		t.Fatalf("fork under another model: no agentturn:unhashed entry naming the reasoning item left out: %+v", why)
+	if err := replay.Unverifiable(s, res.Target); err != nil {
+		t.Errorf("Unverifiable: %v", err)
 	}
-	if !errors.Is(other.Err, agenteval.ErrUnreplayable) {
-		t.Fatalf("err = %v, want ErrUnreplayable", other.Err)
-	}
-	msg := other.Err.Error()
-	if strings.Contains(msg, "WithOnFold") {
-		t.Errorf("the error diagnoses a compacting configuration this run does not have:\n%s", msg)
-	}
-	for _, want := range []string{why.Reason, "reasoning", "agentsession#56"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("the error does not say %q:\n%s", want, msg)
-		}
+	if _, err := replay.NewModel(s, replay.Strict(), replay.WithLeaf(res.Target)); err != nil {
+		t.Errorf("strict NewModel without AllowUnhashed: %v", err)
 	}
 }
 
