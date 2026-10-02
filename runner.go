@@ -67,7 +67,11 @@ type Runner struct {
 	// rewards, as a reward.
 	Judges []Judge
 	// JudgeFailedRuns judges a task whose run failed as one that ended,
-	// for an evaluation where a crash counts against the configuration.
+	// for an evaluation where a crash counts against the configuration:
+	// Harbor's, which counts a trial with no reward as 0. Without it
+	// the failed run is counted on [Summary.Unjudged], and a comparison
+	// marks its pair on [Pair.Unjudged] rather than scoring it; a
+	// comparison under Harbor's rule sets it on both runners.
 	JudgeFailedRuns bool
 	// Samples is how many times each task is run, each in a session of
 	// its own: the group an RL producer scores together. Zero or one

@@ -12,6 +12,13 @@ type Summary struct {
 	// failed is not scored unless [Runner.JudgeFailedRuns], so it counts
 	// here only then; its result carries the error.
 	Count int `json:"count"`
+	// Unjudged is how many results the judge did not score, so Count
+	// plus Unjudged is the number of results: a run that failed and was
+	// left unjudged under the default, or a judge that failed on it;
+	// the result's Err says which. A reader that counts a run with no
+	// score as 0, as Harbor's mean does, has what it needs to: the mean
+	// over every result is Mean times Count over Count plus Unjudged.
+	Unjudged int `json:"unjudged"`
 	// Mean is the mean of the judge's values over those results.
 	Mean float64 `json:"mean"`
 	// Passed is how many of them the judge passed, and PassRate is
@@ -32,7 +39,10 @@ type Report struct {
 	ByJudge  map[string]Summary `json:"by_judge"`
 }
 
-// Summarize computes the per-judge summaries over results.
+// Summarize computes the per-judge summaries over results. It reads
+// the results alone, so a report read back from JSON summarises as the
+// runner's did: a judge is summarised when it scored at least one
+// result, and its Unjudged is the results it did not score.
 func Summarize(results []Result) map[string]Summary {
 	out := map[string]Summary{}
 	for _, r := range results {
@@ -47,6 +57,7 @@ func Summarize(results []Result) map[string]Summary {
 		}
 	}
 	for name, sum := range out {
+		sum.Unjudged = len(results) - sum.Count
 		sum.Mean /= float64(sum.Count)
 		sum.PassRate = float64(sum.Passed) / float64(sum.Count)
 		out[name] = sum

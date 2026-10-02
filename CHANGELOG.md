@@ -5,6 +5,21 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+### Added
+
+- `Summary.Unjudged`, the results a judge did not score, so `Count`
+  plus `Unjudged` is the number of results and a reader can tell 1 of
+  1 from 1 of 2, or compute Harbor's mean, which counts a trial with
+  no reward as 0. `Compare` marks a pair whose side was not judged on
+  `Pair.Unjudged` (`UnjudgedA`, `UnjudgedB`, `UnjudgedBoth`), counts
+  it on `Comparison.Unjudged` and leaves it out of `ByJudge`, which
+  covers the pairs both sides answered. Under #39's default a
+  configuration that crashed on a task compared as the equal of one
+  that answered it. An evaluation where a crash counts as a failure
+  sets `JudgeFailedRuns` on both runners. (#44)
+
 ## v0.0.9 - 2026-10-01
 
 ### Added

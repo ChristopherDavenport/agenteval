@@ -33,9 +33,26 @@ type Comparison struct {
 	Config  ConfigDiff `json:"config"`
 	Uniform bool       `json:"uniform"`
 	Pairs   []Pair     `json:"pairs"`
-	// ByJudge is B's mean minus A's, per judge scored on both sides.
+	// ByJudge is B's mean minus A's, per judge, over the pairs the judge
+	// scored on both sides. A pair with an unjudged side, a run that
+	// failed under the default of leaving it unjudged, is left out of
+	// it and counted on Unjudged: the mean says how the two compared
+	// where both answered, and Unjudged how often one did not. An
+	// evaluation where a crash counts as a failure, Harbor's included,
+	// sets [Runner.JudgeFailedRuns] on both runners, and the failed run
+	// then scores 0 here like any other.
 	ByJudge map[string]float64 `json:"by_judge"`
+	// Unjudged is how many pairs have a side that was not judged; each
+	// such pair says which on [Pair.Unjudged].
+	Unjudged int `json:"unjudged"`
 }
+
+// The values of [Pair.Unjudged]: which side's result was not judged.
+const (
+	UnjudgedA    = "a"
+	UnjudgedB    = "b"
+	UnjudgedBoth = "both"
+)
 
 // Pair is one task under both configurations.
 type Pair struct {
@@ -47,6 +64,13 @@ type Pair struct {
 	B      *Result `json:"b"`
 	// Delta is B's value minus A's, per judge that scored both.
 	Delta map[string]float64 `json:"delta"`
+	// Unjudged is [UnjudgedA], [UnjudgedB] or [UnjudgedBoth] when that
+	// side's result was not judged: its run failed and
+	// [Runner.JudgeFailedRuns] was off, or it never reached a
+	// trajectory. The side has no scores, so Delta holds nothing for
+	// the judges, and the pair is counted on [Comparison.Unjudged]
+	// rather than in its ByJudge. Empty when both sides were judged.
+	Unjudged string `json:"unjudged,omitempty"`
 	// Config is the difference between the settings B's run started
 	// under and A's.
 	Config ConfigDiff `json:"config"`
@@ -118,6 +142,15 @@ func (d ConfigDiff) Empty() bool {
 // runs of each task started under, read back from their sessions, so
 // a comparison says how the configurations differed and not only which
 // scored higher.
+//
+// A pair whose side was not judged, because its run failed and that
+// runner leaves a failed run unjudged, is marked on [Pair.Unjudged] and
+// counted on [Comparison.Unjudged]; its ByJudge covers the pairs both
+// sides answered. A configuration that crashes on the hard tasks and
+// answers the easy ones therefore does not read as the equal of one
+// that answers all of them. For an evaluation where a crash counts as
+// a failure, Harbor's included, which counts a trial with no reward as
+// 0, set [Runner.JudgeFailedRuns] on both runners.
 func Compare(ctx context.Context, suite *Suite, a, b *Runner) (*Comparison, error) {
 	if a == nil || b == nil {
 		return nil, errors.New("agenteval: compare needs two runners")
@@ -140,6 +173,17 @@ func Compare(ctx context.Context, suite *Suite, a, b *Runner) (*Comparison, erro
 			continue
 		}
 		pair := Pair{Task: pa.Task.ID, Sample: pa.Sample, A: pa, B: pb, Delta: map[string]float64{}}
+		switch {
+		case !pa.judged && !pb.judged:
+			pair.Unjudged = UnjudgedBoth
+		case !pa.judged:
+			pair.Unjudged = UnjudgedA
+		case !pb.judged:
+			pair.Unjudged = UnjudgedB
+		}
+		if pair.Unjudged != "" {
+			c.Unjudged++
+		}
 		byJudge := map[string]float64{}
 		for _, s := range pa.Scores {
 			byJudge[s.Judge] = s.Value

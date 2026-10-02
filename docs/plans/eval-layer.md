@@ -400,7 +400,13 @@ type Member struct {
 ### Report and comparison
 
 ```go
-type Summary struct { Count int; Mean float64; Passed int; PassRate float64 }
+type Summary struct {
+    Count    int     // results the judge scored
+    Unjudged int     // results it did not: Count + Unjudged is the number of results
+    Mean     float64
+    Passed   int
+    PassRate float64
+}
 
 type Report struct {
     Suite    string
@@ -422,12 +428,23 @@ type Comparison struct {
     A, B     *Report
     Config   ConfigDiff       // when every pair's differs the same way
     Uniform  bool
-    Pairs    []Pair           // Task, A, B, Delta by judge, Config
-    ByJudge  map[string]float64 // B's mean minus A's
+    Pairs    []Pair           // Task, Sample, A, B, Delta by judge, Config, Unjudged ("a", "b", "both")
+    ByJudge  map[string]float64 // B's mean minus A's, over the pairs the judge scored on both sides
+    Unjudged int              // pairs with a side that was not judged
 }
 
 func DiffSettings(a, b agentsession.Settings) ConfigDiff
 ```
+
+A run that failed and was left unjudged is not scored, and two readers
+say so rather than reading past it: `Summary.Unjudged` counts the
+results a judge did not score, so a reader can tell 1 of 1 from 1 of 2
+and compute Harbor's mean, which counts a trial with no reward as 0;
+and `Compare` marks a pair whose side was not judged on
+`Pair.Unjudged`, counts it on `Comparison.Unjudged` and leaves it out of
+`ByJudge`, which covers the pairs both sides answered. An evaluation
+under Harbor's rule sets `JudgeFailedRuns` on both runners, and the
+failed run scores 0 like any other.
 
 A comparison of two configurations writes two sessions per task, so
 `PreferScore` plays no part in it; putting both on branches of one
