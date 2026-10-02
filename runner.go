@@ -458,7 +458,14 @@ var ErrUnreplayable = errors.New("agenteval: the run cannot be replayed strictly
 // session with unhashed responses and no fold at all is most often one
 // whose compacting configuration never bound compact.WithOnFold, and
 // that is a seam this package owns. A workspace substitution alone
-// gets none of it; replay's error names the env entry.
+// gets none of it; replay's error names the env entry. Nor does a
+// first unhashed response whose agentturn:unhashed entry names a
+// reasoning item as what the path rebuilds where the request parts
+// from it: agentturn v0.0.15 leaves another model's reasoning out of a
+// request, as a fork run under another model than its base's does, the
+// format cannot describe that, and no seam here binds it; replay's
+// error quotes the entry (#46). An unbound fold writes such an entry
+// too, naming a message for a message, and keeps the diagnosis.
 func replayable(s *agentsession.Session, leaf string) error {
 	err := replay.Unverifiable(s, leaf)
 	if err == nil {
@@ -476,8 +483,29 @@ func replayable(s *agentsession.Session, leaf string) error {
 	if leaf == "" {
 		leaf = s.Leaf()
 	}
+	// why is the last agentturn:unhashed entry before the first
+	// unhashed response, with no hashed response between.
+	var why *agentsession.CustomEntry
+	found := false
 	for _, e := range s.Path(leaf) {
-		if _, ok := e.(*agentsession.CompactionEntry); ok {
+		switch v := e.(type) {
+		case *agentsession.CompactionEntry:
+			return fmt.Errorf("%w: %w", ErrUnreplayable, err)
+		case *agentsession.CustomEntry:
+			if v.NS == session.UnhashedNS && !found {
+				why = v
+			}
+		case *agentsession.ResponseEntry:
+			if !found && v.RequestHash == "" {
+				found = true
+			} else if !found {
+				why = nil
+			}
+		}
+	}
+	if why != nil {
+		var u session.Unhashed
+		if json.Unmarshal(why.Data, &u) == nil && u.Recorded != nil && u.Recorded.Type == openresponses.ItemTypeReasoning {
 			return fmt.Errorf("%w: %w", ErrUnreplayable, err)
 		}
 	}

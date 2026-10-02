@@ -787,23 +787,69 @@ func repeatedCallID(path []agentsession.Entry) error {
 }
 
 // unhashed reports the responses on path from start on that carry no
-// request hash.
+// request hash, quoting the agentturn:unhashed entry that explains the
+// first of them when the path holds one (#46): the recorder writes the
+// entry before the first response it leaves without a hash for a
+// cause, and again when the cause changes or after a response that
+// carried a hash, so the last such entry before the first unhashed
+// response, with no hashed response between, is its cause. The entry
+// may be before start, as a fork's prefix holds the cause its agent
+// took up.
 func unhashed(path []agentsession.Entry, start int) error {
 	n, responses := 0, 0
-	for _, e := range path[start:] {
-		r, ok := e.(*agentsession.ResponseEntry)
-		if !ok {
-			continue
-		}
-		responses++
-		if r.RequestHash == "" {
-			n++
+	// why is the last unhashed entry before the first unhashed
+	// response from start on, and found whether that response was.
+	var why *agentsession.CustomEntry
+	found := false
+	for i, e := range path {
+		switch v := e.(type) {
+		case *agentsession.CustomEntry:
+			if v.NS == session.UnhashedNS && !found {
+				why = v
+			}
+		case *agentsession.ResponseEntry:
+			if i >= start {
+				responses++
+				if v.RequestHash == "" {
+					n++
+					found = true
+				}
+			}
+			if v.RequestHash != "" && !found {
+				why = nil
+			}
 		}
 	}
 	if n == 0 {
 		return nil
 	}
-	return fmt.Errorf("%w: %d of %d responses on the path carry no request hash", ErrUnverifiable, n, responses)
+	return fmt.Errorf("%w: %d of %d responses on the path carry no request hash%s", ErrUnverifiable, n, responses, explainUnhashed(why))
+}
+
+// explainUnhashed is the sentence quoting an agentturn:unhashed entry:
+// its reason, the index where the sent and the recorded inputs part
+// and the item each holds there, and, when the recorded item is a
+// reasoning item, why the format cannot describe that. It is "" for
+// no entry or one that does not decode.
+func explainUnhashed(c *agentsession.CustomEntry) string {
+	if c == nil {
+		return ""
+	}
+	var why session.Unhashed
+	if err := json.Unmarshal(c.Data, &why); err != nil {
+		return ""
+	}
+	name := func(item *session.UnhashedItem) string {
+		if item == nil {
+			return "nothing"
+		}
+		return item.Type
+	}
+	out := fmt.Sprintf("; the agentturn:unhashed entry %s before the first says why: %s, index %d: sent %s, recorded %s", c.ID, why.Reason, why.Index, name(why.Sent), name(why.Recorded))
+	if why.Recorded != nil && why.Recorded.Type == openresponses.ItemTypeReasoning {
+		out += "; agentturn v0.0.15 leaves another model's reasoning out of a request, and the format cannot describe that (agentsession#56)"
+	}
+	return out
 }
 
 // substituted reports the first env entry on path whose workspace
