@@ -22,6 +22,7 @@ import (
 	"github.com/ChristopherDavenport/agentturn/compact"
 	"github.com/ChristopherDavenport/agentturn/session"
 	"github.com/ChristopherDavenport/openresponses"
+	"github.com/ChristopherDavenport/openresponses/echo"
 )
 
 // basicSuite loads testdata/suites/basic.
@@ -542,19 +543,30 @@ func TestRunnerRecordsFolds(t *testing.T) {
 	tests := []struct {
 		name  string
 		bound bool
+		// endpoint folds through the compaction endpoint, compact.New,
+		// whose unbound fold puts a compaction item first.
+		endpoint bool
 	}{
-		{"bound through ConfigWith", true},
-		{"unbound through Config", false},
+		{"bound through ConfigWith", true, false},
+		{"unbound through Config", false, false},
+		{"unbound through Config, through the endpoint", false, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := newStableStore()
 			r := &agenteval.Runner{Store: store, Judges: []agenteval.Judge{judge.Contains("contains")}}
-			if tt.bound {
+			switch {
+			case tt.bound:
 				r.ConfigWith = func(_ agenteval.Task, rec *session.Recorder) agentturn.Config {
 					return foldingConfig(rec)
 				}
-			} else {
+			case tt.endpoint:
+				r.Config = func(agenteval.Task) agentturn.Config {
+					cfg := echoConfig()
+					cfg.Transform = compact.New(cfg.Model.(*echo.Adapter), compact.WithBudget(1), compact.WithKeepLast(2), compact.WithMinFold(0)).Transform
+					return cfg
+				}
+			default:
 				r.Config = func(agenteval.Task) agentturn.Config { return foldingConfig(nil) }
 			}
 			report, err := r.Run(context.Background(), suite)
