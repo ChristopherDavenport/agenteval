@@ -3,7 +3,10 @@
 // nothing behind them.
 //
 // [Model] serves the session's recorded model calls in path order:
-// each response entry on the path is one call, each compaction entry
+// each response entry on the path is one call, served with the output
+// items recorded before it, item entries naming its response ID and,
+// from agentturn v0.0.15, custom entries marked with it, which hold an
+// output item the filter kept from the model; each compaction entry
 // is the fold that preceded the call after it, and each
 // agentturn:compaction_failed entry is a fold that failed there, one
 // call per attempt it made. In strict mode a
@@ -352,25 +355,40 @@ func NewModel(s *agentsession.Session, opts ...Option) (*Model, error) {
 		case *agentsession.ResponseEntry:
 			st := step{resp: v, settings: settings}
 			// The response's own output is the item entries before it
-			// that name its response ID: entries that are not item
+			// that name its response ID, and the custom entries marked
+			// with it: from agentturn v0.0.15 an output item the filter
+			// keeps from the model, a text-call parser's raw item say,
+			// is written as a custom entry in the namespace of its type
+			// marked with its response ID, outside the context and the
+			// requests, and a replay that skipped it served the
+			// response short of it with nothing to say so (#50). Other
 			// entries are skipped and the walk stops at the first item
-			// entry belonging to something else. It is the rule
-			// Session.RequestContext uses to drop them, and the two
-			// must agree or a replay serves an input item as output.
-			// Skipping rather than stopping is what lets an observer
-			// write a custom entry between two output items of one
-			// response, which is where every layer above the loop puts
-			// its verdict, without losing the item after it.
+			// entry, or marked entry, belonging to something else. It
+			// is the rule Session.RequestContext uses to drop them, and
+			// the two must agree or a replay serves an input item as
+			// output. Skipping rather than stopping is what lets an
+			// observer write a custom entry between two output items of
+			// one response, which is where every layer above the loop
+			// puts its verdict, without losing the item after it.
 			if v.ResponseID != "" {
+			walk:
 				for j := i - 1; j >= 0; j-- {
-					item, ok := path[j].(*agentsession.ItemEntry)
-					if !ok {
-						continue
+					switch e := path[j].(type) {
+					case *agentsession.ItemEntry:
+						if e.ResponseID != v.ResponseID {
+							break walk
+						}
+						st.output = append(openresponses.Items{e.Item}, st.output...)
+					case *agentsession.CustomEntry:
+						item, responseID, ok := markedItem(e)
+						if !ok {
+							continue
+						}
+						if responseID != v.ResponseID {
+							break walk
+						}
+						st.output = append(openresponses.Items{item}, st.output...)
 					}
-					if item.ResponseID != v.ResponseID {
-						break
-					}
-					st.output = append(openresponses.Items{item.Item}, st.output...)
 				}
 			}
 			// Served items are cloned: what is served reaches the
@@ -556,6 +574,31 @@ func foldHash(c *agentsession.CompactionEntry) string {
 		return ""
 	}
 	return call.RequestHash
+}
+
+// markedItem decodes a custom entry marked with session.ResponseIDMember
+// as the item the filter kept from the model that it holds, and the
+// response ID the mark names, "" for an app-only input. It reports
+// false for an entry without the mark, one whose mark is not a JSON
+// string, or one whose data does not decode to an item of the entry's
+// namespace, which is the rule agentturn/session's own transcript
+// reader applies. It is the shape of the session.MarkedItem decoder
+// agentturn is considering, so that the switch to the shared decoder is
+// a one-line change once it is released.
+func markedItem(c *agentsession.CustomEntry) (openresponses.Item, string, bool) {
+	raw, ok := c.Unknown[session.ResponseIDMember]
+	if !ok {
+		return nil, "", false
+	}
+	var responseID string
+	if err := json.Unmarshal(raw, &responseID); err != nil {
+		return nil, "", false
+	}
+	item, err := openresponses.UnmarshalItem(c.Data)
+	if err != nil || item.ItemType() != c.NS {
+		return nil, "", false
+	}
+	return item, responseID, true
 }
 
 // pathTo returns the root-first path to leaf, or to the current leaf

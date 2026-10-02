@@ -143,7 +143,10 @@ type recording struct {
 
 // Tools wraps tools so that a call whose call_id, or whose name and
 // arguments, match a function call with an output on the path returns
-// that output instead of running. Arguments are compared canonically,
+// that output instead of running. A call or an output the filter in
+// force kept from the model, which agentturn v0.0.15 writes as a custom
+// entry marked with session.ResponseIDMember, counts as the item it
+// holds. Arguments are compared canonically,
 // RFC 8785 over the JSON, the rule the request hash uses, so a
 // serialiser that reorders members still matches; arguments that are
 // not JSON compare byte for byte. A call with no recorded output runs
@@ -204,7 +207,16 @@ func (r *recording) index(path []agentsession.Entry, format string) {
 	// entry, whose record, if one follows, is the nested call's.
 	nestedEnd := ""
 	for _, e := range path {
+		// An item the filter in force kept from the model is a custom
+		// entry marked with its response ID from agentturn v0.0.15, a
+		// function call's output among them when a filter drops those;
+		// it is the item it holds, where it stands (#50).
+		var item openresponses.Item
+		entryID := e.Base().ID
 		if rec, ok := e.(*agentsession.CustomEntry); ok {
+			item, _, _ = markedItem(rec)
+		}
+		if rec, ok := e.(*agentsession.CustomEntry); ok && item == nil {
 			after := nestedEnd
 			nestedEnd = ""
 			if rec.NS == nestedCallNS {
@@ -232,11 +244,13 @@ func (r *recording) index(path []agentsession.Entry, format string) {
 			continue
 		}
 		nestedEnd = ""
-		item, ok := e.(*agentsession.ItemEntry)
-		if !ok {
+		if ie, ok := e.(*agentsession.ItemEntry); ok {
+			item = ie.Item
+		}
+		if item == nil {
 			continue
 		}
-		switch v := item.Item.(type) {
+		switch v := item.(type) {
 		case *openresponses.FunctionCall:
 			// A repeated ID makes this the call its next output
 			// answers; the earlier one keeps what it was given.
@@ -247,7 +261,7 @@ func (r *recording) index(path []agentsession.Entry, format string) {
 		case *openresponses.FunctionCallOutput:
 			if c, ok := calls[v.CallID]; ok && c.output == nil {
 				c.output = v
-				c.entryID = item.ID
+				c.entryID = entryID
 				delete(waiting, v.CallID)
 			}
 		}
