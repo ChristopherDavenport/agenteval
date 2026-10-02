@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ChristopherDavenport/agenteval"
@@ -21,6 +22,7 @@ import (
 	"github.com/ChristopherDavenport/agentturn/compact"
 	"github.com/ChristopherDavenport/agentturn/session"
 	"github.com/ChristopherDavenport/openresponses"
+	"github.com/ChristopherDavenport/openresponses/echo"
 )
 
 // basicSuite loads testdata/suites/basic.
@@ -364,8 +366,10 @@ func TestRunnerErrors(t *testing.T) {
 	if empty.Err == nil || !strings.Contains(empty.Err.Error(), "nothing to send") || empty.SessionID != "" {
 		t.Errorf("empty: %+v", empty)
 	}
-	if _, ok := report.ByJudge["broken"]; ok {
-		t.Error("a judge that never scored is summarised")
+	// A judge that never scored is still named, with every result
+	// unjudged, so a report where every judge failed says so.
+	if sum, ok := report.ByJudge["broken"]; !ok || sum.Count != 0 || sum.Unjudged != len(report.Results) {
+		t.Errorf("a judge that never scored: %+v, %v", sum, ok)
 	}
 	var buf bytes.Buffer
 	if err := report.WriteJSON(&buf); err != nil {
@@ -433,8 +437,18 @@ func TestRunnerErrors(t *testing.T) {
 		if judgeFailed {
 			want = len(r.Judges)
 		}
-		if len(res.Scores) != want || outcomes != want || (len(report.ByJudge) == 0) != (want == 0) {
+		if len(res.Scores) != want || outcomes != want || len(report.ByJudge) != len(r.Judges) {
 			t.Errorf("failing model, JudgeFailedRuns %v: %d scores, %d outcomes, by judge %v; want %d", judgeFailed, len(res.Scores), outcomes, report.ByJudge, want)
+		}
+		// Every judge is summarised either way: with the run judged it
+		// scored the one result, and with it left unjudged it names
+		// that result as the one it did not score.
+		for _, j := range r.Judges {
+			sum := report.ByJudge[j.Name()]
+			n := len(report.Results)
+			if judgeFailed && (sum.Count != n || sum.Unjudged != 0) || !judgeFailed && (sum.Count != 0 || sum.Unjudged != n) {
+				t.Errorf("failing model, JudgeFailedRuns %v: %s summarised as %+v", judgeFailed, j.Name(), sum)
+			}
 		}
 	}
 
@@ -529,19 +543,30 @@ func TestRunnerRecordsFolds(t *testing.T) {
 	tests := []struct {
 		name  string
 		bound bool
+		// endpoint folds through the compaction endpoint, compact.New,
+		// whose unbound fold puts a compaction item first.
+		endpoint bool
 	}{
-		{"bound through ConfigWith", true},
-		{"unbound through Config", false},
+		{"bound through ConfigWith", true, false},
+		{"unbound through Config", false, false},
+		{"unbound through Config, through the endpoint", false, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := newStableStore()
 			r := &agenteval.Runner{Store: store, Judges: []agenteval.Judge{judge.Contains("contains")}}
-			if tt.bound {
+			switch {
+			case tt.bound:
 				r.ConfigWith = func(_ agenteval.Task, rec *session.Recorder) agentturn.Config {
 					return foldingConfig(rec)
 				}
-			} else {
+			case tt.endpoint:
+				r.Config = func(agenteval.Task) agentturn.Config {
+					cfg := echoConfig()
+					cfg.Transform = compact.New(cfg.Model.(*echo.Adapter), compact.WithBudget(1), compact.WithKeepLast(2), compact.WithMinFold(0)).Transform
+					return cfg
+				}
+			default:
 				r.Config = func(agenteval.Task) agentturn.Config { return foldingConfig(nil) }
 			}
 			report, err := r.Run(context.Background(), suite)
@@ -1073,4 +1098,151 @@ func TestRunnerForksInAContainer(t *testing.T) {
 func countResponses(s *agentsession.Session, leaf string) int {
 	_, responses, _ := countPath(s, leaf)
 	return responses
+}
+
+// talker answers "ok", and answers a summary call, one with no tools
+// and no instructions, at such length that agentturn refuses the
+// summary as no smaller than what it folds, so every fold fails. It
+// counts the summary calls.
+type talker struct{ folds atomic.Int32 }
+
+func (m *talker) CreateStream(_ context.Context, req openresponses.Request, sink openresponses.EventSink) error {
+	isFold := len(req.Tools) == 0 && req.Instructions == ""
+	text := "ok"
+	if isFold {
+		m.folds.Add(1)
+		text = strings.Repeat("The user and the agent talked at length. ", 200)
+	}
+	resp := openresponses.NewResponse(req)
+	resp.Usage = &openresponses.Usage{InputTokens: 100, OutputTokens: 25, TotalTokens: 125}
+	em := openresponses.NewEmitter(sink, resp)
+	if err := em.Item(openresponses.AssistantText(text)); err != nil {
+		return err
+	}
+	return em.Complete()
+}
+
+// backOffFolding is a transform with a 400-token budget that keeps the
+// last four items and reports to rec, with extra options after its own.
+func backOffFolding(model agentturn.Model, rec *session.Recorder, extra ...compact.Option) func(context.Context, agentturn.Transcript) (agentturn.Transcript, error) {
+	opts := append([]compact.Option{compact.WithBudget(400), compact.WithKeepLast(4), compact.WithOnFold(rec.Fold)}, extra...)
+	return compact.NewLocal(model, opts...).Transform
+}
+
+// failedFoldsOn counts the agentturn:compaction_failed entries on the
+// path to leaf.
+func failedFoldsOn(s *agentsession.Session, leaf string) int {
+	n := 0
+	for _, e := range s.Path(leaf) {
+		if c, ok := e.(*agentsession.CustomEntry); ok && c.NS == session.FailedFoldNS {
+			n++
+		}
+	}
+	return n
+}
+
+// TestRunnerForkSeedsTheTransform is #48: a fork of a base whose last
+// fold failed as too large asked for that summary again, where a host
+// resuming the base with session.CompactOptions does not, because the
+// runner seeds the agent and ConfigWith could not reach the session to
+// seed the transform. CompactOptions gives it the options.
+func TestRunnerForkSeedsTheTransform(t *testing.T) {
+	ctx := context.Background()
+	store := newStableStore()
+	longPrompt := strings.Repeat("Here is the log I want you to read. ", 50)
+	// The base: three prompts under the back-off transform, the first
+	// long enough to fold under the budget, with a summary model whose
+	// every summary is refused.
+	baseModel := &talker{}
+	rec, base, err := session.Start(ctx, store, agentsession.Header{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := echoConfig()
+	cfg.Model = baseModel
+	cfg.Transform = backOffFolding(baseModel, rec)
+	a := agentturn.New(cfg)
+	unsubscribe := rec.Attach(a)
+	for _, p := range []string{longPrompt, "two", "three"} {
+		if _, err := a.Prompt(ctx, openresponses.UserText(p)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unsubscribe()
+	last, err := session.LastFailedFold(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last == nil || last.PrefixHash == "" {
+		t.Fatalf("the base's last fold did not fail with a prefix hash: %+v; the test needs one to back off from", last)
+	}
+	baseFailed := failedFoldsOn(base, base.Leaf())
+
+	// Each model call, summary calls included, reports 100 input
+	// tokens, and a result's usage sums the path to its target, the
+	// base's three calls and two failed summary calls included.
+	tests := []struct {
+		name   string
+		seeded bool
+		folds  int32
+		input  int
+	}{
+		{"unseeded, the fork asks again", false, 2, 800},
+		{"seeded with CompactOptions, it does not", true, 0, 600},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := &talker{}
+			r := &agenteval.Runner{
+				Store: store,
+				ConfigWith: func(_ agenteval.Task, rec *session.Recorder) agentturn.Config {
+					cfg := echoConfig()
+					cfg.Model = model
+					var extra []compact.Option
+					if tt.seeded {
+						opts, err := agenteval.CompactOptions(ctx, rec)
+						if err != nil {
+							t.Fatal(err)
+						}
+						extra = opts
+					}
+					cfg.Transform = backOffFolding(model, rec, extra...)
+					return cfg
+				},
+				Header: func(agenteval.Task) agentsession.Header {
+					return agentsession.Header{ParentSession: base.ID(), Base: base.Leaf()}
+				},
+			}
+			report, err := r.Run(ctx, &agenteval.Suite{Name: "fork", Tasks: []agenteval.Task{{ID: "four", Instruction: "four"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			res := report.Results[0]
+			if res.Err != nil {
+				t.Fatalf("err = %v", res.Err)
+			}
+			fork, err := store.Open(ctx, res.SessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			failed := failedFoldsOn(fork, res.Target)
+			if got := model.folds.Load(); got != tt.folds || failed != baseFailed+int(tt.folds)/2 {
+				t.Errorf("the fork made %d summary calls and its path holds %d failed folds (the base's %d); want %d calls", got, failed, baseFailed, tt.folds)
+			}
+			// The summary calls the fork made, or did not, are on its
+			// result's usage: a continuation forked from a production
+			// session is otherwise priced two calls above production.
+			if res.Usage.InputTokens != tt.input {
+				t.Errorf("the fork's usage is %d input tokens, want %d", res.Usage.InputTokens, tt.input)
+			}
+		})
+	}
+	// A recorder with no base has nothing to back off from.
+	rec2, _, err := session.Start(ctx, store, agentsession.Header{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts, err := agenteval.CompactOptions(ctx, rec2); err != nil || len(opts) != 0 {
+		t.Errorf("a fresh session: %d options, %v", len(opts), err)
+	}
 }

@@ -3,7 +3,10 @@
 // nothing behind them.
 //
 // [Model] serves the session's recorded model calls in path order:
-// each response entry on the path is one call, each compaction entry
+// each response entry on the path is one call, served with the output
+// items recorded before it, item entries naming its response ID and,
+// from agentturn v0.0.15, custom entries marked with it, which hold an
+// output item the filter kept from the model; each compaction entry
 // is the fold that preceded the call after it, and each
 // agentturn:compaction_failed entry is a fold that failed there, one
 // call per attempt it made. In strict mode a
@@ -43,6 +46,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"reflect"
 	"regexp"
@@ -176,6 +180,8 @@ type options struct {
 	allowUnhashed bool
 	allowSubst    bool
 	leaf          string
+	from          string
+	afterBase     bool
 	observer      func(Served)
 	foldText      func(openresponses.Item) string
 	details       map[string]func(json.RawMessage) (any, error)
@@ -240,6 +246,30 @@ func AllowSubstitution() Option { return func(o *options) { o.allowSubst = true 
 // model output; a branched session has several leaves and a replay
 // names the one it wants.
 func WithLeaf(id string) Option { return func(o *options) { o.leaf = id } }
+
+// From serves only the steps after the entry named, which must be on
+// the path: for [NewModel] the model calls recorded after it, for
+// [Tools] the outputs recorded after it. The settings still accumulate
+// from the whole path, so a config entry before it is in force at the
+// steps served, and a strict model checks substitution and repeated
+// call IDs over the whole path too; only the unhashed responses it
+// refuses are counted among the steps served. It is how a session
+// whose first part another agent sent is replayed from an agent seeded
+// with that part: a fork, whose agent starts at the base and never
+// sends the base's requests, is [AfterBase]. [NewModel] returns an error
+// for an entry that is not on the path; [Tools], which has no error to
+// return, then serves no recorded output, so under [Strict] every call
+// diverges.
+func From(entryID string) Option { return func(o *options) { o.from = entryID } }
+
+// AfterBase is [From] over the session header's Base, and wins over
+// [From] when both are given: it serves the steps a fork recorded
+// after the base it was forked at. A task forked
+// through Runner.Header replays through the runner with it, since the
+// runner seeds the fork's agent at the base. [NewModel] returns an
+// error for a session whose header names no base; [Tools] then serves
+// no recorded output, as for a [From] entry not on the path.
+func AfterBase() Option { return func(o *options) { o.afterBase = true } }
 
 // WithObserver sets a function called for everything served.
 func WithObserver(fn func(Served)) Option { return func(o *options) { o.observer = fn } }
@@ -322,19 +352,24 @@ type Model struct {
 }
 
 // NewModel builds a model over the path from the root to the leaf
-// named by [WithLeaf], or to the session's current leaf. A strict
-// model over a path a strict replay could not check is refused here
-// with [ErrUnverifiable], rather than at the call it could not check:
-// see [Unverifiable], and [AllowUnhashed] and [AllowSubstitution] to
-// serve it anyway.
+// named by [WithLeaf], or to the session's current leaf, serving the
+// steps after the entry [From] or [AfterBase] names when one is given.
+// A strict model over a path a strict replay could not check is
+// refused here with [ErrUnverifiable], rather than at the call it
+// could not check: see [Unverifiable], and [AllowUnhashed] and
+// [AllowSubstitution] to serve it anyway.
 func NewModel(s *agentsession.Session, opts ...Option) (*Model, error) {
 	o := apply(opts)
 	path, err := pathTo(s, o.leaf)
 	if err != nil {
 		return nil, err
 	}
+	start, err := startOf(s, path, o)
+	if err != nil {
+		return nil, err
+	}
 	if o.strict {
-		if err := unverifiable(path, o); err != nil {
+		if err := unverifiable(path, start, o); err != nil {
 			return nil, err
 		}
 	}
@@ -343,34 +378,53 @@ func NewModel(s *agentsession.Session, opts ...Option) (*Model, error) {
 	// path applied in order, which is what a product whose layers
 	// re-read state each turn must send to replay strictly: the
 	// recording's instructions, not the ones those layers would build
-	// again today.
+	// again today. They accumulate from the root whatever From names;
+	// only the steps are taken from after it.
 	var settings agentsession.Settings
 	for i, e := range path {
+		if _, ok := e.(*agentsession.ConfigEntry); !ok && i < start {
+			continue
+		}
 		switch v := e.(type) {
 		case *agentsession.ConfigEntry:
 			settings = settings.Apply(v)
 		case *agentsession.ResponseEntry:
 			st := step{resp: v, settings: settings}
 			// The response's own output is the item entries before it
-			// that name its response ID: entries that are not item
+			// that name its response ID, and the custom entries marked
+			// with it: from agentturn v0.0.15 an output item the filter
+			// keeps from the model, a text-call parser's raw item say,
+			// is written as a custom entry in the namespace of its type
+			// marked with its response ID, outside the context and the
+			// requests, and a replay that skipped it served the
+			// response short of it with nothing to say so (#50). Other
 			// entries are skipped and the walk stops at the first item
-			// entry belonging to something else. It is the rule
-			// Session.RequestContext uses to drop them, and the two
-			// must agree or a replay serves an input item as output.
-			// Skipping rather than stopping is what lets an observer
-			// write a custom entry between two output items of one
-			// response, which is where every layer above the loop puts
-			// its verdict, without losing the item after it.
+			// entry, or marked entry, belonging to something else. It
+			// is the rule Session.RequestContext uses to drop them, and
+			// the two must agree or a replay serves an input item as
+			// output. Skipping rather than stopping is what lets an
+			// observer write a custom entry between two output items of
+			// one response, which is where every layer above the loop
+			// puts its verdict, without losing the item after it.
 			if v.ResponseID != "" {
+			walk:
 				for j := i - 1; j >= 0; j-- {
-					item, ok := path[j].(*agentsession.ItemEntry)
-					if !ok {
-						continue
+					switch e := path[j].(type) {
+					case *agentsession.ItemEntry:
+						if e.ResponseID != v.ResponseID {
+							break walk
+						}
+						st.output = append(openresponses.Items{e.Item}, st.output...)
+					case *agentsession.CustomEntry:
+						item, responseID, ok := markedItem(e)
+						if !ok {
+							continue
+						}
+						if responseID != v.ResponseID {
+							break walk
+						}
+						st.output = append(openresponses.Items{item}, st.output...)
 					}
-					if item.ResponseID != v.ResponseID {
-						break
-					}
-					st.output = append(openresponses.Items{item.Item}, st.output...)
 				}
 			}
 			// Served items are cloned: what is served reaches the
@@ -439,12 +493,17 @@ var servedFailure = regexp.MustCompile(`^replay: recorded failure at step \d+ \(
 // and syscall.ECONNRESET, ECONNREFUSED, EPIPE, ETIMEDOUT, ENETUNREACH
 // and EHOSTUNREACH, each served as itself; "no such host", served as
 // a *net.DNSError; and a net/http client timeout, served as a
-// net.Error whose Timeout is true. Each is a net.Error or one of the
-// errors agentturn's DefaultRetryable names. A Retryable that declines
-// every openresponses error before asking about the transport
-// declines it: the record keeps the text alone, and the 503 is what
-// gives it Retry-After. A failed response has no Cause and is served
-// as the error it recorded.
+// net.Error whose Timeout is true. A text of the shape net/http's
+// client gives every error it returns, `<Op> "<url>": <rest>`, is
+// served as a *url.Error with that Op and URL whose Err is the error
+// rest names, or, when rest names none, a net.Error whose Timeout
+// reports whether rest says timeout, as net/http's response-header and
+// TLS-handshake timeouts, which it names only by text, do. Each is a
+// net.Error or one of the errors agentturn's DefaultRetryable names. A
+// Retryable that declines every openresponses error before asking
+// about the transport declines it: the record keeps the text alone,
+// and the 503 is what gives it Retry-After. A failed response has no
+// Cause and is served as the error it recorded.
 type Failure struct {
 	// N is the step, numbered as [Served.N] is, and EntryID the entry
 	// the failure was served from.
@@ -491,9 +550,40 @@ var lookupFailure = regexp.MustCompile(`lookup (\S+?)(?: on (\S+))?: no such hos
 // Timeout ended, after the error it wraps.
 const clientTimeout = "(Client.Timeout exceeded while awaiting headers)"
 
+// urlFailure matches the text of a *url.Error, which net/http's client
+// wraps every error it returns in: `<Op> "<url>": <rest>`, as the whole
+// text or after a colon-separated prefix, the Op a method name and the
+// URL absolute, so a provider's message that quotes a word is not read
+// as one. The rest is the wrapped error's own text. A text that spells
+// a provider's own error, an openresponses error of a status other
+// than the 503 [failureOf] gives a transport failure, is not parsed for
+// one either: the provider's message quoting a request is its message,
+// not net/http's wrapper, and the transport-only Retryable that retries
+// every net.Error would otherwise retry it under replay and not live.
+// A provider's own 503 whose message has that shape is the residual:
+// the text cannot tell it from the 503 a replay of a replay re-records,
+// and a 503 is retried by DefaultRetryable either way.
+var urlFailure = regexp.MustCompile(`(?:^|: )(Get|Head|Post|Put|Patch|Delete|Connect|Options|Trace) "([a-z][a-z0-9+.-]*://[^"]*)": (.+)$`)
+
 // causeOf returns the transport failure text names, as the whole text
-// or as the last of its colon-separated parts, or nil.
+// or as the last of its colon-separated parts, or nil. A text in
+// net/http's *url.Error form is served as one, with the Op and URL it
+// names, wrapping the error its rest names: one of those below, or,
+// when the rest names none, a net.Error whose Timeout reports whether
+// the rest says timeout, which is how net/http's own response-header
+// and TLS-handshake timeouts, unexported types named only by their
+// text, are told from a cancelled request (#47).
 func causeOf(text string) error {
+	if m := recordedError.FindStringSubmatch(text); m != nil && (m[1] != string(openresponses.ErrorTypeServerError) || m[2] != "503") {
+		return nil
+	}
+	if m := urlFailure.FindStringSubmatch(text); m != nil {
+		err := causeOf(m[3])
+		if err == nil {
+			err = netError{text: m[3], timeout: strings.Contains(strings.ToLower(m[3]), "timeout")}
+		}
+		return &url.Error{Op: m[1], URL: m[2], Err: err}
+	}
 	for _, err := range transportFailures {
 		if t := err.Error(); text == t || strings.HasSuffix(text, ": "+t) {
 			return err
@@ -503,22 +593,26 @@ func causeOf(text string) error {
 		return &net.DNSError{Err: "no such host", Name: m[1], Server: m[2], IsNotFound: true}
 	}
 	if strings.HasSuffix(text, clientTimeout) {
-		return timeoutError(text)
+		return netError{text: text, timeout: true}
 	}
 	return nil
 }
 
-// timeoutError is a net.Error that timed out, for a recorded timeout
-// whose own type the text does not name.
-type timeoutError string
+// netError is a net.Error for a recorded transport failure whose own
+// type the text does not name: net/http's timeouts, and whatever else
+// its client wrapped.
+type netError struct {
+	text    string
+	timeout bool
+}
 
-func (e timeoutError) Error() string { return string(e) }
+func (e netError) Error() string { return e.text }
 
-// Timeout reports true.
-func (timeoutError) Timeout() bool { return true }
+// Timeout reports whether the text says the failure was a timeout.
+func (e netError) Timeout() bool { return e.timeout }
 
-// Temporary reports true, as net/http's own timeout does.
-func (timeoutError) Temporary() bool { return true }
+// Temporary reports what Timeout does, as net/http's own timeouts do.
+func (e netError) Temporary() bool { return e.timeout }
 
 // serveFailure returns the failure recorded as text at step n of entry.
 func serveFailure(n int, entryID, text string) *Failure {
@@ -558,6 +652,56 @@ func foldHash(c *agentsession.CompactionEntry) string {
 	return call.RequestHash
 }
 
+// markedItem decodes a custom entry marked with session.ResponseIDMember
+// as the item the filter kept from the model that it holds, and the
+// response ID the mark names, "" for an app-only input. It reports
+// false for an entry without the mark, one whose mark is not a JSON
+// string, or one whose data does not decode to an item of the entry's
+// namespace, which is the rule agentturn/session's own transcript
+// reader applies. It is the shape of the session.MarkedItem decoder
+// agentturn is considering, so that the switch to the shared decoder is
+// a one-line change once it is released.
+func markedItem(c *agentsession.CustomEntry) (openresponses.Item, string, bool) {
+	raw, ok := c.Unknown[session.ResponseIDMember]
+	if !ok {
+		return nil, "", false
+	}
+	var responseID string
+	if err := json.Unmarshal(raw, &responseID); err != nil {
+		return nil, "", false
+	}
+	item, err := openresponses.UnmarshalItem(c.Data)
+	if err != nil || item.ItemType() != c.NS {
+		return nil, "", false
+	}
+	return item, responseID, true
+}
+
+// startOf returns the index on path of the first entry to serve: 0 for
+// the whole path, or the index after the entry [From] or [AfterBase]
+// names. An entry not on the path, or AfterBase on a session whose
+// header names no base, is an error.
+func startOf(s *agentsession.Session, path []agentsession.Entry, o options) (int, error) {
+	from := o.from
+	if o.afterBase {
+		if from = s.Header().Base; from == "" {
+			return 0, errors.New("replay: AfterBase: the session names no base")
+		}
+	}
+	if from == "" {
+		return 0, nil
+	}
+	if id, ok := s.Resolve(from); ok {
+		from = id
+	}
+	for i, e := range path {
+		if e.Base().ID == from {
+			return i + 1, nil
+		}
+	}
+	return 0, fmt.Errorf("replay: From: %w: %s is not on the path", agentsession.ErrNoEntry, from)
+}
+
 // pathTo returns the root-first path to leaf, or to the current leaf
 // when leaf is empty.
 func pathTo(s *agentsession.Session, leaf string) ([]agentsession.Entry, error) {
@@ -590,7 +734,8 @@ func pathTo(s *agentsession.Session, leaf string) ([]agentsession.Entry, error) 
 // that does not wrap [ErrUnverifiable] is the failure to resolve leaf
 // to a path at all, which says nothing either way about the record. [AllowUnhashed] and
 // [AllowSubstitution] among opts leave out what they allow, as they do
-// for [NewModel]; the other options are ignored.
+// for [NewModel], and [From] or [AfterBase] counts the unhashed
+// responses among the steps served; the other options are ignored.
 //
 // The recorder writes a response without a request hash when the path
 // it wrote does not rebuild that request's input: what a compacting
@@ -604,21 +749,26 @@ func pathTo(s *agentsession.Session, leaf string) ([]agentsession.Entry, error) 
 // so a caller can ask before building a model or running a suite
 // rather than find out at the call.
 func Unverifiable(s *agentsession.Session, leaf string, opts ...Option) error {
+	o := apply(opts)
 	path, err := pathTo(s, leaf)
 	if err != nil {
 		return err
 	}
-	return unverifiable(path, apply(opts))
+	start, err := startOf(s, path, o)
+	if err != nil {
+		return err
+	}
+	return unverifiable(path, start, o)
 }
 
-// unverifiable is [Unverifiable] over a path already in hand. Folds
-// are not counted here: a compaction entry with no fold hash matters
-// only if the replay folds locally, which is not known until the call,
-// so serveFold decides that one.
-func unverifiable(path []agentsession.Entry, o options) error {
+// unverifiable is [Unverifiable] over a path already in hand, serving
+// from start. Folds are not counted here: a compaction entry with no
+// fold hash matters only if the replay folds locally, which is not
+// known until the call, so serveFold decides that one.
+func unverifiable(path []agentsession.Entry, start int, o options) error {
 	var errs []error
 	if !o.allowUnhashed {
-		errs = append(errs, unhashed(path))
+		errs = append(errs, unhashed(path, start))
 	}
 	if !o.allowSubst {
 		errs = append(errs, substituted(path))
@@ -648,23 +798,70 @@ func repeatedCallID(path []agentsession.Entry) error {
 	return nil
 }
 
-// unhashed reports the responses on path that carry no request hash.
-func unhashed(path []agentsession.Entry) error {
+// unhashed reports the responses on path from start on that carry no
+// request hash, quoting the agentturn:unhashed entry that explains the
+// first of them when the path holds one (#46): the recorder writes the
+// entry before the first response it leaves without a hash for a
+// cause, and again when the cause changes or after a response that
+// carried a hash, so the last such entry before the first unhashed
+// response, with no hashed response between, is its cause. The entry
+// may be before start, as a fork's prefix holds the cause its agent
+// took up.
+func unhashed(path []agentsession.Entry, start int) error {
 	n, responses := 0, 0
-	for _, e := range path {
-		r, ok := e.(*agentsession.ResponseEntry)
-		if !ok {
-			continue
-		}
-		responses++
-		if r.RequestHash == "" {
-			n++
+	// why is the last unhashed entry before the first unhashed
+	// response from start on, and found whether that response was.
+	var why *agentsession.CustomEntry
+	found := false
+	for i, e := range path {
+		switch v := e.(type) {
+		case *agentsession.CustomEntry:
+			if v.NS == session.UnhashedNS && !found {
+				why = v
+			}
+		case *agentsession.ResponseEntry:
+			if i >= start {
+				responses++
+				if v.RequestHash == "" {
+					n++
+					found = true
+				}
+			}
+			if v.RequestHash != "" && !found {
+				why = nil
+			}
 		}
 	}
 	if n == 0 {
 		return nil
 	}
-	return fmt.Errorf("%w: %d of %d responses on the path carry no request hash", ErrUnverifiable, n, responses)
+	return fmt.Errorf("%w: %d of %d responses on the path carry no request hash%s", ErrUnverifiable, n, responses, explainUnhashed(why))
+}
+
+// explainUnhashed is the sentence quoting an agentturn:unhashed entry:
+// its reason, the index where the sent and the recorded inputs part
+// and the item each holds there, and, when the recorded item is a
+// reasoning item, why the format cannot describe that. It is "" for
+// no entry or one that does not decode.
+func explainUnhashed(c *agentsession.CustomEntry) string {
+	if c == nil {
+		return ""
+	}
+	var why session.Unhashed
+	if err := json.Unmarshal(c.Data, &why); err != nil {
+		return ""
+	}
+	name := func(item *session.UnhashedItem) string {
+		if item == nil {
+			return "nothing"
+		}
+		return item.Type
+	}
+	out := fmt.Sprintf("; the agentturn:unhashed entry %s before the first says why: %s, index %d: sent %s, recorded %s", c.ID, why.Reason, why.Index, name(why.Sent), name(why.Recorded))
+	if why.Recorded != nil && why.Recorded.Type == openresponses.ItemTypeReasoning {
+		out += "; agentturn v0.0.15 leaves another model's reasoning out of a request, and the format cannot describe that (agentsession#56)"
+	}
+	return out
 }
 
 // substituted reports the first env entry on path whose workspace
@@ -844,12 +1041,62 @@ func (m *Model) take() (step, int, error) {
 	return st, m.next, nil
 }
 
-// skippedFold is what a divergence at a local fold the replay did not
-// make adds: from agentturn v0.0.15 compact.NewLocal skips a fold whose
-// input is below its minimum, and backs off from a prefix whose fold
-// failed, so a recording made before then folds where a replay under
-// the same options does not.
-const skippedFold = "; from agentturn v0.0.15 compact.NewLocal skips a fold whose input is below its minimum, by default the larger of an eighth of the budget and twice an empty summary's estimate, which compact.WithMinFold(0) removes, and does not fold again a prefix whose fold failed"
+// What a divergence at a local fold the replay did not make adds, by
+// cause (#49). A recording made before agentturn v0.0.15 folds where a
+// replay under the same options does not, for three reasons the record
+// tells apart: the step before is a fold that failed on a summary with
+// no text, which failed the turn then and sends it on unfolded now;
+// the fold is one the transform remembers failing, which the recording
+// asked about again after a restart and a replay in one process backs
+// off from; or the fold's input is below the minimum v0.0.15 skips by
+// default. The last is the residual: the record holds tokens_before,
+// the estimate of the whole transcript, and not the budget or the
+// estimate of the part to fold, so whether the input was below the
+// minimum cannot be read from it.
+const (
+	noTextFold  = "; the step before is a fold that failed on a summary with no text, which failed the recording's turn there: from agentturn v0.0.15 compact.NewLocal sends the transcript unfolded instead and the turn goes on, so the request here is that turn's and not the fold the recording made next, and such a recording does not replay strictly past this point"
+	backedOff   = "; most likely the recording asked again about a prefix whose fold had failed, as a host that restarted, or resumed, without session.CompactOptions does: compact.NewLocal from agentturn v0.0.13 backs off from that prefix in one process until the part to fold has grown by the keep-last count of items, at least one, or the estimate by a quarter of the budget, which the record does not hold enough to settle here, and no released agentturn option turns the back-off off (agentturn#211)"
+	skippedFold = "; from agentturn v0.0.15 compact.NewLocal skips a fold whose input is below its minimum, by default the larger of an eighth of the budget and twice an empty summary's estimate, which compact.WithMinFold(0) removes, and does not fold again a prefix whose fold failed"
+)
+
+// unfoldedFold reports whether a failed fold's recorded error is one
+// compact.NewLocal sends the transcript unfolded after and backs off
+// from: a summary too large, incomplete or with no text. A summary call
+// that failed is neither.
+func unfoldedFold(text string) bool {
+	return strings.HasPrefix(text, foldTooLarge) || strings.HasPrefix(text, foldIncomplete) || strings.HasPrefix(text, foldNoText)
+}
+
+// skippedHint is what the divergence at step n, a fold or a failed fold
+// the request did not match, adds. The step before it being a no-text
+// fold is the first cause. Otherwise the last fold step before it says
+// whether the replay's transform was backing off: a failed fold it
+// remembers, one with an unfolded send, means it was, since nothing
+// the record holds would have released it; a fold that succeeded means
+// the replay folded since and so was not. The minimum is the residual.
+// hashed says whether the recording hashed the skipped fold's request,
+// which the residual is given only for: an entry without the fold
+// member is older than the behaviour the residual describes.
+func (m *Model) skippedHint(n int, hashed bool) string {
+	if n >= 2 {
+		if prev := m.steps[n-2]; prev.failed != nil && strings.HasPrefix(prev.fold.Error, foldNoText) {
+			return noTextFold
+		}
+	}
+	for i := n - 2; i >= 0; i-- {
+		st := m.steps[i]
+		if st.comp != nil {
+			break
+		}
+		if st.failed != nil && unfoldedFold(st.fold.Error) {
+			return backedOff
+		}
+	}
+	if hashed {
+		return skippedFold
+	}
+	return ""
+}
 
 // isFoldRequest reports whether a request is shaped like a local
 // fold's summary call: no tools and no instructions, which is what
@@ -884,17 +1131,13 @@ func (m *Model) CreateStream(_ context.Context, req openresponses.Request, sink 
 		}
 		// The configuration under test sent a turn where the
 		// recording folded.
-		hint := ""
-		if st.foldHash != "" {
-			hint = skippedFold
-		}
-		return fmt.Errorf("%w: compaction %s (step %d): the recording folded here and the request did not%s", ErrDiverged, st.comp.ID, n, hint)
+		return fmt.Errorf("%w: compaction %s (step %d): the recording folded here and the request did not%s", ErrDiverged, st.comp.ID, n, m.skippedHint(n, st.foldHash != ""))
 	}
 	if st.failed != nil {
 		if isFoldRequest(req) {
 			return m.serveFailedFold(st, n, req, sink)
 		}
-		return fmt.Errorf("%w: failed fold %s (step %d): the recording tried to fold here and the request did not%s", ErrDiverged, st.failed.ID, n, skippedFold)
+		return fmt.Errorf("%w: failed fold %s (step %d): the recording tried to fold here and the request did not%s", ErrDiverged, st.failed.ID, n, m.skippedHint(n, true))
 	}
 	// Got is computed whether or not the entry recorded a hash to
 	// compare it against: it is what this replay sent, and for a call

@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ChristopherDavenport/agenteval"
@@ -13,6 +15,7 @@ import (
 	"github.com/ChristopherDavenport/agentturn/compact"
 	"github.com/ChristopherDavenport/agentturn/session"
 	"github.com/ChristopherDavenport/openresponses"
+	"github.com/ChristopherDavenport/openresponses/echo"
 )
 
 func TestCompare(t *testing.T) {
@@ -321,5 +324,100 @@ func TestCompareFoldsKeepTheSuiteUniform(t *testing.T) {
 	}
 	if c.Config.Folded == nil || c.Config.Folded.A != false || c.Config.Folded.B != true {
 		t.Errorf("folded = %+v, want B's runs to have folded and A's not", c.Config.Folded)
+	}
+}
+
+// failAfter answers through the echo adapter n times and then refuses
+// every call with a 400, the error an inference server returns for a
+// context it cannot take, which no retry policy retries.
+type failAfter struct {
+	n     int
+	calls atomic.Int32
+	echo  echo.Adapter
+}
+
+func (m *failAfter) CreateStream(ctx context.Context, req openresponses.Request, sink openresponses.EventSink) error {
+	if int(m.calls.Add(1)) > m.n {
+		return &openresponses.Error{Type: openresponses.ErrorTypeInvalidRequest, StatusCode: 400, Message: "context length exceeded"}
+	}
+	return m.echo.CreateStream(ctx, req, sink)
+}
+
+// TestCompareSeesUnjudgedRuns is #44: under the default of leaving a
+// failed run unjudged, a comparison where B crashed on a task said
+// nothing about it, and B's summary read as good as A's over fewer
+// tasks. The summary now counts what it left out and the comparison
+// marks the pair.
+func TestCompareSeesUnjudgedRuns(t *testing.T) {
+	suite := basicSuite(t)
+	for _, judgeFailed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("JudgeFailedRuns %v", judgeFailed), func(t *testing.T) {
+			a, b := basicRunner(newStableStore()), basicRunner(newStableStore())
+			a.JudgeFailedRuns, b.JudgeFailedRuns = judgeFailed, judgeFailed
+			// B answers plain's first prompt and fails its second.
+			b.Config = func(task agenteval.Task) agentturn.Config {
+				cfg := basicConfig(task)
+				if task.ID == "plain" {
+					cfg.Model = &failAfter{n: 1}
+				}
+				return cfg
+			}
+			c, err := agenteval.Compare(context.Background(), suite, a, b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(c.Pairs) != 2 {
+				t.Fatalf("%d pairs", len(c.Pairs))
+			}
+			greet, plain := c.Pairs[0], c.Pairs[1]
+			if plain.B.Err == nil || plain.B.Reason != agentturn.ReasonError {
+				t.Fatalf("B's plain run did not fail: reason %s, err %v", plain.B.Reason, plain.B.Err)
+			}
+			for _, name := range c.A.Judges() {
+				if sum := c.A.ByJudge[name]; sum.Count != 2 || sum.Unjudged != 0 {
+					t.Errorf("A %s: %+v, want both tasks judged", name, sum)
+				}
+			}
+			if judgeFailed {
+				// A crash counts as a failure: the failed run scores 0
+				// on every judge, and the comparison sees the drop.
+				if plain.Unjudged != "" || greet.Unjudged != "" || c.Unjudged != 0 {
+					t.Errorf("unjudged: greet %q, plain %q, comparison %d; want none", greet.Unjudged, plain.Unjudged, c.Unjudged)
+				}
+				if sum := c.B.ByJudge["exact"]; sum.Count != 2 || sum.Unjudged != 0 || sum.Mean != 0 {
+					t.Errorf("B exact: %+v, want the failed run scored 0", sum)
+				}
+				if plain.Delta["exact"] != -1 || c.ByJudge["exact"] != -0.5 {
+					t.Errorf("plain delta %v, by judge %v; want exact down by one", plain.Delta, c.ByJudge)
+				}
+				return
+			}
+			if plain.Unjudged != agenteval.UnjudgedB || greet.Unjudged != "" || c.Unjudged != 1 {
+				t.Errorf("unjudged: greet %q, plain %q, comparison %d; want plain's B side", greet.Unjudged, plain.Unjudged, c.Unjudged)
+			}
+			if len(plain.Delta) != 0 || len(plain.B.Scores) != 0 {
+				t.Errorf("plain delta %v, B scores %+v; want none for an unjudged side", plain.Delta, plain.B.Scores)
+			}
+			for _, name := range c.B.Judges() {
+				if sum := c.B.ByJudge[name]; sum.Count != 1 || sum.Unjudged != 1 {
+					t.Errorf("B %s: %+v, want one judged and one left out", name, sum)
+				}
+			}
+			// The count survives the report being written and read back.
+			var buf bytes.Buffer
+			if err := c.B.WriteJSON(&buf); err != nil {
+				t.Fatal(err)
+			}
+			back, err := agenteval.ReadReport(&buf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sum := agenteval.Summarize(back.Results)["exact"]; sum.Count != 1 || sum.Unjudged != 1 {
+				t.Errorf("summarised from the read-back report: %+v", sum)
+			}
+			if c.ByJudge["exact"] != 0 {
+				t.Errorf("by judge %v: an unjudged pair is left out of the mean", c.ByJudge)
+			}
+		})
 	}
 }

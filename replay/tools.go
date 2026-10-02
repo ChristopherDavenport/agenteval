@@ -21,6 +21,9 @@ type recorded struct {
 	entryID string
 	call    *openresponses.FunctionCall
 	output  *openresponses.FunctionCallOutput
+	// before is set when the output is before the entry From names,
+	// so the call is answered but not served.
+	before bool
 	// records are the records beside the call that may be its
 	// result's, in path order.
 	records []*agentsession.CustomEntry
@@ -143,7 +146,10 @@ type recording struct {
 
 // Tools wraps tools so that a call whose call_id, or whose name and
 // arguments, match a function call with an output on the path returns
-// that output instead of running. Arguments are compared canonically,
+// that output instead of running. A call or an output the filter in
+// force kept from the model, which agentturn v0.0.15 writes as a custom
+// entry marked with session.ResponseIDMember, counts as the item it
+// holds. Arguments are compared canonically,
 // RFC 8785 over the JSON, the rule the request hash uses, so a
 // serialiser that reorders members still matches; arguments that are
 // not JSON compare byte for byte. A call with no recorded output runs
@@ -175,13 +181,19 @@ type recording struct {
 // matched on its name and arguments rather than running its tool.
 //
 // A session with no path to the leaf named holds no recordings, so
-// every call falls through, or fails when Strict.
+// every call falls through, or fails when Strict. [From] and
+// [AfterBase] serve the outputs recorded after the entry they name,
+// and one that is not on the path, or a base the header does not
+// name, is the same as no path: nothing is served.
 func Tools(s *agentsession.Session, tools []agenttool.Tool, opts ...Option) []agenttool.Tool {
 	o := apply(opts)
 	rec := &recording{opts: o, byID: map[string][]*recorded{}, byArgs: map[string][]*recorded{}}
 	path, err := pathTo(s, o.leaf)
 	if err == nil {
-		rec.index(path, s.Header().Format)
+		var start int
+		if start, err = startOf(s, path, o); err == nil {
+			rec.index(path, start, s.Header().Format)
+		}
 	}
 	out := make([]agenttool.Tool, len(tools))
 	for i, t := range tools {
@@ -192,9 +204,12 @@ func Tools(s *agentsession.Session, tools []agenttool.Tool, opts ...Option) []ag
 	return out
 }
 
-// index collects every function call with an output on the path, and
-// the records beside each, in a session of the given format.
-func (r *recording) index(path []agentsession.Entry, format string) {
+// index collects every function call with an output on the path from
+// start on, and the records beside each, in a session of the given
+// format. A call before start is indexed so an output after it is
+// matched to it, as a call left pending at a fork's base and answered
+// in the fork; one whose output is before start is not served.
+func (r *recording) index(path []agentsession.Entry, start int, format string) {
 	calls := map[string]*recorded{}
 	var order []*recorded
 	byPosition := !namesCalls(format)
@@ -203,8 +218,17 @@ func (r *recording) index(path []agentsession.Entry, format string) {
 	// nestedEnd is the call whose nested call's end was the previous
 	// entry, whose record, if one follows, is the nested call's.
 	nestedEnd := ""
-	for _, e := range path {
+	for i, e := range path {
+		// An item the filter in force kept from the model is a custom
+		// entry marked with its response ID from agentturn v0.0.15, a
+		// function call's output among them when a filter drops those;
+		// it is the item it holds, where it stands (#50).
+		var item openresponses.Item
+		entryID := e.Base().ID
 		if rec, ok := e.(*agentsession.CustomEntry); ok {
+			item, _, _ = markedItem(rec)
+		}
+		if rec, ok := e.(*agentsession.CustomEntry); ok && item == nil {
 			after := nestedEnd
 			nestedEnd = ""
 			if rec.NS == nestedCallNS {
@@ -232,11 +256,13 @@ func (r *recording) index(path []agentsession.Entry, format string) {
 			continue
 		}
 		nestedEnd = ""
-		item, ok := e.(*agentsession.ItemEntry)
-		if !ok {
+		if ie, ok := e.(*agentsession.ItemEntry); ok {
+			item = ie.Item
+		}
+		if item == nil {
 			continue
 		}
-		switch v := item.Item.(type) {
+		switch v := item.(type) {
 		case *openresponses.FunctionCall:
 			// A repeated ID makes this the call its next output
 			// answers; the earlier one keeps what it was given.
@@ -247,13 +273,14 @@ func (r *recording) index(path []agentsession.Entry, format string) {
 		case *openresponses.FunctionCallOutput:
 			if c, ok := calls[v.CallID]; ok && c.output == nil {
 				c.output = v
-				c.entryID = item.ID
+				c.entryID = entryID
+				c.before = i < start
 				delete(waiting, v.CallID)
 			}
 		}
 	}
 	for _, c := range order {
-		if c.output == nil {
+		if c.output == nil || c.before {
 			continue
 		}
 		r.byID[c.call.CallID] = append(r.byID[c.call.CallID], c)
