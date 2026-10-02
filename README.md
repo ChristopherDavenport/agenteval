@@ -134,9 +134,9 @@ compaction entry, when one did and the other did not.
 and the runner and the exporter take the same hook. A result's `usage`
 and `cost_usd` sum every model call on the run's path, the folds a
 compacting configuration made included, which is what the exported
-document's final metrics sum, so the two agree on the total. The one
-exception is a fold that failed: the result counts its summary calls,
-and the document does not yet (agentsession#184). A run
+document's final metrics sum, so the two agree on the total, a fold
+that failed included: its summary calls are counted by both from
+agentsession v0.0.20 (agentsession#184). A run
 with a call the hook cannot price has no `cost_usd`, where the
 document reports the sum of the calls it could.
 

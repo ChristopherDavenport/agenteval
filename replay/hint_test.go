@@ -71,7 +71,7 @@ func TestASkippedFoldNamesItsCause(t *testing.T) {
 		// host restarted and asked again about the same prefix, which a
 		// transform in one process backs off from.
 		{"restart", 400, 4, []string{longPrompt, "two", "three", "four", "five", "six"}, 6,
-			[]string{"asked again", "session.CompactOptions", "backs off", "agentturn#211"}, []string{"WithMinFold"}},
+			[]string{"asked again", "session.CompactOptions", "backs off", "compact.WithBackOff(false)"}, []string{"WithMinFold"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -103,5 +103,34 @@ func TestASkippedFoldNamesItsCause(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The option the restart divergence names does what it says: with the
+// back-off off, the transform asks again about the prefix whose fold
+// failed, as the host that restarted did before "four", and the replay
+// passes the step the hint is about. It is not the whole recording: the
+// host backed off in the process it restarted into, so it did not ask
+// again before "five", and a transform with the back-off off does.
+func TestWithBackOffFalseAsksAgainAsTheRestartedHostDid(t *testing.T) {
+	longPrompt := strings.Repeat("Here is the log I want you to read. ", 50)
+	s := loadFixture(t, "restart")
+	model, err := replay.NewModel(s, replay.Strict())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := terminalConfig(model)
+	cfg.BeforeModelCall = model.BeforeModelCall
+	cfg.Transform = compact.NewLocal(model, compact.WithBudget(400), compact.WithKeepLast(4), compact.WithMinFold(0), compact.WithBackOff(false)).Transform
+	a := agentturn.New(cfg)
+	var failed string
+	for _, p := range []string{longPrompt, "two", "three", "four", "five", "six"} {
+		if _, err = a.Prompt(context.Background(), openresponses.UserText(p)); err != nil {
+			failed = p
+			break
+		}
+	}
+	if failed != "five" || !errors.Is(err, replay.ErrDiverged) {
+		t.Errorf("failed at %.10q with %v; want a divergence at five, past the fold asked again before four", failed, err)
 	}
 }

@@ -236,7 +236,7 @@ type Runner struct {
     // wins over Config. It is where a compacting configuration binds
     // compact.WithOnFold(rec.Fold), without which the folds reach no
     // session and the run cannot be replayed strictly, and seeds its
-    // transform with CompactOptions(ctx, rec), so a fork of a base whose
+    // transform with rec.CompactOptions(), so a fork of a base whose
     // last fold failed does not ask for that summary again; and where a
     // layer keeps the recorder to Annotate the run it is in.
     ConfigWith func(Task, *session.Recorder) agentturn.Config
@@ -275,12 +275,6 @@ type Result struct {
 }
 
 func (r *Runner) Run(ctx context.Context, suite *Suite) (*Report, error)
-
-// CompactOptions is session.CompactOptions for the session the recorder
-// writes: what ConfigWith passes to compact.NewLocal beside its own
-// options, as the runner passes session.AgentOptions to a fork's agent.
-// A wrapper of Recorder.CompactOptions once agentturn has it.
-func CompactOptions(ctx context.Context, rec *session.Recorder) ([]compact.Option, error)
 ```
 
 Each task runs in a fresh session recorded through `agentturn/session`.

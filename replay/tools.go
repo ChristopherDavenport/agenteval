@@ -12,6 +12,7 @@ import (
 
 	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agenttool"
+	"github.com/ChristopherDavenport/agentturn/session"
 	"github.com/ChristopherDavenport/openresponses"
 )
 
@@ -226,7 +227,7 @@ func (r *recording) index(path []agentsession.Entry, start int, format string) {
 		var item openresponses.Item
 		entryID := e.Base().ID
 		if rec, ok := e.(*agentsession.CustomEntry); ok {
-			item, _, _ = markedItem(rec)
+			item, _, _ = session.MarkedItem(rec)
 		}
 		if rec, ok := e.(*agentsession.CustomEntry); ok && item == nil {
 			after := nestedEnd
