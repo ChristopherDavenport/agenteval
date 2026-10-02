@@ -416,7 +416,7 @@ func NewModel(s *agentsession.Session, opts ...Option) (*Model, error) {
 						}
 						st.output = append(openresponses.Items{e.Item}, st.output...)
 					case *agentsession.CustomEntry:
-						item, responseID, ok := markedItem(e)
+						item, responseID, ok := session.MarkedItem(e)
 						if !ok {
 							continue
 						}
@@ -650,31 +650,6 @@ func foldHash(c *agentsession.CompactionEntry) string {
 		return ""
 	}
 	return call.RequestHash
-}
-
-// markedItem decodes a custom entry marked with session.ResponseIDMember
-// as the item the filter kept from the model that it holds, and the
-// response ID the mark names, "" for an app-only input. It reports
-// false for an entry without the mark, one whose mark is not a JSON
-// string, or one whose data does not decode to an item of the entry's
-// namespace, which is the rule agentturn/session's own transcript
-// reader applies. It is the shape of the session.MarkedItem decoder
-// agentturn is considering, so that the switch to the shared decoder is
-// a one-line change once it is released.
-func markedItem(c *agentsession.CustomEntry) (openresponses.Item, string, bool) {
-	raw, ok := c.Unknown[session.ResponseIDMember]
-	if !ok {
-		return nil, "", false
-	}
-	var responseID string
-	if err := json.Unmarshal(raw, &responseID); err != nil {
-		return nil, "", false
-	}
-	item, err := openresponses.UnmarshalItem(c.Data)
-	if err != nil || item.ItemType() != c.NS {
-		return nil, "", false
-	}
-	return item, responseID, true
 }
 
 // startOf returns the index on path of the first entry to serve: 0 for
@@ -1055,7 +1030,7 @@ func (m *Model) take() (step, int, error) {
 // minimum cannot be read from it.
 const (
 	noTextFold  = "; the step before is a fold that failed on a summary with no text, which failed the recording's turn there: from agentturn v0.0.15 compact.NewLocal sends the transcript unfolded instead and the turn goes on, so the request here is that turn's and not the fold the recording made next, and such a recording does not replay strictly past this point"
-	backedOff   = "; most likely the recording asked again about a prefix whose fold had failed, as a host that restarted, or resumed, without session.CompactOptions does: compact.NewLocal from agentturn v0.0.13 backs off from that prefix in one process until the part to fold has grown by the keep-last count of items, at least one, or the estimate by a quarter of the budget, which the record does not hold enough to settle here, and no released agentturn option turns the back-off off (agentturn#211)"
+	backedOff   = "; most likely the recording asked again about a prefix whose fold had failed, as a host that restarted, or resumed, without session.CompactOptions does: compact.NewLocal from agentturn v0.0.13 backs off from that prefix in one process until the part to fold has grown by the keep-last count of items, at least one, or the estimate by a quarter of the budget, which the record does not hold enough to settle here; compact.WithBackOff(false) turns the back-off off, so the replay asks again where the host did, though not where the host had backed off in the process it restarted into"
 	skippedFold = "; from agentturn v0.0.15 compact.NewLocal skips a fold whose input is below its minimum, by default the larger of an eighth of the budget and twice an empty summary's estimate, which compact.WithMinFold(0) removes, and does not fold again a prefix whose fold failed"
 )
 

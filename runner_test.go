@@ -678,16 +678,16 @@ func TestRunnerCostCountsFolds(t *testing.T) {
 	if m == nil || m.TotalPromptTokens == nil || m.TotalCompletionTokens == nil || m.TotalCostUSD == nil {
 		t.Fatalf("the document has no totals: %+v", m)
 	}
-	// The exporter leaves the failed folds out (agentsession#184); the
-	// result is the document's totals and theirs.
-	if res.Usage.InputTokens != *m.TotalPromptTokens+failed.InputTokens || res.Usage.OutputTokens != *m.TotalCompletionTokens+failed.OutputTokens {
-		t.Errorf("usage %d in, %d out; the document %d in, %d out, and failed folds %d in, %d out", res.Usage.InputTokens, res.Usage.OutputTokens, *m.TotalPromptTokens, *m.TotalCompletionTokens, failed.InputTokens, failed.OutputTokens)
+	// The exporter counts the failed folds from agentsession v0.0.20
+	// (agentsession#184), so the result is the document's totals.
+	if res.Usage.InputTokens != *m.TotalPromptTokens || res.Usage.OutputTokens != *m.TotalCompletionTokens {
+		t.Errorf("usage %d in, %d out; the document %d in, %d out (failed folds %d in, %d out)", res.Usage.InputTokens, res.Usage.OutputTokens, *m.TotalPromptTokens, *m.TotalCompletionTokens, failed.InputTokens, failed.OutputTokens)
 	}
 	if res.CostUSD == nil {
 		t.Fatal("the run was not priced")
 	}
-	if *res.CostUSD != *m.TotalCostUSD+failedUSD {
-		t.Errorf("cost %v, the document %v and failed folds %v", *res.CostUSD, *m.TotalCostUSD, failedUSD)
+	if *res.CostUSD != *m.TotalCostUSD {
+		t.Errorf("cost %v, the document %v (failed folds %v)", *res.CostUSD, *m.TotalCostUSD, failedUSD)
 	}
 }
 
@@ -1145,7 +1145,7 @@ func failedFoldsOn(s *agentsession.Session, leaf string) int {
 // fold failed as too large asked for that summary again, where a host
 // resuming the base with session.CompactOptions does not, because the
 // runner seeds the agent and ConfigWith could not reach the session to
-// seed the transform. CompactOptions gives it the options.
+// seed the transform. Recorder.CompactOptions gives it the options.
 func TestRunnerForkSeedsTheTransform(t *testing.T) {
 	ctx := context.Background()
 	store := newStableStore()
@@ -1188,7 +1188,7 @@ func TestRunnerForkSeedsTheTransform(t *testing.T) {
 		input  int
 	}{
 		{"unseeded, the fork asks again", false, 2, 800},
-		{"seeded with CompactOptions, it does not", true, 0, 600},
+		{"seeded with rec.CompactOptions, it does not", true, 0, 600},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1200,11 +1200,7 @@ func TestRunnerForkSeedsTheTransform(t *testing.T) {
 					cfg.Model = model
 					var extra []compact.Option
 					if tt.seeded {
-						opts, err := agenteval.CompactOptions(ctx, rec)
-						if err != nil {
-							t.Fatal(err)
-						}
-						extra = opts
+						extra = rec.CompactOptions()
 					}
 					cfg.Transform = backOffFolding(model, rec, extra...)
 					return cfg
@@ -1242,7 +1238,7 @@ func TestRunnerForkSeedsTheTransform(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opts, err := agenteval.CompactOptions(ctx, rec2); err != nil || len(opts) != 0 {
-		t.Errorf("a fresh session: %d options, %v", len(opts), err)
+	if opts := rec2.CompactOptions(); len(opts) != 0 {
+		t.Errorf("a fresh session: %d options", len(opts))
 	}
 }

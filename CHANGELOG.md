@@ -9,6 +9,16 @@ versions may break the API.
 
 ### Added
 
+- `judged_by` links. For every score whose judge ran in a session of
+  its own, a rubric judge say, the runner writes a link of that relation
+  into the judged session, naming the judge's session and the target the
+  outcome names, as RFC 0001 0.11 defines it, for a score of `Run`
+  and of `JudgeGroups` alike. `Session.Judges` lists a run's judges; the
+  `parent_session` of a judge's session says no more than a subagent's
+  and a fork's do. A deterministic judge has no session and writes no
+  link. A link that cannot be written is an error on the result of a
+  score that stands. (agentsession#145)
+
 - `replay.From(entryID)` and `replay.AfterBase()`. `From` serves only
   the steps after the named entry on the path, for `NewModel` and
   `Tools` alike; `AfterBase` is `From` over the session header's
@@ -34,17 +44,6 @@ versions may break the API.
   that answered it. An evaluation where a crash counts as a failure
   sets `JudgeFailedRuns` on both runners. (#44)
 
-- `CompactOptions(ctx, rec)`, the options that seed a compacting
-  configuration's transform with the session the recorder writes, as
-  the runner seeds a fork's agent with `session.AgentOptions`: for a
-  task forked from a base whose last fold failed, the fold to back off
-  from. A fork made two summary calls and wrote a `compaction_failed`
-  the product resuming the same session would not; `ConfigWith`'s
-  example passes the options beside `compact.WithOnFold(rec.Fold)`.
-  It reads the session through the recorder's store until agentturn
-  releases `Recorder.CompactOptions() []compact.Option`, which it then
-  wraps. (#48)
-
 - `Runner.JudgeGroups(ctx, suite)`, the group step over sessions
   already in the store: per task and sample, the latest session the
   runner's judges scored whose run ended, judged together once every
@@ -62,12 +61,25 @@ versions may break the API.
 
 ### Changed
 
+- Requires agentsession v0.0.20, agenttool v0.0.15, openresponses
+  v0.0.14 and agentturn and its `session` module v0.0.16. agentsession
+  v0.0.20 is format 0.11, which defines the `judged_by` link above;
+  under agentturn v0.0.16 a run that switches model writes the omit
+  setting and hashes every later response, so a strict replay of it
+  needs no `AllowUnhashed`.
+
 - A sampling runner names each sample's session `task#n`
   (`SampleName`), where every sample was named by the task ID alone, so
   a store listing with names tells the samples of a task apart. The
   name is the `info` entry's and reaches every reader of it, a store
   listing or an exported document's name included; a runner that does
   not sample names the session by the task alone, as before. (#51)
+
+- `Result.Usage` and `CostUSD` and the exported document's totals now
+  agree for a run with a failed fold: agentsession v0.0.20's exporter
+  counts a custom entry whose data carries `usage`, which a failed
+  fold's summary calls are, where v0.0.9 documented that the document
+  left them out. The runner's own sum is unchanged. (agentsession#184)
 
 ### Fixed
 
@@ -78,10 +90,9 @@ versions may break the API.
   call or output the same way. The output walk took item entries
   alone, so a replayed response was short of such an item, a text-call
   parser's raw item say, and nothing said so, since the filter keeps
-  it out of every request. The entry is decoded here as agentturn's
-  `Transcript` decodes it, until agentturn releases
-  `session.MarkedItem(*agentsession.CustomEntry) (openresponses.Item, string, bool)`,
-  which replay then calls. (#50)
+  it out of every request. The entry is decoded by agentturn
+  v0.0.16's `session.MarkedItem`, the rule its `Transcript` applies,
+  which replay calls. (#50)
 
 - A recorded failure of the shape `<Op> "<url>": <rest>`, which
   net/http's client gives every error it returns, is served with a
@@ -100,8 +111,9 @@ versions may break the API.
   that point; at a fold the recording asked for again about a prefix
   whose fold had failed, as a host that restarted without
   `session.CompactOptions` does, it says `compact.NewLocal` backs off
-  from it, and that no released agentturn option turns the back-off
-  off, naming agentturn#211 until that option is released; the minimum
+  from it and names `compact.WithBackOff(false)`, agentturn v0.0.16's
+  option that turns the back-off off, with what it does not settle: a
+  host that backed off in the process it restarted into; the minimum
   fold remains the residual. (#49)
 
 - `ErrUnverifiable` for a path with unhashed responses quotes the
@@ -113,6 +125,13 @@ versions may break the API.
   no longer tells a fork run under another model than its base's to
   bind `compact.WithOnFold`; an unbound fold, which writes such an
   entry too, keeps that diagnosis. (#46)
+
+- A compacting configuration seeds its transform from the recorder
+  that writes the run: `ConfigWith`'s example passes
+  `rec.CompactOptions()`, agentturn v0.0.16's `Recorder.CompactOptions`,
+  beside `compact.WithOnFold(rec.Fold)`, so a fork of a base whose last
+  fold failed does not ask for that summary again and write a
+  `compaction_failed` the product resuming the session would not. (#48)
 
 ## v0.0.9 - 2026-10-01
 

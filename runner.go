@@ -16,7 +16,6 @@ import (
 	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agentsession/export"
 	"github.com/ChristopherDavenport/agentturn"
-	"github.com/ChristopherDavenport/agentturn/compact"
 	"github.com/ChristopherDavenport/agentturn/session"
 	"github.com/ChristopherDavenport/openresponses"
 )
@@ -38,16 +37,13 @@ type Runner struct {
 	// annotate through Recorder.Annotate the run it is in. A task that
 	// forks a base (see Header) starts its agent from the context there,
 	// which the runner seeds; a compacting configuration seeds its
-	// transform the same way with [CompactOptions], so a fork of a base
-	// whose last fold failed does not ask for that summary again.
+	// transform the same way with Recorder.CompactOptions, so a fork of a
+	// base whose last fold failed does not ask for that summary again.
 	//
 	//	ConfigWith: func(t agenteval.Task, rec *session.Recorder) agentturn.Config {
 	//		cfg := product.Config(t)
-	//		opts, err := agenteval.CompactOptions(ctx, rec)
-	//		if err != nil {
-	//			// ...
-	//		}
-	//		cfg.Transform = compact.NewLocal(cfg.Model, append(opts, compact.WithOnFold(rec.Fold))...).Transform
+	//		opts := append(rec.CompactOptions(), compact.WithOnFold(rec.Fold))
+	//		cfg.Transform = compact.NewLocal(cfg.Model, opts...).Transform
 	//		return cfg
 	//	}
 	ConfigWith func(Task, *session.Recorder) agentturn.Config
@@ -169,8 +165,10 @@ type Result struct {
 	// exported document's final metrics sum, and the runner prices
 	// each call under the model the exporter does, so with the same
 	// price hook the two agree on the total whenever every call was
-	// priced, except that the exporter as of agentsession v0.0.19
-	// leaves a failed fold's calls out (agentsession#184).
+	// priced. A failed fold's calls are in the document's from
+	// agentsession v0.0.20, which counts a custom entry whose data
+	// carries usage (agentsession#184); before it, the document left
+	// them out.
 	Usage openresponses.Usage `json:"usage"`
 	// CostUSD is the run's cost under Runner.Cost, when every call was
 	// priced.
@@ -424,18 +422,40 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task, sample in
 		if score.Judge == "" {
 			score.Judge = j.Name()
 		}
-		entry, err := newOutcome(score, res.Target, task.ID, sample)
+		scored, err := r.recordScore(ctx, s.ID(), res.Target, task.ID, sample, score)
 		if err != nil {
-			res.Err = errors.Join(res.Err, fmt.Errorf("agenteval: task %s: judge %s: %w", task.ID, j.Name(), err))
-			continue
-		}
-		if _, err := r.Store.Append(ctx, s.ID(), entry); err != nil {
 			res.Err = errors.Join(res.Err, fmt.Errorf("agenteval: task %s: record %s: %w", task.ID, j.Name(), err))
-			continue
 		}
-		res.Scores = append(res.Scores, score)
+		if scored {
+			res.Scores = append(res.Scores, score)
+		}
 	}
 	return res
+}
+
+// recordScore appends a score to the session of the run it judges as an
+// outcome entry and, when the judge ran in a session of its own, a
+// judged_by link to that session naming the same target, so a reader of
+// the judged session finds its judges without knowing any judge's
+// private details, and a subagent's or a fork's session, which names
+// the same parent, is not taken for one. scored reports whether the
+// outcome was written, which the score is counted by; a link that could
+// not be written is the error of a score that stands.
+func (r *Runner) recordScore(ctx context.Context, sessionID, target, task string, sample int, score Score) (scored bool, err error) {
+	entry, err := newOutcome(score, target, task, sample)
+	if err != nil {
+		return false, err
+	}
+	if _, err := r.Store.Append(ctx, sessionID, entry); err != nil {
+		return false, err
+	}
+	if score.Session == "" {
+		return true, nil
+	}
+	if _, err := r.Store.Append(ctx, sessionID, agentsession.NewJudgedByLink(score.Session, target)); err != nil {
+		return true, fmt.Errorf("link judge session %s: %w", score.Session, err)
+	}
+	return true, nil
 }
 
 // config returns the configuration under test for a task and what
@@ -449,33 +469,6 @@ func (r *Runner) config(ctx context.Context, task Task, rec *session.Recorder) (
 		return r.ConfigWith(task, rec), nil, nil
 	}
 	return r.Config(task), nil, nil
-}
-
-// CompactOptions returns the options that seed a compacting
-// configuration's transform with the session the recorder writes, as
-// the runner seeds the agent with session.AgentOptions: for a task
-// forked from a base whose last fold failed, the fold the transform
-// backs off from, so the fork does not ask again for a summary the
-// base's run was refused. A configuration passes them to compact.New
-// or compact.NewLocal beside its own, from ConfigWith or Build, where
-// the recorder is in hand and the session is not; a session with no
-// failed fold on its path, a fresh one included, yields none.
-//
-// It reads the session back through the recorder's store, which hands
-// out the session it already holds for the recorder and takes no
-// second hold, so there is nothing to release: a Release here would
-// let the recorder's session go. It becomes a wrapper of
-// Recorder.CompactOptions once agentturn releases that.
-func CompactOptions(ctx context.Context, rec *session.Recorder) ([]compact.Option, error) {
-	s, err := rec.Store().Open(ctx, rec.SessionID())
-	if err != nil {
-		return nil, fmt.Errorf("agenteval: session %s: %w", rec.SessionID(), err)
-	}
-	opts, err := session.CompactOptions(s)
-	if err != nil {
-		return nil, fmt.Errorf("agenteval: session %s: %w", rec.SessionID(), err)
-	}
-	return opts, nil
 }
 
 // DefaultMaxResumes is how many times one prompt is resumed through
@@ -748,15 +741,13 @@ func (r *Runner) recordGroup(ctx context.Context, task Task, group []Result, jud
 			if score.Judge == "" {
 				score.Judge = j.Name()
 			}
-			entry, err := newOutcome(score, res.Target, task.ID, res.Sample)
-			if err == nil {
-				_, err = r.Store.Append(ctx, res.SessionID, entry)
-			}
+			scored, err := r.recordScore(ctx, res.SessionID, res.Target, task.ID, res.Sample, score)
 			if err != nil {
 				res.Err = errors.Join(res.Err, fmt.Errorf("agenteval: task %s: group judge %s: %w", task.ID, j.Name(), err))
-				continue
 			}
-			res.Scores = append(res.Scores, score)
+			if scored {
+				res.Scores = append(res.Scores, score)
+			}
 		}
 	}
 }
