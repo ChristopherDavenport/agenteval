@@ -605,14 +605,18 @@ func replayable(s *agentsession.Session, leaf string) error {
 }
 
 // unboundFoldShape reports whether an agentturn:unhashed entry is the
-// one an unbound local fold writes: the summary message sent where the
-// path rebuilds the first message, index 0, a message for a message.
-// Every other shape, a reasoning item left out of a request, an item
-// the path does not hold, a response that named no ID, has a cause the
-// WithOnFold seam does not touch.
+// one an unbound fold writes: the summary sent where the path rebuilds
+// the first message, index 0, a message for a message for
+// compact.NewLocal's summary, or a compaction item for a message for a
+// fold through the compaction endpoint, compact.New. Every other
+// shape, a reasoning item left out of a request, an item the path does
+// not hold, a response that named no ID, has a cause the WithOnFold
+// seam does not touch.
 func unboundFoldShape(u session.Unhashed) bool {
-	return u.Index == 0 && u.Sent != nil && u.Recorded != nil &&
-		u.Sent.Type == openresponses.ItemTypeMessage && u.Recorded.Type == openresponses.ItemTypeMessage
+	if u.Index != 0 || u.Sent == nil || u.Recorded == nil || u.Recorded.Type != openresponses.ItemTypeMessage {
+		return false
+	}
+	return u.Sent.Type == openresponses.ItemTypeMessage || u.Sent.Type == openresponses.ItemTypeCompaction
 }
 
 // describe writes what the session is a run of: an info entry naming
@@ -809,7 +813,14 @@ func (r *Runner) JudgeGroups(ctx context.Context, suite *Suite) (*Report, error)
 		return nil, err
 	}
 	report := &Report{Suite: suite.Name, Manifest: suite.Manifest}
+	// A resume's suite may name a task once per sample it ran again;
+	// the group is judged once.
+	seen := map[string]bool{}
 	for _, task := range suite.Tasks {
+		if seen[task.ID] {
+			continue
+		}
+		seen[task.ID] = true
 		// The suite handed in may be a resume's, its task naming one
 		// sample; the group judges see the task as Run shows it.
 		task = withoutSample(task)

@@ -119,3 +119,43 @@ func TestUnreplayableQuotesTheUnhashedEntry(t *testing.T) {
 		}
 	}
 }
+
+// A fork is replayed after its base, so an unhashed response on the
+// base's own path, which that replay never serves, does not make the
+// fork unreplayable: here the base's BeforeModelCall added an item the
+// record does not hold, and the fork, under a plain configuration,
+// sends what the path rebuilds.
+func TestForkOfAnUnhashedBaseIsReplayable(t *testing.T) {
+	ctx := context.Background()
+	store := newStableStore()
+	edited := echoConfig()
+	edited.BeforeModelCall = func(_ context.Context, req *openresponses.Request) error {
+		// Put first, not last: the echo adapter calls its tool whenever
+		// the last item is not a tool result, and a message appended
+		// after one would keep it calling.
+		req.Input = append(openresponses.Items{openresponses.UserText("remember the house style")}, req.Input...)
+		return nil
+	}
+	first, err := (&agenteval.Runner{Store: store, Config: func(agenteval.Task) agentturn.Config { return edited }}).Run(ctx, &agenteval.Suite{Name: "base", Tasks: []agenteval.Task{{ID: "setup", Prompts: openresponses.Items{openresponses.UserText("look around")}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin := first.Results[0]
+	if !errors.Is(origin.Err, agenteval.ErrUnreplayable) {
+		t.Fatalf("base: err %v, want ErrUnreplayable for the edited request", origin.Err)
+	}
+	r := &agenteval.Runner{
+		Store:  store,
+		Config: func(agenteval.Task) agentturn.Config { return echoConfig() },
+		Header: func(agenteval.Task) agentsession.Header {
+			return agentsession.Header{ParentSession: origin.SessionID, Base: origin.Target}
+		},
+	}
+	rep, err := r.Run(ctx, &agenteval.Suite{Name: "fork", Tasks: []agenteval.Task{{ID: "next", Prompts: openresponses.Items{openresponses.UserText("go on")}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := rep.Results[0]; res.Err != nil {
+		t.Errorf("fork of an unhashed base: %v", res.Err)
+	}
+}

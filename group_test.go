@@ -423,6 +423,23 @@ func TestRunnerResumesAGroup(t *testing.T) {
 	if _, outcomes := sessionRecord(t, store, rejudged.Results[1]); outcomes["advantage"].Sample != 2 {
 		t.Errorf("rerun sample 2's group outcome %+v", outcomes["advantage"])
 	}
+	if sum := rejudged.ByJudge["advantage"]; sum.Count != 3 || sum.Unjudged != 0 {
+		t.Errorf("the group judge's summary %+v", sum)
+	}
+
+	// A resume suite that names the task once per sample it ran again
+	// judges the group once.
+	twice := &agenteval.Suite{Name: "s", Tasks: []agenteval.Task{withMeta(task, agenteval.SampleMeta, "1"), withMeta(task, agenteval.SampleMeta, "3")}}
+	if _, err := r.Run(ctx, twice); err != nil {
+		t.Fatal(err)
+	}
+	once, err := r.JudgeGroups(ctx, twice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(once.Results) != 3 || calls.Load() != 3 {
+		t.Errorf("a resume suite naming the task twice: %d results, %d group calls", len(once.Results), calls.Load())
+	}
 }
 
 // withMeta returns task with one Meta key set, its Meta copied.

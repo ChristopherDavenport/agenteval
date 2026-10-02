@@ -560,6 +560,9 @@ const clientTimeout = "(Client.Timeout exceeded while awaiting headers)"
 // one either: the provider's message quoting a request is its message,
 // not net/http's wrapper, and the transport-only Retryable that retries
 // every net.Error would otherwise retry it under replay and not live.
+// A provider's own 503 whose message has that shape is the residual:
+// the text cannot tell it from the 503 a replay of a replay re-records,
+// and a 503 is retried by DefaultRetryable either way.
 var urlFailure = regexp.MustCompile(`(?:^|: )(Get|Head|Post|Put|Patch|Delete|Connect|Options|Trace) "([a-z][a-z0-9+.-]*://[^"]*)": (.+)$`)
 
 // causeOf returns the transport failure text names, as the whole text
