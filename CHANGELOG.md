@@ -23,6 +23,40 @@ versions may break the API.
   not on the path and `AfterBase` on a session with no base; `Tools`
   then serves no recorded output. (#45)
 
+- `Summary.Unjudged`, the results a judge did not score, so `Count`
+  plus `Unjudged` is the number of results and a reader can tell 1 of
+  1 from 1 of 2, or compute Harbor's mean, which counts a trial with
+  no reward as 0. `Compare` marks a pair whose side was not judged on
+  `Pair.Unjudged` (`UnjudgedA`, `UnjudgedB`, `UnjudgedBoth`), counts
+  it on `Comparison.Unjudged` and leaves it out of `ByJudge`, which
+  covers the pairs both sides answered. Under #39's default a
+  configuration that crashed on a task compared as the equal of one
+  that answered it. An evaluation where a crash counts as a failure
+  sets `JudgeFailedRuns` on both runners. (#44)
+
+- `CompactOptions(ctx, rec)`, the options that seed a compacting
+  configuration's transform with the session the recorder writes, as
+  the runner seeds a fork's agent with `session.AgentOptions`: for a
+  task forked from a base whose last fold failed, the fold to back off
+  from. A fork made two summary calls and wrote a `compaction_failed`
+  the product resuming the same session would not; `ConfigWith`'s
+  example passes the options beside `compact.WithOnFold(rec.Fold)`.
+  It reads the session through the recorder's store until agentturn
+  releases `Recorder.CompactOptions`, which it then wraps. (#48)
+
+- `Runner.JudgeGroups(ctx, suite)`, the group step over sessions
+  already in the store: per task and sample, the latest session the
+  runner's judges scored whose run ended, judged together once every
+  sample has one and recorded as `Run` records a group; groups with a
+  sample missing or already group judged are left out. With it a task
+  whose `Meta["sample"]` is set while `Samples` is above one is no
+  longer refused: it runs that sample alone, numbered as it says, and
+  without a group step, so a killed batch is resumed by rerunning the
+  samples that did not finish and then calling `JudgeGroups`. Each
+  sample's session is named `task#n`, `SampleName`, so a store listing
+  tells the samples apart; a runner that does not sample names the
+  session by the task alone, as before. (#51)
+
 ### Fixed
 
 - A strict replay serves a model output the filter kept from the

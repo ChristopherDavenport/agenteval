@@ -133,18 +133,21 @@
   "by_judge": {
     "contains": {
       "count": 2,
+      "unjudged": 0,
       "mean": 0.5,
       "passed": 1,
       "pass_rate": 0.5
     },
     "exact": {
       "count": 2,
+      "unjudged": 0,
       "mean": 0.5,
       "passed": 1,
       "pass_rate": 0.5
     },
     "tool_called:upper": {
       "count": 2,
+      "unjudged": 0,
       "mean": 0.5,
       "passed": 1,
       "pass_rate": 0.5

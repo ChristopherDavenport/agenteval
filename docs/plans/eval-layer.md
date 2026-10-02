@@ -235,7 +235,9 @@ type Runner struct {
     // ConfigWith is Config with the recorder that writes the run, and
     // wins over Config. It is where a compacting configuration binds
     // compact.WithOnFold(rec.Fold), without which the folds reach no
-    // session and the run cannot be replayed strictly, and where a
+    // session and the run cannot be replayed strictly, and seeds its
+    // transform with CompactOptions(ctx, rec), so a fork of a base whose
+    // last fold failed does not ask for that summary again; and where a
     // layer keeps the recorder to Annotate the run it is in.
     ConfigWith func(Task, *session.Recorder) agentturn.Config
     // Build is ConfigWith for a configuration that can fail to build or
@@ -273,6 +275,12 @@ type Result struct {
 }
 
 func (r *Runner) Run(ctx context.Context, suite *Suite) (*Report, error)
+
+// CompactOptions is session.CompactOptions for the session the recorder
+// writes: what ConfigWith passes to compact.NewLocal beside its own
+// options, as the runner passes session.AgentOptions to a fork's agent.
+// A wrapper of Recorder.CompactOptions once agentturn has it.
+func CompactOptions(ctx context.Context, rec *session.Recorder) ([]compact.Option, error)
 ```
 
 Each task runs in a fresh session recorded through `agentturn/session`.
@@ -359,6 +367,12 @@ type Runner struct {
     GroupJudges []GroupJudge // score each task's samples together, after its judges
 }
 
+// JudgeGroups finishes the groups already in the Store: per task and
+// sample, the latest judged session whose run ended, judged together once
+// every sample has one, and recorded as Run records a group. The report's
+// results are the members.
+func (r *Runner) JudgeGroups(ctx context.Context, suite *Suite) (*Report, error)
+
 type Result struct {
     // ...
     Sample int // 1 to Samples; 0 when the runner does not sample
@@ -381,7 +395,16 @@ type Member struct {
   `Result.Sample`, so a suite's own IDs need no reserved character. The
   `Task` each sample runs, and every hook sees, carries
   `Meta["sample"]`, so a `Header` that fixes session IDs can fix one per
-  sample; a suite whose task already sets that key is refused.
+  sample. Its session is named `task#n` (`SampleName`), so a store
+  listing with names tells the samples apart; a runner that does not
+  sample names the session by the task alone, as before.
+- **One sample.** A suite task whose `Meta["sample"]` is set while
+  `Samples` is above one runs that sample alone, numbered as it says on
+  the result, the task record and each outcome's details: how a batch
+  that was killed, or lost a sample to its inference server, is
+  resumed without paying again for the samples that finished. Its
+  group step is not run, since one sample is not the group; a value
+  that is not a number from 1 to `Samples` is refused.
 - **Order.** Results are task-major, sample-minor. Samples run under
   `Parallel` like tasks; a task's group judges run once its last sample
   is judged, on that sample's goroutine.
@@ -398,6 +421,17 @@ type Member struct {
   group-judged, as Atropos drops it. Every other member's result says
   so on `Err`. With `JudgeFailedRuns` the failed member is judged and
   the group is complete.
+- **Finishing a group from the store.** `JudgeGroups(ctx, suite)` is
+  the group step over sessions already recorded: for each task it
+  takes, per sample, the latest session found by name or by its
+  `agenteval:task` record that the runner's judges scored and whose
+  scores target a run end that is not an error (any end under
+  `JudgeFailedRuns`), and once every sample has one runs the group
+  judges no member already holds an outcome from, recording the scores
+  as `Run` does. A group with a sample still missing, or judged by
+  every group judge already, is left out, so a second call does
+  nothing. Sessions are read without being held where the store is a
+  `Reader`.
 - **Errors.** A group judge that errs, or returns a score count other
   than the group's, writes nothing, and the error is on every member's
   result.
@@ -408,7 +442,13 @@ type Member struct {
 ### Report and comparison
 
 ```go
-type Summary struct { Count int; Mean float64; Passed int; PassRate float64 }
+type Summary struct {
+    Count    int     // results the judge scored
+    Unjudged int     // results it did not: Count + Unjudged is the number of results
+    Mean     float64
+    Passed   int
+    PassRate float64
+}
 
 type Report struct {
     Suite    string
@@ -430,12 +470,23 @@ type Comparison struct {
     A, B     *Report
     Config   ConfigDiff       // when every pair's differs the same way
     Uniform  bool
-    Pairs    []Pair           // Task, A, B, Delta by judge, Config
-    ByJudge  map[string]float64 // B's mean minus A's
+    Pairs    []Pair           // Task, Sample, A, B, Delta by judge, Config, Unjudged ("a", "b", "both")
+    ByJudge  map[string]float64 // B's mean minus A's, over the pairs the judge scored on both sides
+    Unjudged int              // pairs with a side that was not judged
 }
 
 func DiffSettings(a, b agentsession.Settings) ConfigDiff
 ```
+
+A run that failed and was left unjudged is not scored, and two readers
+say so rather than reading past it: `Summary.Unjudged` counts the
+results a judge did not score, so a reader can tell 1 of 1 from 1 of 2
+and compute Harbor's mean, which counts a trial with no reward as 0;
+and `Compare` marks a pair whose side was not judged on
+`Pair.Unjudged`, counts it on `Comparison.Unjudged` and leaves it out of
+`ByJudge`, which covers the pairs both sides answered. An evaluation
+under Harbor's rule sets `JudgeFailedRuns` on both runners, and the
+failed run scores 0 like any other.
 
 A comparison of two configurations writes two sessions per task, so
 `PreferScore` plays no part in it; putting both on branches of one

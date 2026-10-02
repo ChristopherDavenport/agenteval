@@ -19,10 +19,12 @@ type TaskRecord struct {
 	Setup    map[string]string `json:"setup,omitempty"`
 	Meta     map[string]string `json:"meta,omitempty"`
 	// Sample is which of Samples runs of the task this is, from 1,
-	// when the runner sampled it. GroupJudges names the group judges
+	// when the runner sampled it, and the session is then named
+	// task#sample ([SampleName]). GroupJudges names the group judges
 	// the runner was to score the group with, so a reader can tell a
 	// group that was never scored, because the batch ended before its
-	// group step, by a session that holds no outcome from one of them.
+	// group step, by a session that holds no outcome from one of them;
+	// [Runner.JudgeGroups] scores such a group from the store.
 	Sample      int      `json:"sample,omitempty"`
 	Samples     int      `json:"samples,omitempty"`
 	GroupJudges []string `json:"group_judges,omitempty"`
