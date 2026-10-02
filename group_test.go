@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -396,8 +397,31 @@ func TestRunnerResumesAGroup(t *testing.T) {
 	if err != nil || len(report.Results) != 1 || calls.Load() != 1 {
 		t.Fatalf("a suite with an unrun task: %d results, %d group calls, %v", len(report.Results), calls.Load(), err)
 	}
-	if res := report.Results[0]; res.Task.ID != missing.Tasks[1].ID || res.Err == nil || !strings.Contains(res.Err.Error(), "sample 1, 2, 3 has no judged run in the store") {
+	if res := report.Results[0]; res.Task.ID != missing.Tasks[1].ID || res.Err == nil || strings.Count(res.Err.Error(), "has no judged run in the store") != 1 || !strings.Contains(res.Err.Error(), "sample 1, 2, 3 has no judged run in the store") {
 		t.Errorf("unrun task: %s, err %v", res.Task.ID, res.Err)
+	}
+
+	// A sample run again after the group was judged lacks the group's
+	// outcome; the group is judged again as a whole, through the resume
+	// suite's own task, and the other members get a second outcome.
+	again2, err := r.Run(ctx, &agenteval.Suite{Name: "s", Tasks: []agenteval.Task{withMeta(task, agenteval.SampleMeta, "2")}})
+	if err != nil || len(again2.Results) != 1 || again2.Results[0].Err != nil {
+		t.Fatalf("rerun of sample 2: %v, %+v", err, again2.Results)
+	}
+	rejudged, err := r.JudgeGroups(ctx, &agenteval.Suite{Name: "s", Tasks: []agenteval.Task{withMeta(task, agenteval.SampleMeta, "2")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rejudged.Results) != 3 || calls.Load() != 2 {
+		t.Fatalf("after rerunning sample 2: %d results, %d group calls", len(rejudged.Results), calls.Load())
+	}
+	for k, res := range rejudged.Results {
+		if res.Err != nil || res.Sample != k+1 || res.Task.Meta[agenteval.SampleMeta] != strconv.Itoa(k+1) {
+			t.Errorf("rejudged member %d: err %v, sample %d, meta %v", k, res.Err, res.Sample, res.Task.Meta)
+		}
+	}
+	if _, outcomes := sessionRecord(t, store, rejudged.Results[1]); outcomes["advantage"].Sample != 2 {
+		t.Errorf("rerun sample 2's group outcome %+v", outcomes["advantage"])
 	}
 }
 

@@ -52,7 +52,9 @@ versions may break the API.
   sample still missing is reported, not left out: its members carry the
   missing samples on `Err`, and a task with none is one result carrying
   the error; a group every group judge has scored is left out, so a
-  second call writes nothing. With it a task
+  second call writes nothing, and a judge some member lacks, because
+  that sample was run again, is run over the whole group and appended
+  on every member. With it a task
   whose `Meta["sample"]` is set while `Samples` is above one is no
   longer refused: it runs that sample alone, numbered as it says, and
   without a group step, so a killed batch is resumed by rerunning the

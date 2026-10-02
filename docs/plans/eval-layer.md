@@ -432,8 +432,11 @@ type Member struct {
   left out: its members carry the missing samples on `Err`, as `Run`
   reports a group it could not judge, and a task with no member is one
   result carrying the error. A group every group judge has scored is
-  left out, so a second call writes nothing. Sessions are read without
-  being held where the store is a `Reader`.
+  left out, so a second call writes nothing; a judge some member lacks,
+  because that sample was run again after the group was judged, is run
+  over the whole group and appended on every member, a second outcome
+  on those that had one. Sessions are read without being held where
+  the store is a `Reader`.
 - **Errors.** A group judge that errs, or returns a score count other
   than the group's, writes nothing, and the error is on every member's
   result.

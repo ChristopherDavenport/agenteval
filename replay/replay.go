@@ -554,8 +554,13 @@ const clientTimeout = "(Client.Timeout exceeded while awaiting headers)"
 // wraps every error it returns in: `<Op> "<url>": <rest>`, as the whole
 // text or after a colon-separated prefix, the Op a method name and the
 // URL absolute, so a provider's message that quotes a word is not read
-// as one. The rest is the wrapped error's own text.
-var urlFailure = regexp.MustCompile(`(?:^|: )([A-Z][a-z]+) "([a-z][a-z0-9+.-]*://[^"]*)": (.+)$`)
+// as one. The rest is the wrapped error's own text. A text that spells
+// a provider's own error, an openresponses error of a status other
+// than the 503 [failureOf] gives a transport failure, is not parsed for
+// one either: the provider's message quoting a request is its message,
+// not net/http's wrapper, and the transport-only Retryable that retries
+// every net.Error would otherwise retry it under replay and not live.
+var urlFailure = regexp.MustCompile(`(?:^|: )(Get|Head|Post|Put|Patch|Delete|Connect|Options|Trace) "([a-z][a-z0-9+.-]*://[^"]*)": (.+)$`)
 
 // causeOf returns the transport failure text names, as the whole text
 // or as the last of its colon-separated parts, or nil. A text in
@@ -566,6 +571,9 @@ var urlFailure = regexp.MustCompile(`(?:^|: )([A-Z][a-z]+) "([a-z][a-z0-9+.-]*:/
 // and TLS-handshake timeouts, unexported types named only by their
 // text, are told from a cancelled request (#47).
 func causeOf(text string) error {
+	if m := recordedError.FindStringSubmatch(text); m != nil && (m[1] != string(openresponses.ErrorTypeServerError) || m[2] != "503") {
+		return nil
+	}
 	if m := urlFailure.FindStringSubmatch(text); m != nil {
 		err := causeOf(m[3])
 		if err == nil {
@@ -1044,7 +1052,7 @@ func (m *Model) take() (step, int, error) {
 // minimum cannot be read from it.
 const (
 	noTextFold  = "; the step before is a fold that failed on a summary with no text, which failed the recording's turn there: from agentturn v0.0.15 compact.NewLocal sends the transcript unfolded instead and the turn goes on, so the request here is that turn's and not the fold the recording made next, and such a recording does not replay strictly past this point"
-	backedOff   = "; the recording asked again about a prefix whose fold had failed, as a host that restarted, or resumed, without session.CompactOptions does: compact.NewLocal from agentturn v0.0.13 backs off from that prefix in one process until the part to fold has grown by the keep-last count of items, at least one, or the estimate by a quarter of the budget, and no released agentturn option turns the back-off off (agentturn#211)"
+	backedOff   = "; most likely the recording asked again about a prefix whose fold had failed, as a host that restarted, or resumed, without session.CompactOptions does: compact.NewLocal from agentturn v0.0.13 backs off from that prefix in one process until the part to fold has grown by the keep-last count of items, at least one, or the estimate by a quarter of the budget, which the record does not hold enough to settle here, and no released agentturn option turns the back-off off (agentturn#211)"
 	skippedFold = "; from agentturn v0.0.15 compact.NewLocal skips a fold whose input is below its minimum, by default the larger of an eighth of the budget and twice an empty summary's estimate, which compact.WithMinFold(0) removes, and does not fold again a prefix whose fold failed"
 )
 

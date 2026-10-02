@@ -365,8 +365,10 @@ func TestRunnerErrors(t *testing.T) {
 	if empty.Err == nil || !strings.Contains(empty.Err.Error(), "nothing to send") || empty.SessionID != "" {
 		t.Errorf("empty: %+v", empty)
 	}
-	if _, ok := report.ByJudge["broken"]; ok {
-		t.Error("a judge that never scored is summarised")
+	// A judge that never scored is still named, with every result
+	// unjudged, so a report where every judge failed says so.
+	if sum, ok := report.ByJudge["broken"]; !ok || sum.Count != 0 || sum.Unjudged != len(report.Results) {
+		t.Errorf("a judge that never scored: %+v, %v", sum, ok)
 	}
 	var buf bytes.Buffer
 	if err := report.WriteJSON(&buf); err != nil {
@@ -434,8 +436,18 @@ func TestRunnerErrors(t *testing.T) {
 		if judgeFailed {
 			want = len(r.Judges)
 		}
-		if len(res.Scores) != want || outcomes != want || (len(report.ByJudge) == 0) != (want == 0) {
+		if len(res.Scores) != want || outcomes != want || len(report.ByJudge) != len(r.Judges) {
 			t.Errorf("failing model, JudgeFailedRuns %v: %d scores, %d outcomes, by judge %v; want %d", judgeFailed, len(res.Scores), outcomes, report.ByJudge, want)
+		}
+		// Every judge is summarised either way: with the run judged it
+		// scored the one result, and with it left unjudged it names
+		// that result as the one it did not score.
+		for _, j := range r.Judges {
+			sum := report.ByJudge[j.Name()]
+			n := len(report.Results)
+			if judgeFailed && (sum.Count != n || sum.Unjudged != 0) || !judgeFailed && (sum.Count != 0 || sum.Unjudged != n) {
+				t.Errorf("failing model, JudgeFailedRuns %v: %s summarised as %+v", judgeFailed, j.Name(), sum)
+			}
 		}
 	}
 

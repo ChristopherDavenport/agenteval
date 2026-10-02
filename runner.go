@@ -291,6 +291,7 @@ func (r *Runner) Run(ctx context.Context, suite *Suite) (*Report, error) {
 	}
 	wg.Wait()
 	report.ByJudge = Summarize(report.Results)
+	r.nameJudges(report)
 	return report, ctx.Err()
 }
 
@@ -540,15 +541,25 @@ var ErrUnreplayable = errors.New("agenteval: the run cannot be replayed strictly
 // whose compacting configuration never bound compact.WithOnFold, and
 // that is a seam this package owns. A workspace substitution alone
 // gets none of it; replay's error names the env entry. Nor does a
-// first unhashed response whose agentturn:unhashed entry names a
-// reasoning item as what the path rebuilds where the request parts
-// from it: agentturn v0.0.15 leaves another model's reasoning out of a
-// request, as a fork run under another model than its base's does, the
-// format cannot describe that, and no seam here binds it; replay's
-// error quotes the entry (#46). An unbound fold writes such an entry
-// too, naming a message for a message, and keeps the diagnosis.
+// first unhashed response whose agentturn:unhashed entry says the
+// cause is something else: a reasoning item left out of a request,
+// which agentturn v0.0.15 does for another model's reasoning, as a
+// fork run under another model than its base's is, and the format
+// cannot describe; an item the path does not hold; a response that
+// named no ID. No seam here binds any of those, and replay's error
+// quotes the entry (#46). The diagnosis is kept for the entry an
+// unbound fold writes, a message sent for a message at index 0, since
+// the reason text is the same for every cause and only the items tell
+// them apart, and for a recording with no such entry at all.
 func replayable(s *agentsession.Session, leaf string) error {
-	err := replay.Unverifiable(s, leaf)
+	// A fork is replayed after its base, as Runner.Header says, so the
+	// base's own unhashed responses, which that replay never serves,
+	// do not count against the fork.
+	var opts []replay.Option
+	if s.Header().Base != "" {
+		opts = append(opts, replay.AfterBase())
+	}
+	err := replay.Unverifiable(s, leaf, opts...)
 	if err == nil {
 		return nil
 	}
@@ -558,7 +569,7 @@ func replayable(s *agentsession.Session, leaf string) error {
 	if !errors.Is(err, replay.ErrUnverifiable) {
 		return err
 	}
-	if replay.Unverifiable(s, leaf, replay.AllowSubstitution()) == nil {
+	if replay.Unverifiable(s, leaf, append(opts, replay.AllowSubstitution())...) == nil {
 		return fmt.Errorf("%w: %w", ErrUnreplayable, err)
 	}
 	if leaf == "" {
@@ -586,11 +597,22 @@ func replayable(s *agentsession.Session, leaf string) error {
 	}
 	if why != nil {
 		var u session.Unhashed
-		if json.Unmarshal(why.Data, &u) == nil && u.Recorded != nil && u.Recorded.Type == openresponses.ItemTypeReasoning {
+		if json.Unmarshal(why.Data, &u) != nil || !unboundFoldShape(u) {
 			return fmt.Errorf("%w: %w", ErrUnreplayable, err)
 		}
 	}
 	return fmt.Errorf("%w: %w and the session records no fold; a configuration that compacts binds compact.WithOnFold(rec.Fold) through Runner.ConfigWith, and a transform or a hook that edits the input is a change the record cannot describe at all", ErrUnreplayable, err)
+}
+
+// unboundFoldShape reports whether an agentturn:unhashed entry is the
+// one an unbound local fold writes: the summary message sent where the
+// path rebuilds the first message, index 0, a message for a message.
+// Every other shape, a reasoning item left out of a request, an item
+// the path does not hold, a response that named no ID, has a cause the
+// WithOnFold seam does not touch.
+func unboundFoldShape(u session.Unhashed) bool {
+	return u.Index == 0 && u.Sent != nil && u.Recorded != nil &&
+		u.Sent.Type == openresponses.ItemTypeMessage && u.Recorded.Type == openresponses.ItemTypeMessage
 }
 
 // describe writes what the session is a run of: an info entry naming
@@ -657,6 +679,19 @@ func withSample(task Task, sample int) Task {
 	meta := make(map[string]string, len(task.Meta)+1)
 	maps.Copy(meta, task.Meta)
 	meta[SampleMeta] = strconv.Itoa(sample)
+	task.Meta = meta
+	return task
+}
+
+// withoutSample returns task without SampleMeta, as Run shows a task
+// to its group judges; a task without the key is returned as is.
+func withoutSample(task Task) Task {
+	if _, ok := task.Meta[SampleMeta]; !ok {
+		return task
+	}
+	meta := make(map[string]string, len(task.Meta))
+	maps.Copy(meta, task.Meta)
+	delete(meta, SampleMeta)
 	task.Meta = meta
 	return task
 }
@@ -740,10 +775,13 @@ func (r *Runner) recordGroup(ctx context.Context, task Task, group []Result, jud
 // all is one result carrying the error, so a resume that still has
 // samples to run reads which. A group already judged by every group
 // judge is left out, since there is nothing left to do and a second
-// call writes nothing; a group judge some member already holds an
+// call writes nothing; a group judge every member already holds an
 // outcome from is not run again, so a judge added since scores the
-// groups it has not. A runner that does not sample judges each task's
-// latest session as a group of one.
+// groups it has not, and one some member lacks, because that sample
+// was run again after the group was judged, is run over the whole
+// group and appended on every member, a second outcome on those that
+// had one, as scores are appended and never rewritten. A runner that
+// does not sample judges each task's latest session as a group of one.
 //
 // A sample's sessions are found by name, task#n (see [SampleName]),
 // through a store that lists names, and by their agenteval:task record
@@ -772,9 +810,14 @@ func (r *Runner) JudgeGroups(ctx context.Context, suite *Suite) (*Report, error)
 	}
 	report := &Report{Suite: suite.Name, Manifest: suite.Manifest}
 	for _, task := range suite.Tasks {
-		samples, _ := r.samples(Task{ID: task.ID})
+		// The suite handed in may be a resume's, its task naming one
+		// sample; the group judges see the task as Run shows it.
+		task = withoutSample(task)
+		samples, _ := r.samples(task)
 		group := make([]Result, 0, n)
-		judged := map[string]bool{}
+		// judged counts the members holding an outcome from each group
+		// judge; a judge every member holds is done.
+		judged := map[string]int{}
 		var missing []string
 		for _, k := range samples {
 			m, ok := stored[task.ID][k]
@@ -783,7 +826,7 @@ func (r *Runner) JudgeGroups(ctx context.Context, suite *Suite) (*Report, error)
 				continue
 			}
 			for name := range m.groupJudged {
-				judged[name] = true
+				judged[name]++
 			}
 			group = append(group, m.Result)
 		}
@@ -795,7 +838,7 @@ func (r *Runner) JudgeGroups(ctx context.Context, suite *Suite) (*Report, error)
 				err = fmt.Errorf("agenteval: task %s: no judged run in the store", task.ID)
 			}
 			if len(group) == 0 {
-				group = append(group, Result{Task: task, Err: err})
+				group = append(group, Result{Task: task})
 			}
 			for k := range group {
 				group[k].Err = errors.Join(group[k].Err, err)
@@ -805,7 +848,7 @@ func (r *Runner) JudgeGroups(ctx context.Context, suite *Suite) (*Report, error)
 		}
 		var pending []GroupJudge
 		for _, j := range r.GroupJudges {
-			if !judged[j.Name()] {
+			if judged[j.Name()] < len(group) {
 				pending = append(pending, j)
 			}
 		}
@@ -816,7 +859,27 @@ func (r *Runner) JudgeGroups(ctx context.Context, suite *Suite) (*Report, error)
 		report.Results = append(report.Results, group...)
 	}
 	report.ByJudge = Summarize(report.Results)
+	r.nameJudges(report)
 	return report, nil
+}
+
+// nameJudges adds to the report's ByJudge a summary for each of the
+// runner's judges and group judges that scored nothing, with Count 0
+// and every result unjudged: Summarize reads the results alone and
+// cannot name a judge no result holds a score from, and a report
+// where every run failed would otherwise say nothing of the judges it
+// left idle.
+func (r *Runner) nameJudges(report *Report) {
+	for _, j := range r.Judges {
+		if _, ok := report.ByJudge[j.Name()]; !ok {
+			report.ByJudge[j.Name()] = Summary{Unjudged: len(report.Results)}
+		}
+	}
+	for _, j := range r.GroupJudges {
+		if _, ok := report.ByJudge[j.Name()]; !ok {
+			report.ByJudge[j.Name()] = Summary{Unjudged: len(report.Results)}
+		}
+	}
 }
 
 // storedMember is a sample's latest judged session in the store, as a
@@ -834,7 +897,7 @@ func (r *Runner) storedMembers(ctx context.Context, suite *Suite) (map[string]ma
 	tasks := make(map[string]Task, len(suite.Tasks))
 	names := map[string]bool{}
 	for _, task := range suite.Tasks {
-		tasks[task.ID] = task
+		tasks[task.ID] = withoutSample(task)
 		// The task's own name as well, which a runner that does not
 		// sample uses, and which every sample was named before the
 		// samples were told apart.

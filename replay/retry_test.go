@@ -335,21 +335,42 @@ func TestAFailureNamesItsCause(t *testing.T) {
 // Issue 47: a provider's message shaped like a *url.Error's text is not
 // one, and names no cause.
 func TestAQuotedMessageIsNotAURLError(t *testing.T) {
-	said := &openresponses.Error{StatusCode: http.StatusServiceUnavailable, Type: openresponses.ErrorTypeServerError, Message: `upstream Said "x": timeout`}
-	cfg := fixtureConfig(&flaky{fail: map[int]bool{1: true}, err: said})
-	cfg.Retry = agentturn.Retry{MaxAttempts: 2, Backoff: func(int, error) time.Duration { return 0 }}
-	orig, _, err := rerun(t, cfg, "first")
-	if err != nil {
-		t.Fatal(err)
+	everything := func(error) bool { return true }
+	tests := []struct {
+		name      string
+		said      *openresponses.Error
+		retryable func(error) bool // what the recording retried under
+	}{
+		// A word that is not a method, before a quoted non-URL.
+		{"a quoted word", &openresponses.Error{StatusCode: http.StatusServiceUnavailable, Type: openresponses.ErrorTypeServerError, Message: `upstream Said "x": timeout`}, nil},
+		// A provider's own 400 whose message has net/http's shape: the
+		// provider's message, not a transport failure, and a
+		// transport-only Retryable must not retry it under replay.
+		{"a provider's message", &openresponses.Error{StatusCode: http.StatusBadRequest, Type: openresponses.ErrorTypeInvalidRequest, Message: `Get "https://example.com/a.png": not found`}, everything},
 	}
-	model, err := replay.NewModel(orig, replay.Strict())
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, _, err = rerun(t, fixtureConfig(model), "first")
-	var f *replay.Failure
-	if !errors.As(err, &f) || f.Cause != nil || f.Err.HTTPStatus() != http.StatusServiceUnavailable {
-		t.Errorf("err = %v (%T cause), want the 503 with no cause", err, causeOf(f))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := fixtureConfig(&flaky{fail: map[int]bool{1: true}, err: tt.said})
+			cfg.Retry = agentturn.Retry{MaxAttempts: 2, Backoff: func(int, error) time.Duration { return 0 }, Retryable: tt.retryable}
+			orig, _, err := rerun(t, cfg, "first")
+			if err != nil {
+				t.Fatal(err)
+			}
+			model, err := replay.NewModel(orig, replay.Strict())
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Replayed under a transport-only Retryable: the served
+			// failure carries no transport cause, so it is not retried
+			// and the run ends on it.
+			replayed := fixtureConfig(model)
+			replayed.Retry = agentturn.Retry{MaxAttempts: 2, Backoff: func(int, error) time.Duration { return 0 }, Retryable: transportOnly}
+			_, _, err = rerun(t, replayed, "first")
+			var f *replay.Failure
+			if !errors.As(err, &f) || f.Cause != nil || f.Err.HTTPStatus() != tt.said.StatusCode {
+				t.Errorf("err = %v (%T cause), want the %d with no cause", err, causeOf(f), tt.said.StatusCode)
+			}
+		})
 	}
 }
 
