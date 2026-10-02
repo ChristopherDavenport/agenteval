@@ -302,6 +302,21 @@ func TestRunnerResumesAGroup(t *testing.T) {
 		t.Errorf("names = %v", got)
 	}
 
+	// Before the resume the group cannot be finished, and JudgeGroups
+	// says so rather than leaving it out: the two judged members carry
+	// the missing sample on Err, and nothing is written.
+	if partial, err := r.JudgeGroups(ctx, suite); err != nil {
+		t.Fatal(err)
+	} else if len(partial.Results) != 2 || calls.Load() != 0 {
+		t.Errorf("an incomplete group: %d results, %d group calls", len(partial.Results), calls.Load())
+	} else {
+		for _, res := range partial.Results {
+			if res.Err == nil || !strings.Contains(res.Err.Error(), "sample 3 has no judged run in the store") || len(res.Scores) != len(r.Judges) {
+				t.Errorf("incomplete group member %d: err %v, %d scores", res.Sample, res.Err, len(res.Scores))
+			}
+		}
+	}
+
 	// The resume: sample 3 alone, as the task's Meta names it, under the
 	// same runner. It is numbered as it says and is not a group of one.
 	r.Config = basicConfig
@@ -374,10 +389,15 @@ func TestRunnerResumesAGroup(t *testing.T) {
 	if len(again.Results) != 0 || calls.Load() != 1 {
 		t.Errorf("a second JudgeGroups: %d results, %d group calls", len(again.Results), calls.Load())
 	}
-	// A group with a sample still missing is left out.
+	// A task with no run in the store is one result carrying the
+	// error; the finished group is left out.
 	missing := &agenteval.Suite{Name: "s", Tasks: basicSuite(t).Tasks}
-	if report, err := r.JudgeGroups(ctx, missing); err != nil || len(report.Results) != 0 || calls.Load() != 1 {
-		t.Errorf("a suite with an unrun task: %d results, %d group calls, %v", len(report.Results), calls.Load(), err)
+	report, err = r.JudgeGroups(ctx, missing)
+	if err != nil || len(report.Results) != 1 || calls.Load() != 1 {
+		t.Fatalf("a suite with an unrun task: %d results, %d group calls, %v", len(report.Results), calls.Load(), err)
+	}
+	if res := report.Results[0]; res.Task.ID != missing.Tasks[1].ID || res.Err == nil || !strings.Contains(res.Err.Error(), "sample 1, 2, 3 has no judged run in the store") {
+		t.Errorf("unrun task: %s, err %v", res.Task.ID, res.Err)
 	}
 }
 

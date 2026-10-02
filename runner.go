@@ -734,9 +734,14 @@ func (r *Runner) recordGroup(ctx context.Context, task Task, group []Result, jud
 // Target, Reason, Usage and Cost read back from the session, Scores
 // the judges' scores read back followed by the group's, and Err per
 // member; Runs, Resumes and Ends are not read back. A group with a
-// sample that has no such session is left out, as is one already
-// judged by every group judge; a group judge some member already holds
-// an outcome from is not run again, so a judge added since scores the
+// sample that has no such session is not judged, and says so: each
+// member it does have is reported with the missing samples on Err, as
+// Run reports a group it could not judge, and a task with no member at
+// all is one result carrying the error, so a resume that still has
+// samples to run reads which. A group already judged by every group
+// judge is left out, since there is nothing left to do and a second
+// call writes nothing; a group judge some member already holds an
+// outcome from is not run again, so a judge added since scores the
 // groups it has not. A runner that does not sample judges each task's
 // latest session as a group of one.
 //
@@ -770,18 +775,32 @@ func (r *Runner) JudgeGroups(ctx context.Context, suite *Suite) (*Report, error)
 		samples, _ := r.samples(Task{ID: task.ID})
 		group := make([]Result, 0, n)
 		judged := map[string]bool{}
+		var missing []string
 		for _, k := range samples {
 			m, ok := stored[task.ID][k]
 			if !ok {
-				group = nil
-				break
+				missing = append(missing, strconv.Itoa(k))
+				continue
 			}
 			for name := range m.groupJudged {
 				judged[name] = true
 			}
 			group = append(group, m.Result)
 		}
-		if group == nil {
+		if len(missing) > 0 {
+			// The silence #44 was filed about, avoided: a group this
+			// call could not finish is reported, not left out.
+			err := fmt.Errorf("agenteval: task %s: group not judged: sample %s has no judged run in the store", task.ID, strings.Join(missing, ", "))
+			if n == 1 {
+				err = fmt.Errorf("agenteval: task %s: no judged run in the store", task.ID)
+			}
+			if len(group) == 0 {
+				group = append(group, Result{Task: task, Err: err})
+			}
+			for k := range group {
+				group[k].Err = errors.Join(group[k].Err, err)
+			}
+			report.Results = append(report.Results, group...)
 			continue
 		}
 		var pending []GroupJudge

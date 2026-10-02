@@ -42,20 +42,30 @@ versions may break the API.
   the product resuming the same session would not; `ConfigWith`'s
   example passes the options beside `compact.WithOnFold(rec.Fold)`.
   It reads the session through the recorder's store until agentturn
-  releases `Recorder.CompactOptions`, which it then wraps. (#48)
+  releases `Recorder.CompactOptions() []compact.Option`, which it then
+  wraps. (#48)
 
 - `Runner.JudgeGroups(ctx, suite)`, the group step over sessions
   already in the store: per task and sample, the latest session the
   runner's judges scored whose run ended, judged together once every
-  sample has one and recorded as `Run` records a group; groups with a
-  sample missing or already group judged are left out. With it a task
+  sample has one and recorded as `Run` records a group. A group with a
+  sample still missing is reported, not left out: its members carry the
+  missing samples on `Err`, and a task with none is one result carrying
+  the error; a group every group judge has scored is left out, so a
+  second call writes nothing. With it a task
   whose `Meta["sample"]` is set while `Samples` is above one is no
   longer refused: it runs that sample alone, numbered as it says, and
   without a group step, so a killed batch is resumed by rerunning the
-  samples that did not finish and then calling `JudgeGroups`. Each
-  sample's session is named `task#n`, `SampleName`, so a store listing
-  tells the samples apart; a runner that does not sample names the
-  session by the task alone, as before. (#51)
+  samples that did not finish and then calling `JudgeGroups`. (#51)
+
+### Changed
+
+- A sampling runner names each sample's session `task#n`
+  (`SampleName`), where every sample was named by the task ID alone, so
+  a store listing with names tells the samples of a task apart. The
+  name is the `info` entry's and reaches every reader of it, a store
+  listing or an exported document's name included; a runner that does
+  not sample names the session by the task alone, as before. (#51)
 
 ### Fixed
 
@@ -66,7 +76,10 @@ versions may break the API.
   call or output the same way. The output walk took item entries
   alone, so a replayed response was short of such an item, a text-call
   parser's raw item say, and nothing said so, since the filter keeps
-  it out of every request. (#50)
+  it out of every request. The entry is decoded here as agentturn's
+  `Transcript` decodes it, until agentturn releases
+  `session.MarkedItem(*agentsession.CustomEntry) (openresponses.Item, string, bool)`,
+  which replay then calls. (#50)
 
 - A recorded failure of the shape `<Op> "<url>": <rest>`, which
   net/http's client gives every error it returns, is served with a

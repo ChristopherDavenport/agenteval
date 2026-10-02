@@ -428,10 +428,12 @@ type Member struct {
   scores target a run end that is not an error (any end under
   `JudgeFailedRuns`), and once every sample has one runs the group
   judges no member already holds an outcome from, recording the scores
-  as `Run` does. A group with a sample still missing, or judged by
-  every group judge already, is left out, so a second call does
-  nothing. Sessions are read without being held where the store is a
-  `Reader`.
+  as `Run` does. A group with a sample still missing is reported, not
+  left out: its members carry the missing samples on `Err`, as `Run`
+  reports a group it could not judge, and a task with no member is one
+  result carrying the error. A group every group judge has scored is
+  left out, so a second call writes nothing. Sessions are read without
+  being held where the store is a `Reader`.
 - **Errors.** A group judge that errs, or returns a score count other
   than the group's, writes nothing, and the error is on every member's
   result.
