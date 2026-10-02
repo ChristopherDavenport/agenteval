@@ -46,6 +46,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"reflect"
 	"regexp"
@@ -491,12 +492,17 @@ var servedFailure = regexp.MustCompile(`^replay: recorded failure at step \d+ \(
 // and syscall.ECONNRESET, ECONNREFUSED, EPIPE, ETIMEDOUT, ENETUNREACH
 // and EHOSTUNREACH, each served as itself; "no such host", served as
 // a *net.DNSError; and a net/http client timeout, served as a
-// net.Error whose Timeout is true. Each is a net.Error or one of the
-// errors agentturn's DefaultRetryable names. A Retryable that declines
-// every openresponses error before asking about the transport
-// declines it: the record keeps the text alone, and the 503 is what
-// gives it Retry-After. A failed response has no Cause and is served
-// as the error it recorded.
+// net.Error whose Timeout is true. A text of the shape net/http's
+// client gives every error it returns, `<Op> "<url>": <rest>`, is
+// served as a *url.Error with that Op and URL whose Err is the error
+// rest names, or, when rest names none, a net.Error whose Timeout
+// reports whether rest says timeout, as net/http's response-header and
+// TLS-handshake timeouts, which it names only by text, do. Each is a
+// net.Error or one of the errors agentturn's DefaultRetryable names. A
+// Retryable that declines every openresponses error before asking
+// about the transport declines it: the record keeps the text alone,
+// and the 503 is what gives it Retry-After. A failed response has no
+// Cause and is served as the error it recorded.
 type Failure struct {
 	// N is the step, numbered as [Served.N] is, and EntryID the entry
 	// the failure was served from.
@@ -543,9 +549,29 @@ var lookupFailure = regexp.MustCompile(`lookup (\S+?)(?: on (\S+))?: no such hos
 // Timeout ended, after the error it wraps.
 const clientTimeout = "(Client.Timeout exceeded while awaiting headers)"
 
+// urlFailure matches the text of a *url.Error, which net/http's client
+// wraps every error it returns in: `<Op> "<url>": <rest>`, as the whole
+// text or after a colon-separated prefix, the Op a method name and the
+// URL absolute, so a provider's message that quotes a word is not read
+// as one. The rest is the wrapped error's own text.
+var urlFailure = regexp.MustCompile(`(?:^|: )([A-Z][a-z]+) "([a-z][a-z0-9+.-]*://[^"]*)": (.+)$`)
+
 // causeOf returns the transport failure text names, as the whole text
-// or as the last of its colon-separated parts, or nil.
+// or as the last of its colon-separated parts, or nil. A text in
+// net/http's *url.Error form is served as one, with the Op and URL it
+// names, wrapping the error its rest names: one of those below, or,
+// when the rest names none, a net.Error whose Timeout reports whether
+// the rest says timeout, which is how net/http's own response-header
+// and TLS-handshake timeouts, unexported types named only by their
+// text, are told from a cancelled request (#47).
 func causeOf(text string) error {
+	if m := urlFailure.FindStringSubmatch(text); m != nil {
+		err := causeOf(m[3])
+		if err == nil {
+			err = netError{text: m[3], timeout: strings.Contains(strings.ToLower(m[3]), "timeout")}
+		}
+		return &url.Error{Op: m[1], URL: m[2], Err: err}
+	}
 	for _, err := range transportFailures {
 		if t := err.Error(); text == t || strings.HasSuffix(text, ": "+t) {
 			return err
@@ -555,22 +581,26 @@ func causeOf(text string) error {
 		return &net.DNSError{Err: "no such host", Name: m[1], Server: m[2], IsNotFound: true}
 	}
 	if strings.HasSuffix(text, clientTimeout) {
-		return timeoutError(text)
+		return netError{text: text, timeout: true}
 	}
 	return nil
 }
 
-// timeoutError is a net.Error that timed out, for a recorded timeout
-// whose own type the text does not name.
-type timeoutError string
+// netError is a net.Error for a recorded transport failure whose own
+// type the text does not name: net/http's timeouts, and whatever else
+// its client wrapped.
+type netError struct {
+	text    string
+	timeout bool
+}
 
-func (e timeoutError) Error() string { return string(e) }
+func (e netError) Error() string { return e.text }
 
-// Timeout reports true.
-func (timeoutError) Timeout() bool { return true }
+// Timeout reports whether the text says the failure was a timeout.
+func (e netError) Timeout() bool { return e.timeout }
 
-// Temporary reports true, as net/http's own timeout does.
-func (timeoutError) Temporary() bool { return true }
+// Temporary reports what Timeout does, as net/http's own timeouts do.
+func (e netError) Temporary() bool { return e.timeout }
 
 // serveFailure returns the failure recorded as text at step n of entry.
 func serveFailure(n int, entryID, text string) *Failure {

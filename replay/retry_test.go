@@ -71,6 +71,10 @@ func TestStrictReplaysARevisedRetry(t *testing.T) {
 		{"a DNS failure, retried as transport", dnsFailure, transportOnly, "no such host"},
 		{"a dial timeout, retried as transport", fmt.Errorf("dial tcp 10.0.0.1:443: %w", syscall.ETIMEDOUT), transportOnly, syscall.ETIMEDOUT.Error()},
 		{"a client timeout, retried as transport", &url.Error{Op: "Post", URL: endpoint, Err: clientTimedOut{}}, transportOnly, "Client.Timeout exceeded"},
+		// Issue 47: net/http's own timeouts, unexported net.Errors
+		// inside a *url.Error.
+		{"a response header timeout, retried as transport", headerTimeout, transportOnly, "timeout awaiting response headers"},
+		{"a TLS handshake timeout, retried as transport", tlsTimeout, transportOnly, "TLS handshake timeout"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -164,6 +168,22 @@ var (
 	dnsFailure  = &url.Error{Op: "Post", URL: "http://ollama.internal:11434/v1/responses", Err: &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{Err: "no such host", Name: "ollama.internal", IsNotFound: true}}}
 )
 
+// headerTimeout and tlsTimeout are the errors net/http returns when the
+// Transport's ResponseHeaderTimeout or TLSHandshakeTimeout ends a
+// request: an unexported net.Error that timed out, inside a *url.Error.
+var (
+	headerTimeout = &url.Error{Op: "Post", URL: endpoint, Err: httpTimeout("net/http: timeout awaiting response headers")}
+	tlsTimeout    = &url.Error{Op: "Post", URL: "https://ollama.internal/v1/responses", Err: httpTimeout("net/http: TLS handshake timeout")}
+)
+
+// httpTimeout is a net.Error that timed out, with the text net/http
+// gives its own.
+type httpTimeout string
+
+func (e httpTimeout) Error() string { return string(e) }
+func (httpTimeout) Timeout() bool   { return true }
+func (httpTimeout) Temporary() bool { return true }
+
 // clientTimedOut is the error net/http's Client wraps when its Timeout
 // ends a request.
 type clientTimedOut struct{}
@@ -243,23 +263,41 @@ func TestCompactWhereTheRecordingFailed(t *testing.T) {
 
 // Issue 36: a served failure names the transport failure its text
 // names by type, so a Retryable reading the type decides as it did.
+// Issue 47: one net/http wrapped as a *url.Error is served as one, with
+// the URL, so a timeout net/http names only by text is still a net.Error
+// that timed out, and DefaultRetryable retries the cause alone.
 func TestAFailureNamesItsCause(t *testing.T) {
+	// urlError reports whether err unwraps to a *url.Error naming the
+	// endpoint, whose Timeout reports timeout.
+	urlError := func(err error, at string, timeout bool) bool {
+		var ue *url.Error
+		var ne net.Error
+		return errors.As(err, &ue) && ue.Op == "Post" && ue.URL == at && errors.As(err, &ne) && ne.Timeout() == timeout
+	}
 	tests := []struct {
 		name  string
 		err   error
 		check func(error) bool
 	}{
 		{"a read timeout", readTimeout, func(err error) bool {
-			var ne net.Error
-			return errors.Is(err, os.ErrDeadlineExceeded) && errors.As(err, &ne) && ne.Timeout()
+			return errors.Is(err, os.ErrDeadlineExceeded) && urlError(err, endpoint, true)
 		}},
 		{"a DNS failure", dnsFailure, func(err error) bool {
 			var de *net.DNSError
-			return errors.As(err, &de) && de.Name == "ollama.internal" && de.IsNotFound
+			return errors.As(err, &de) && de.Name == "ollama.internal" && de.IsNotFound && urlError(err, "http://ollama.internal:11434/v1/responses", false)
 		}},
 		{"a client timeout", &url.Error{Op: "Post", URL: endpoint, Err: clientTimedOut{}}, func(err error) bool {
-			var ne net.Error
-			return errors.As(err, &ne) && ne.Timeout()
+			return urlError(err, endpoint, true)
+		}},
+		{"a response header timeout", headerTimeout, func(err error) bool {
+			var ue *url.Error
+			return urlError(err, endpoint, true) && errors.As(err, &ue) && ue.Err.Error() == "net/http: timeout awaiting response headers"
+		}},
+		{"a TLS handshake timeout", tlsTimeout, func(err error) bool {
+			return urlError(err, "https://ollama.internal/v1/responses", true)
+		}},
+		{"a refused dial", &url.Error{Op: "Post", URL: endpoint, Err: &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}}, func(err error) bool {
+			return errors.Is(err, syscall.ECONNREFUSED) && urlError(err, endpoint, false)
 		}},
 		{"a context deadline", fmt.Errorf("stream: %w", context.DeadlineExceeded), func(err error) bool {
 			return errors.Is(err, context.DeadlineExceeded)
@@ -285,7 +323,33 @@ func TestAFailureNamesItsCause(t *testing.T) {
 			if !errors.As(err, &f) || f.Cause == nil || !tt.check(err) {
 				t.Errorf("err = %v (%T cause), want a failure whose cause is the recorded one", err, causeOf(f))
 			}
+			// The cause alone is one agentturn's default policy retries,
+			// as it retried the live error.
+			if f != nil && f.Cause != nil && !agentturn.DefaultRetryable(f.Cause) {
+				t.Errorf("DefaultRetryable(%v) = false", f.Cause)
+			}
 		})
+	}
+}
+
+// Issue 47: a provider's message shaped like a *url.Error's text is not
+// one, and names no cause.
+func TestAQuotedMessageIsNotAURLError(t *testing.T) {
+	said := &openresponses.Error{StatusCode: http.StatusServiceUnavailable, Type: openresponses.ErrorTypeServerError, Message: `upstream Said "x": timeout`}
+	cfg := fixtureConfig(&flaky{fail: map[int]bool{1: true}, err: said})
+	cfg.Retry = agentturn.Retry{MaxAttempts: 2, Backoff: func(int, error) time.Duration { return 0 }}
+	orig, _, err := rerun(t, cfg, "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, err := replay.NewModel(orig, replay.Strict())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = rerun(t, fixtureConfig(model), "first")
+	var f *replay.Failure
+	if !errors.As(err, &f) || f.Cause != nil || f.Err.HTTPStatus() != http.StatusServiceUnavailable {
+		t.Errorf("err = %v (%T cause), want the 503 with no cause", err, causeOf(f))
 	}
 }
 
