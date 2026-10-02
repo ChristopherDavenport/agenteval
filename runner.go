@@ -422,18 +422,40 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task, sample in
 		if score.Judge == "" {
 			score.Judge = j.Name()
 		}
-		entry, err := newOutcome(score, res.Target, task.ID, sample)
+		scored, err := r.recordScore(ctx, s.ID(), res.Target, task.ID, sample, score)
 		if err != nil {
-			res.Err = errors.Join(res.Err, fmt.Errorf("agenteval: task %s: judge %s: %w", task.ID, j.Name(), err))
-			continue
-		}
-		if _, err := r.Store.Append(ctx, s.ID(), entry); err != nil {
 			res.Err = errors.Join(res.Err, fmt.Errorf("agenteval: task %s: record %s: %w", task.ID, j.Name(), err))
-			continue
 		}
-		res.Scores = append(res.Scores, score)
+		if scored {
+			res.Scores = append(res.Scores, score)
+		}
 	}
 	return res
+}
+
+// recordScore appends a score to the session of the run it judges as an
+// outcome entry and, when the judge ran in a session of its own, a
+// judged_by link to that session naming the same target, so a reader of
+// the judged session finds its judges without knowing any judge's
+// private details, and a subagent's or a fork's session, which names
+// the same parent, is not taken for one. scored reports whether the
+// outcome was written, which the score is counted by; a link that could
+// not be written is the error of a score that stands.
+func (r *Runner) recordScore(ctx context.Context, sessionID, target, task string, sample int, score Score) (scored bool, err error) {
+	entry, err := newOutcome(score, target, task, sample)
+	if err != nil {
+		return false, err
+	}
+	if _, err := r.Store.Append(ctx, sessionID, entry); err != nil {
+		return false, err
+	}
+	if score.Session == "" {
+		return true, nil
+	}
+	if _, err := r.Store.Append(ctx, sessionID, agentsession.NewJudgedByLink(score.Session, target)); err != nil {
+		return true, fmt.Errorf("link judge session %s: %w", score.Session, err)
+	}
+	return true, nil
 }
 
 // config returns the configuration under test for a task and what
@@ -719,15 +741,13 @@ func (r *Runner) recordGroup(ctx context.Context, task Task, group []Result, jud
 			if score.Judge == "" {
 				score.Judge = j.Name()
 			}
-			entry, err := newOutcome(score, res.Target, task.ID, res.Sample)
-			if err == nil {
-				_, err = r.Store.Append(ctx, res.SessionID, entry)
-			}
+			scored, err := r.recordScore(ctx, res.SessionID, res.Target, task.ID, res.Sample, score)
 			if err != nil {
 				res.Err = errors.Join(res.Err, fmt.Errorf("agenteval: task %s: group judge %s: %w", task.ID, j.Name(), err))
-				continue
 			}
-			res.Scores = append(res.Scores, score)
+			if scored {
+				res.Scores = append(res.Scores, score)
+			}
 		}
 	}
 }

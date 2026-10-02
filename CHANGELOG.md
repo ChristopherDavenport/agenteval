@@ -9,6 +9,16 @@ versions may break the API.
 
 ### Added
 
+- `judged_by` links. For every score whose judge ran in a session of
+  its own, a rubric judge say, the runner writes a link of that relation
+  into the judged session, naming the judge's session and the target the
+  outcome names, as RFC 0001 0.11 defines it, for a score of `Run`
+  and of `JudgeGroups` alike. `Session.Judges` lists a run's judges; the
+  `parent_session` of a judge's session says no more than a subagent's
+  and a fork's do. A deterministic judge has no session and writes no
+  link. A link that cannot be written is an error on the result of a
+  score that stands. (agentsession#145)
+
 - `replay.From(entryID)` and `replay.AfterBase()`. `From` serves only
   the steps after the named entry on the path, for `NewModel` and
   `Tools` alike; `AfterBase` is `From` over the session header's

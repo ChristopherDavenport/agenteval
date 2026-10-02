@@ -319,9 +319,14 @@ the two can name different winners; the report documents its rule.
 
 The rubric judge's session names the judged session as its
 `parent_session`, so a store lists a run's judgements by filter, and
-the outcome's `details.session` points the other way. The format's
-`link` relations are a closed set with nothing meaning "judged by", so
-no link entry is written.
+the outcome's `details.session` points the other way. A subagent's and
+a fork's session name the same parent, so the header cannot say which
+a child is. RFC 0001 0.11 adds the `judged_by` link relation for it,
+and the runner writes one into the judged session for every score whose
+judge ran in a session of its own, naming that session and the target
+the outcome names, so `Session.Judges` lists a run's judges and a
+judge's own session needs no filter. A deterministic judge has no
+session and writes no link.
 
 ### `judge`
 
