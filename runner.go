@@ -959,6 +959,10 @@ func (r *Runner) storedMembers(ctx context.Context, suite *Suite) (map[string]ma
 // ended. It reports false for a session that was not judged or whose
 // run did not end.
 func (r *Runner) storedMember(s *agentsession.Session, task Task, sample int) (storedMember, bool) {
+	// A judge and a group judge sharing a name cannot be told apart in
+	// the record, which labels an outcome by name alone; the outcome
+	// is read as the group judge's, and the member is then short a
+	// score. Give them different names.
 	judges := map[string]bool{}
 	for _, j := range r.Judges {
 		judges[j.Name()] = true
