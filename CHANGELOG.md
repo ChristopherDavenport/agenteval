@@ -5,6 +5,24 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+### Dependencies
+
+- agentsession v0.0.20 to v0.0.27, agenttool v0.0.15 to v0.0.23,
+  agentturn and its `session` module v0.0.16 to v0.0.29, and
+  openresponses v0.0.14 to v0.0.15, in the root module and in
+  `harbor`. No API of this module changes with them. agentsession
+  v0.0.27 is format 0.13, so the runner records `agentsession/0.13`,
+  appending an outcome raises a session it judges to 0.13, and
+  agentsession v0.0.26 and earlier refuse those files. 0.13 defines
+  redacted sessions: `Render`, and so the rubric judge, now shows the
+  judge model the `redacted` and `redacted_entries` members that
+  ATIF steps of a redacted session carry, and the root's
+  `redacted_from`. The fixtures under `testdata/sessions` are
+  re-recorded in that format; they now carry agentturn's
+  `latency_ms` on responses and `prefix_hash` on failed folds.
+
 ## v0.0.10 - 2026-10-02
 
 ### Added
