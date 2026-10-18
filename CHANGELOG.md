@@ -10,7 +10,7 @@ versions may break the API.
 ### Dependencies
 
 - agentsession v0.0.20 to v0.0.27, agenttool v0.0.15 to v0.0.23,
-  agentturn and its `session` module v0.0.16 to v0.0.29, and
+  agentturn and its `session` module v0.0.16 to v0.0.30, and
   openresponses v0.0.14 to v0.0.15, in the root module and in
   `harbor`. No API of this module changes with them. agentsession
   v0.0.27 is format 0.13, so the runner records `agentsession/0.13`,
@@ -22,6 +22,10 @@ versions may break the API.
   `redacted_from`. The fixtures under `testdata/sessions` are
   re-recorded in that format; they now carry agentturn's
   `latency_ms` on responses and `prefix_hash` on failed folds.
+  agentturn v0.0.30 (from v0.0.29) clears an entry's `redacted`
+  member when the recorder copies an entry it read (a callee link
+  copied onto another branch, the env a child is written with), so a
+  redacted session it resumes takes its run as native entries.
 
 ## v0.0.10 - 2026-10-02
 

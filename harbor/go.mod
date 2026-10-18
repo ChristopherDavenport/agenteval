@@ -10,8 +10,8 @@ require (
 
 require (
 	github.com/ChristopherDavenport/agenttool v0.0.23 // indirect
-	github.com/ChristopherDavenport/agentturn v0.0.29 // indirect
-	github.com/ChristopherDavenport/agentturn/session v0.0.29 // indirect
+	github.com/ChristopherDavenport/agentturn v0.0.30 // indirect
+	github.com/ChristopherDavenport/agentturn/session v0.0.30 // indirect
 	github.com/ChristopherDavenport/openresponses v0.0.15 // indirect
 )
 

@@ -4,9 +4,9 @@ github.com/ChristopherDavenport/agentsession v0.0.27 h1:ESCFMOPl93lwIf0dCUQpgtRq
 github.com/ChristopherDavenport/agentsession v0.0.27/go.mod h1:lZf8gypPbx95D867i491HRT0OXyX6B8S5wM8zS4YzOA=
 github.com/ChristopherDavenport/agenttool v0.0.23 h1:B2EOGLzCKVNyreMyVN/mmBvUDcn2yxqE+eFk80Zf9yE=
 github.com/ChristopherDavenport/agenttool v0.0.23/go.mod h1:G9b+XRWx2+fQJGhGLXzcoRLNb5EVLTRJY71++GzTia0=
-github.com/ChristopherDavenport/agentturn v0.0.29 h1:h8N9ZptevxRquzmYDycdaioa7Dtzf5FMtAIfjtWRj2A=
-github.com/ChristopherDavenport/agentturn v0.0.29/go.mod h1:a14LBYiFAWIk34qWjsBGZl/TBMfvkaYl8/9QwSN/KlY=
-github.com/ChristopherDavenport/agentturn/session v0.0.29 h1:KfjmudPOcRK6mjX69cqSuxFgMyG/xPlKYXdmoTB0A5A=
-github.com/ChristopherDavenport/agentturn/session v0.0.29/go.mod h1:ub+51hzTfQpKKUU7uEgTIGNnFGCVaWUF54Zrm/PknJ4=
+github.com/ChristopherDavenport/agentturn v0.0.30 h1:NOu34YDwGFnHLjlVAS9+x1q8ihXyMbHhIP1ZnracwSE=
+github.com/ChristopherDavenport/agentturn v0.0.30/go.mod h1:zNTFM54M7TOw+yG4tY03NyaAUlGucYuoVQvw3ANvS2o=
+github.com/ChristopherDavenport/agentturn/session v0.0.30 h1:4blMYSexs9i38mOPiUwUWPEL+Fqj0m7Y7Pgcgh20FxA=
+github.com/ChristopherDavenport/agentturn/session v0.0.30/go.mod h1:wu8TlYS0BnAwauKKQqkE2Bl9ACVeAdzfkEkDemWLjvY=
 github.com/ChristopherDavenport/openresponses v0.0.15 h1:QdqIanhSw47FAMz4h6+dLL+RuTBPq3LBjcFb4Xb3AZM=
 github.com/ChristopherDavenport/openresponses v0.0.15/go.mod h1:oZT6GCySXw3+vL5LzrJrRI5qagBumqvwDZdp6Kr++a8=
