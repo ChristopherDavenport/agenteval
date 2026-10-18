@@ -5,6 +5,21 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+### Dependencies
+
+- agentsession v0.0.27 to v0.0.28, in the root module and in
+  `harbor`. No API of this module changes with it. A redacted session
+  now hashes independently: a redactor gives each redacted response
+  the `request_hash` of the request the redacted session rebuilds for
+  it, so readers verify and replay it with no exception for redacted
+  entries. Strict replay, which has none, replays a redacted session
+  made under that rule as any other, and a `request_hash` mismatch on
+  a redacted response is a divergence like any other. This answers
+  #61; `Compare`'s first-call hashes need no exception either, since a
+  redacted run's is the hash of its own request.
+
 ## v0.0.11 - 2026-10-18
 
 ### Dependencies

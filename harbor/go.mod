@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/ChristopherDavenport/agenteval v0.0.11
-	github.com/ChristopherDavenport/agentsession v0.0.27
+	github.com/ChristopherDavenport/agentsession v0.0.28
 )
 
 require (
