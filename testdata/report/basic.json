@@ -38,6 +38,7 @@
           "reasoning_tokens": 0
         }
       },
+      "model_calls": 2,
       "cost_usd": 20,
       "scores": [
         {
@@ -107,6 +108,7 @@
           "reasoning_tokens": 0
         }
       },
+      "model_calls": 2,
       "cost_usd": 8,
       "scores": [
         {

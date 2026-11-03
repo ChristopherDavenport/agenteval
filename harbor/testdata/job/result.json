@@ -1,0 +1,8 @@
+{
+  "id": "6f1c2a8e-0b1d-4d7e-9a51-3c2f4e5d6a7b",
+  "started_at": "2026-10-30T10:00:00Z",
+  "updated_at": "2026-10-30T10:20:00Z",
+  "finished_at": "2026-10-30T10:20:00Z",
+  "n_total_trials": 3,
+  "stats": {"n_completed_trials": 3, "n_errored_trials": 1, "n_running_trials": 0, "n_pending_trials": 0, "n_cancelled_trials": 0, "n_retries": 0, "evals": {}}
+}

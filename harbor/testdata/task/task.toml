@@ -1,30 +1,35 @@
-schema_version = "1.4"
-multi_step_reward_strategy = "mean"
+# A task as Harbor 0.25 accepts it (harbor lint), shaped as a
+# Terminal-Bench 2.0 task is: version, a prebuilt docker_image beside
+# the Dockerfile it was built from, memory and storage as sizes, and a
+# network_mode of no-network, public or allowlist.
+version = "1.0"
 
 [task]
-name = "hello-miniturn"
+name = "agenteval/hello-miniturn"
 description = "The smallest task."
 keywords = ["smoke", "hello"]
-authors = ["a", "b"]
+authors = [{ name = "agenteval" }]
 
 [metadata]
 difficulty = "easy"
 category = "smoke"
+tags = ["smoke"]
 
-[environment]
-dockerfile = "environment/Dockerfile"
-network_mode = "none"
-cpus = 2
-memory_mb = 1024
-allowed_hosts = []
-
-[[environment.mcp_servers]]
-name = "fs"
-transport = "stdio"
+[verifier]
+timeout_sec = 60
 
 [agent]
 timeout_sec = 300.5
 
-[verifier]
-timeout_sec = 60
-environment_mode = "shared"
+[environment]
+build_timeout_sec = 600.0
+docker_image = "alpine:3.20"
+cpus = 1
+memory = "2G"
+storage = "10G"
+network_mode = "no-network"
+
+[[environment.mcp_servers]]
+name = "fs"
+transport = "stdio"
+command = "mcp-fs"

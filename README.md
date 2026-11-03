@@ -83,6 +83,29 @@ which sends no request the format hashes.
 canonical arguments, so a whole run replays without touching the
 world.
 
+A fold's own model call is told from a turn's by the mark agentturn's
+`compact` package puts on its context (`compact.IsFold`, agentturn RFC
+0001, The request), not by a request with no tools and no
+instructions. A call a guard refused, recorded as
+`agentturn:model_blocked`, is served again as the guard's refusal with
+the usage the provider billed when the replayed run sends it, and
+passed over when the replayed guard refuses it before the model is
+called. The record says a refused call reached the model only by that
+usage: agentturn writes no flag saying it was sent. So a refusal with
+no usage is taken as a `BeforeModelCall` guard's, and a strict replay
+that sends its request anyway diverges rather than serve a refusal the
+model never made; a model guard's refusal the provider did not bill
+reads the same way until agentturn records whether the call was sent. An output marked `failed` is served as the tool's failure, so
+the replayed record keeps the mark, and a call carrying `copied_from`
+is another session's: it is not indexed, and a call of this session
+is never served its output. A sidecar session names its media by
+`sidecar:` references, which no provider can fetch: `replay.WithBlobs`
+gives the model and the tools the session's blob reader, through
+which what they serve is resolved to data URLs and each request is
+hashed in the form the session recorded it, and `FromSessionMedia`
+resolves a task's prompts the same way; `FromSession` refuses such a
+session with `session.ErrNoBlobReader`.
+
 ```go
 s, _ := store.Open(ctx, id)
 model, _ := replay.NewModel(s, replay.Strict())
@@ -130,15 +153,68 @@ injected item are not settings. A context strategy that folds only
 later in the run shows as `folded`, whether each side's path held a
 compaction entry, when one did and the other did not.
 
+`CompareReports` compares two sets of stored results without running
+anything: a candidate against a baseline a ref pins under
+`eval/baseline/<task>` (RFC 0002, Refs), or two report files. A report
+holds no fact its sessions lack, so each result is read again from its
+store at the session and target it names, with `ResultAt`, which reads
+any stored run back as a `Result`: its task, end, scores, usage and
+cost. Each side's results are resolved to their stores: `OneStore`
+for a report whose sessions share one, as a runner's do, and
+`harbor.Resolver` for an imported job, whose trials each have one.
+`Compare` is two runs followed by the same pairing.
+
 `price` loads a table of rates and prices a run with ATIF's formula,
-and the runner and the exporter take the same hook. A result's `usage`
-and `cost_usd` sum every model call on the run's path, the folds a
-compacting configuration made included, which is what the exported
-document's final metrics sum, so the two agree on the total, a fold
-that failed included: its summary calls are counted by both from
-agentsession v0.0.20 (agentsession#184). A run
-with a call the hook cannot price has no `cost_usd`, where the
-document reports the sum of the calls it could.
+and the runner and the exporter take the same hook. The table is JSON,
+the reader's own configuration: a model name, with or without its
+provider prefix, to rates in US dollars per million tokens.
+
+```json
+{
+  "gpt-5": {"input": 1.25, "cached": 0.125, "output": 10},
+  "claude-sonnet-4-5": {"input": 3, "cached": 0.3, "output": 15,
+    "cache_write": 3.75, "cache_write_by_ttl": {"5m": 3.75, "1h": 6}}
+}
+```
+
+`cached` prices prompt tokens read from the provider's cache.
+`cache_write` and `cache_write_by_ttl` price the tokens written to it,
+which openresponses reports as the
+`openresponses-experimental.cache_write_tokens` extension and its
+split by TTL (docs/extensions.md section 5): each TTL's writes at that
+TTL's rate when the usage splits them, else at `cache_write`, and the
+rest of the uncached prompt at `input`, as the extension's Readers rule
+asks. A table with no write rate prices writes as input. A result's `usage`,
+`model_calls` and `cost_usd` sum every model call on the run's path as
+`agentsession.ModelCalls` reads it, which is what the exported
+document's final metrics sum, so the two agree on the total: every
+response, the folds a compacting configuration made, and every
+`custom` entry whose data carries a `usage`, as many calls as its
+`attempts`, whatever its namespace (RFC 0001, `custom`): a fold that
+failed, a call a model guard refused after the provider billed it
+(`agentturn:model_blocked`), a product's own record. A run with a call
+the hook cannot price has no `cost_usd`, where the document reports
+the sum of the calls it could.
+
+A run that delegated work to subagents costs that work too, as RFC
+0001 (`link`) counts it and ATIF's `total_cost_usd` does: `cost_usd`
+adds each session a `subsession` link on the path names, once, at the
+leaf the call's output names or else the leaf a resume takes, each
+call priced at the model in force in the child, the child's own
+children included. `usage` and `model_calls` stay the path's own, as
+the document's token totals and `total_steps` do, and `subagents`
+holds the children's: how many sessions were counted, their usage,
+calls and cost, which were counted at a resume leaf and at which
+entry, and which could not be read (`kind` `not_found`, `elsewhere`
+for a callee in another system, or `failed`) or priced. A child that
+could not be read, or one with any call the hook cannot price, is left
+out of `cost_usd` rather than guessed at, and named there, so
+`cost_usd` is the whole run's only when `subagents` names neither.
+The children are read from the runner's store, and the document
+agrees with the report when it is exported with `Subsessions`
+resolving there and every child's calls are priced: agentsession's
+export counts the priced calls of a child it could only partly price,
+where this module, as RFC 0001 asks, leaves that child out.
 
 ## Harbor
 
@@ -147,7 +223,67 @@ The `harbor` nested module reads a Harbor task directory as a `Task`
 and a finished trial's `reward.json` or `reward.txt` as scores.
 `Task.Meta` carries `[task]` and `[metadata]` under `task.` and
 `metadata.`, because the second table is free-form and invites the
-first table's words.
+first table's words. Every other table goes into `Task.Setup` under
+its own name, flattened with dots, and nothing here honours it. A
+runner that builds the environment itself reads the keys `harbor.Load`
+lists, as Harbor 0.25's `TaskConfig` defines them: the image or
+Dockerfile, `cpus`, `memory_mb` and `storage_mb` (or the `memory` and
+`storage` sizes Terminal-Bench 2.0 writes), `network_mode` (`no-network`,
+`public` or `allowlist` with `allowed_hosts`), the MCP servers, and
+the agent's and verifier's timeouts. The fixture under
+`harbor/testdata/task` is a task `harbor lint` accepts.
+
+`harbor.ImportJob` reads a finished Harbor job back. For each trial it
+finds the agent's session in the store the agent recorded into under
+the trial's `agent/` directory, the one session there that names no
+parent, writes each of the trial's `verifier_result.rewards` onto it as
+an `outcome`, and returns the job as a `Report`, which `CompareReports`
+compares with another. Harbor leaves two choices open, and this module
+makes them so:
+
+- An imported reward is an outcome of kind `test`, the kind RFC 0001
+  gives a verifier's score, not `eval`, which the runner's judges
+  write: Harbor's reward is its verifier's verdict on the trial.
+  Its `label` is `harbor/<reward key>`, so a reward is never taken
+  for a judge of the same name, its `score` the reward's value, its
+  `pass` a value of at least 1 unless `WithPass` says otherwise, and
+  its `target` the run's last entry. `agenteval.ReadOutcome` reads
+  both kinds.
+- An errored trial with no reward, which Harbor counts as 0, is
+  recorded as that 0, under `harbor/reward`, with no `pass`, which
+  RFC 0001 reads as a verdict, and the exception in the details'
+  `error`, so the session holds what Harbor counted and why.
+  In the `Report` it is unjudged, with the exception on its error, and
+  `ResultAt` reads it back the same way, so the 0 is not read as the
+  verifier failing the agent; a reader that wants Harbor's mean counts
+  it as 0 from the summary's `unjudged`. A trial that errored after
+  its verifier wrote rewards keeps them, and carries the exception.
+
+An import is idempotent: an outcome the session already holds is not
+written again. Running a task, building its environment and running
+its verifier, stays with Harbor, or with a product's Harbor adapter.
+
+## Command
+
+`cmd/agenteval` is a nested module holding a command over what runs
+left behind, in jsonl session stores and Harbor job directories. It
+adds no format: a report is a value over the sessions, and `compare`
+reads the stores again rather than trusting the report files.
+
+```sh
+go install github.com/ChristopherDavenport/agenteval/cmd/agenteval@latest
+agenteval import -out a.json jobs/2026-10-30          # rewards onto each trial's sessions, the job as a report
+agenteval report -store runs -suite smoke eval/baseline/greet SESSION@ENTRY
+agenteval compare -a-job jobs/2026-10-30 -b-store runs a.json b.json
+agenteval export -store runs -price prices.json SESSION@ENTRY
+```
+
+A run is named by a ref the store holds or by `SESSION[@ENTRY]`. A
+job's trials keep their sessions in the store `-sessions` names under
+each trial directory, `agent/sessions` by default. Running a task,
+building its environment and running its verifier, stays with Harbor
+or with the product: a suite needs a Go configuration no generic
+binary has, and Harbor already runs tasks.
 
 ## Design
 

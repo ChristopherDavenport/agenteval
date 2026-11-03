@@ -7,11 +7,190 @@ versions may break the API.
 
 ## Unreleased
 
+### Fixed
+
+- A comparison takes no hold on the sessions it reads. `Compare` read
+  each run's first call through `Store.Open`, which on jsonl and cas
+  takes the session's lock and on RFC 0003's client a writer lease,
+  kept until the store closed. It now reads through
+  `agentsession.Reader`, and a store that can only `Open` is let go of
+  afterwards through `agentsession.Releaser`, as every other read of
+  this package (`JudgeGroups`) now is too. (#64)
+- `Result.Usage` and `CostUSD` count every `custom` entry whose data
+  carries a `usage`, whatever its namespace, as RFC 0001 (`custom`)
+  defines a record of paid calls and the exported document counts it.
+  They counted only `agentturn:compaction_failed`, so a call a model
+  guard refused after the provider billed it, which agentturn v0.0.35
+  records as `agentturn:model_blocked` with its usage, and a product's
+  own paid record, were left out of the report and not of the
+  document. The path is read with `agentsession.ModelCalls`, the
+  reader the export uses, so the two cannot drift again. (#58)
+
+- `FromSession` takes as prompts only the inputs that started the
+  path's runs, as RFC 0001 (`run`, since format 0.17) defines them and
+  `agentsession.PathInputs` reads them: per run whose source is
+  `input`, the user messages before its first response. It took every
+  user message no response produced, so a resume's note, a steer or a
+  delivery drained mid-run, an item copied from another session's
+  conversation (`copied_from`, a child opened with its parent's), a
+  peer's late report (`from_link`) and a message composed from an
+  instruction layer were each sent again as a turn of their own, and a
+  strict replay of the task diverged. Each is now named in
+  `Task.Meta[LeftOutMeta]` as `kind=entry`, and a path with no run
+  entries, whose turns are split at responses, is marked
+  `Meta[InputsMeta] = InputsByResponses`. (#57)
+
+- `price` prices a write to the provider's prompt cache at the write
+  rate, as openresponses docs/extensions.md section 5 asks of a price
+  table that has one: `Rates.CacheWrite`, and `Rates.CacheWriteByTTL`
+  per TTL as the usage keys its split (`"5m"`, `"1h"`), written
+  `cache_write` and `cache_write_by_ttl` in the table's JSON. The
+  writes, `openresponses-experimental.cache_write_tokens` or
+  OpenRouter's unprefixed count, come out of the uncached prompt;
+  each TTL of a split is priced at its own rate, else at
+  `cache_write`, else at `input`. Every write was priced as plain
+  input, so a Claude session writing its one-hour cache cost about
+  38% more than its `cost_usd` said. A table without a write rate
+  prices as before. `Result.Usage` sums the write count. (#68)
+  **Breaking:** `Rates` holds a map, so it is no longer comparable
+  with `==`.
+
+- Replay after the format 0.14 to 0.17 bump (#70). A fold's own call
+  is told from a turn's by `compact.IsFold` on the call's context, the
+  mark agentturn v0.0.35 puts there (agentturn RFC 0001, The request,
+  step 2), and no longer by a request with no tools and no
+  instructions: a fold whose request carries either is served, and a
+  turn sent bare where the recording folded is a divergence.
+  `Model.CreateStream` now reads its context. A call a guard refused,
+  `agentturn:model_blocked`, is a step: served again as the guard's
+  refusal, with the usage the provider billed, when the replayed run
+  sends it, and passed over when the replayed guard refuses it first,
+  as a `BeforeModelCall` guard does; a run with a model guard's
+  refusal did not replay. A refusal the provider did not bill is taken
+  as a `BeforeModelCall` guard's, which never reached the model: a
+  strict replay that sends its request diverges rather than serve it. `replay.Tools` serves an output marked
+  `failed` as the tool's failure, so the replayed record keeps the
+  mark: as the error whose text the loop writes back as the recorded
+  output, and under `Strict` a failed output in another form is
+  refused with `ErrUnverifiable`. It no longer indexes a call or an
+  output carrying `copied_from`, another session's, so a child's own
+  call is not served its parent's output.
+- A sidecar session (format 0.16) replays and becomes a task. Its items
+  name media by `sidecar:` references, which no provider can fetch.
+  `replay.WithBlobs` names the session's blob reader: what the model
+  and the tools serve is resolved to data URLs, and each request is
+  hashed with the session's media named by their references, the
+  form the recorder hashed, so a strict replay verifies. `NewModel`
+  refuses a sidecar session naming blobs without it, with
+  `session.ErrNoBlobReader`, and so does `FromSession`, where it
+  handed out references; `FromSessionMedia` resolves the prompts.
+  (#70)
+
+- `harbor`'s task fixture is one Harbor accepts, shaped as a
+  Terminal-Bench 2.0 task: `version`, `docker_image`, `memory` and
+  `storage` as sizes, and `network_mode = "no-network"`. It set
+  `environment.dockerfile` and `network_mode = "none"`, which Harbor
+  refuses, and was the only guide a product had to the keys. `Load`'s
+  documentation and the README list the `Setup` keys a runner reads
+  for the environment, the agent and the verifier, against Harbor's
+  own schema. (#67)
+
+### Changed
+
+- **Breaking:** a fold's call at a step where the recording made a
+  model call is a divergence in every mode, as `Model.Compact` at such
+  a step already was; a lenient model served the response there as the
+  summary. (#70)
+- **Breaking:** `FromSession` and `FromSessionAt` refuse a sidecar
+  session whose prompts name media by `sidecar:` references, with
+  `session.ErrNoBlobReader`, where they handed the references out for
+  a provider to refuse; `FromSessionMedia` resolves them. (#70)
+- `Result.CostUSD` includes the work the run delegated to subagents,
+  as RFC 0001 (`link`, since format 0.17) counts it and the exported
+  document's `total_cost_usd` does: each session a `subsession` link
+  on the path names, once, over its paths to the leaf each link
+  counts, its own children included, each call priced at the model in
+  force in the child, read with `agentsession.DelegatedWork` from the
+  runner's store. It was the path's alone, so a run that delegated
+  most of its work read as cheap. `Usage` and `ModelCalls` stay the
+  path's own, as the document's token totals and `total_steps` do.
+  A run whose path is priced and whose child is not now has a
+  `cost_usd`, without that child. (#56)
+
+### Added
+
+- `Result.Subagents` (`Delegated`, `UnreadSession`): the delegated
+  sessions counted, their usage, model calls and cost, those counted
+  at a resume leaf because no output named one, with that leaf
+  (`DelegatedLeaf`), and those that could not be read, by kind
+  (`UnreadNotFound`, `UnreadElsewhere`, `UnreadFailed`), or priced,
+  which are named and left out of the cost rather than guessed at.
+  Nil for a run that delegated nothing. (#56)
+- `harbor.ImportJob` reads a finished Harbor job back: each trial's
+  `verifier_result.rewards` is written onto the agent's top-level
+  session in the trial's store as outcomes of kind `test`, labelled
+  `harbor/<reward key>` and targeting the run's last entry, and the
+  job is returned as a `Report`. An errored trial with no reward is
+  recorded as Harbor's 0, with no `pass`, and the exception in the
+  details' new
+  `error` (`OutcomeDetails.Error`), and is unjudged in the report. An
+  import writes an outcome the session holds only once. A task the
+  job ran more than once has its trials numbered as samples, from 1 in
+  trial order. `ReadOutcome`
+  and `ResultAt` read `test` outcomes beside `eval` ones, and leave a
+  score carrying `error` out, on `Err`. The README says why `test` and
+  how errored trials are recorded. (#66)
+- `cmd/agenteval`, a nested module holding the command: `import` writes
+  a Harbor job's rewards onto its trials' sessions and prints the job
+  as a report, `report` reports stored runs named by ref or by
+  `SESSION[@ENTRY]`, `compare` compares two reports, each read again
+  from its store or its Harbor job, and `export` writes a stored run
+  as ATIF. Running tasks stays with Harbor or the product. (#65)
+- `ResultAt` reads a stored run back as a `Result`, with no model or
+  judge called: the task and sample from its task record, the scores
+  from the outcomes targeting the entry, the end, the runs, and usage
+  and cost read as the runner reads them (`WithCost` prices it).
+  `CompareReports` compares two reports' results without running
+  anything, each result read again from the store its side's resolver
+  gives it (`OneStore`, or `harbor.Resolver` for an imported job whose
+  trials each have a store), so a candidate is
+  compared against a baseline a ref pins, or against a report read
+  from a file. A session with no task record, as Harbor's are, takes
+  the task and sample its report names. `Compare` is now two runs
+  followed by the same pairing. (#59)
+- `replay.WithBlobs`, `replay.ResolveMedia`, `replay.KindBlocked` and
+  `FromSessionMedia`. (#70)
+- `Task.Turns` and `Task.Runs`: a run that took several inputs at
+  once, as `Agent.Prompt` with more than one item does, is one run of
+  the task. `FromSession` sets `Turns` for a session holding such a
+  run, which it split into a run per message, and the runner sends
+  each run's items in one prompt. (#57)
+- `LeftOutMeta`, `InputsMeta` and `InputsByResponses`, the `Task.Meta`
+  keys `FromSession` writes for the user messages it leaves out. (#57)
+- `Result.ModelCalls`: how many model calls the run's path paid for,
+  each response's and each paid record's `attempts` among them, which
+  is the exported document's `total_steps`. (#58)
+
 ### Dependencies
 
-- agentsession v0.0.27 to v0.0.28, in the root module and in
-  `harbor`. No API of this module changes with it. A redacted session
-  now hashes independently: a redactor gives each redacted response
+- agentsession v0.0.27 to v0.0.34, agenttool v0.0.23 to v0.0.28,
+  agentturn and its `session` module v0.0.30 to v0.0.35, and
+  openresponses v0.0.15 to v0.0.18, in the root module and in
+  `harbor`. agentsession v0.0.34 is format 0.17, so the runner records
+  `agentsession/0.17`, appending an outcome raises a session it judges
+  to 0.17, and agentsession v0.0.33 and earlier refuse those files.
+  The fixtures under `testdata/sessions` are re-recorded in that
+  format. Since format 0.14 a workspace's `host` and `instance` are
+  fields of `agentsession.Workspace`, no longer among its unknown
+  members, so strict replay's substitution error, which names the
+  members that differ when kind and ref agree, reads them there.
+  openresponses v0.0.18 keeps members it does not define in an `Extra`
+  map on `reasoning`, `usage` and their kin, which makes them no longer
+  comparable with `==`; `DiffSettings` compares the reasoning settings
+  by their JSON, so a member such as an effort extension that differs
+  is a difference. What the new formats change in how this module
+  reads a session is under Fixed and Changed. From agentsession
+  v0.0.28 a redacted session hashes independently: a redactor gives each redacted response
   the `request_hash` of the request the redacted session rebuilds for
   it, so readers verify and replay it with no exception for redacted
   entries. Strict replay, which has none, replays a redacted session

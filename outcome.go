@@ -41,6 +41,11 @@ type OutcomeDetails struct {
 	Reason  string          `json:"reason,omitempty"`
 	Session string          `json:"session,omitempty"`
 	Judge   json.RawMessage `json:"judge,omitempty"`
+	// Error is set on the score a harness gives a run that ended in
+	// error with no verdict, Harbor's 0 for an errored trial: why the
+	// run failed. Such a score is the harness's count, not a judge's
+	// verdict, and a reader leaves the run unjudged.
+	Error string `json:"error,omitempty"`
 }
 
 // NewOutcome builds the outcome entry for a score: kind
@@ -63,10 +68,11 @@ func newOutcome(score Score, target, task string, sample int) (*agentsession.Out
 }
 
 // ReadOutcome reads a score back out of an outcome entry the runner
-// wrote. It reports false for an entry of another kind or one without
-// [OutcomeDetails].
+// wrote, kind eval, or one a verifier's import wrote, kind test, as the
+// harbor module writes a Harbor reward (RFC 0001, outcome). It reports
+// false for an entry of another kind or one without [OutcomeDetails].
 func ReadOutcome(e *agentsession.OutcomeEntry) (Score, OutcomeDetails, bool) {
-	if e.Kind != agentsession.OutcomeEval || len(e.Details) == 0 {
+	if e.Kind != agentsession.OutcomeEval && e.Kind != agentsession.OutcomeTest || len(e.Details) == 0 {
 		return Score{}, OutcomeDetails{}, false
 	}
 	var d OutcomeDetails

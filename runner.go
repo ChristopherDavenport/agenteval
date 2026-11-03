@@ -159,20 +159,34 @@ type Result struct {
 	// input_required without it stopped because there was no Answer,
 	// or it had nothing to say or failed.
 	ResumeBound bool `json:"resume_bound,omitempty"`
-	// Usage is the sum over the model calls on the run's path: every
-	// response, every fold or branch summary that reported usage, and
-	// the summary calls of every fold that failed. It is the path the
-	// exported document's final metrics sum, and the runner prices
-	// each call under the model the exporter does, so with the same
-	// price hook the two agree on the total whenever every call was
-	// priced. A failed fold's calls are in the document's from
-	// agentsession v0.0.20, which counts a custom entry whose data
-	// carries usage (agentsession#184); before it, the document left
-	// them out.
+	// Usage is the sum over the model calls on the run's path, as
+	// agentsession.ModelCalls reads them: every response, every fold
+	// or branch summary that reported usage, and every custom entry
+	// whose data carries a usage, which RFC 0001 (custom) makes a
+	// record of calls the path paid for whatever its namespace: the
+	// summary calls of a fold that failed, a call a model guard
+	// refused after the provider billed it (agentturn:model_blocked),
+	// a product's own. It is the path the exported document's final
+	// metrics sum, and the runner prices each call under the model the
+	// exporter does, so with the same price hook the two agree on the
+	// total whenever every call was priced.
 	Usage openresponses.Usage `json:"usage"`
-	// CostUSD is the run's cost under Runner.Cost, when every call was
-	// priced.
+	// ModelCalls is how many model calls the run's path paid for: each
+	// response's attempts, each fold and branch summary, and each
+	// record of calls that produced no response, as its attempts. It is
+	// the exported document's total_steps.
+	ModelCalls int `json:"model_calls,omitempty"`
+	// CostUSD is the run's cost under Runner.Cost, when every call on
+	// the run's own path was priced, nil otherwise. It includes the
+	// work the run delegated, each subsession counted once, less any
+	// child that could not be read or whose calls were not all priced:
+	// such a child is left out rather than guessed at, and named in
+	// [Delegated.Unread] or [Delegated.Unpriced] on Subagents, which a
+	// reader checks before taking CostUSD as the whole run's.
 	CostUSD *float64 `json:"cost_usd,omitempty"`
+	// Subagents is the work the run's path delegated to subsessions,
+	// nil when it delegated none.
+	Subagents *Delegated `json:"subagents,omitempty"`
 	// Scores are the judges' verdicts, in the runner's judge order. A
 	// judge that failed is missing here and named in Err; a task whose
 	// run failed has none, unless [Runner.JudgeFailedRuns].
@@ -189,6 +203,68 @@ type Result struct {
 	trajectory export.Trajectory
 	judged     bool
 }
+
+// Delegated is the work a run's path delegated to subsessions, as RFC
+// 0001 (link, Cost across sessions) counts it and
+// agentsession.DelegatedWork reads it: each session a subsession link
+// on the path names, once however many links name it, over its paths
+// to the leaf each link counts, its own children included. Peer
+// callees, judges and forks are no delegated work.
+type Delegated struct {
+	// Sessions is how many delegated sessions were read and counted.
+	Sessions int `json:"sessions"`
+	// Usage and ModelCalls are those sessions' model calls, summed as
+	// [Result.Usage] and [Result.ModelCalls] sum the path's. They are
+	// apart from the path's own, as the exported document's token
+	// totals and total_steps are.
+	Usage      openresponses.Usage `json:"usage"`
+	ModelCalls int                 `json:"model_calls,omitempty"`
+	// CostUSD is the cost of the sessions whose every call was priced,
+	// under Runner.Cost; [Result.CostUSD] includes it. Nil when the
+	// runner has no price hook.
+	CostUSD *float64 `json:"cost_usd,omitempty"`
+	// AtResumeLeaf names the sessions counted at the leaf a reader
+	// resuming them takes, since no output named the one the call
+	// ended at, with that leaf, as RFC 0001 (link) asks a reader to
+	// say.
+	AtResumeLeaf []DelegatedLeaf `json:"at_resume_leaf,omitempty"`
+	// Unread names the sessions that could not be read, and why; they
+	// are left out of everything above rather than guessed at.
+	Unread []UnreadSession `json:"unread,omitempty"`
+	// Unpriced names the sessions with a call the price hook could not
+	// price. Their usage is counted; their cost is left out of CostUSD
+	// and [Result.CostUSD] rather than counted in part.
+	Unpriced []string `json:"unpriced,omitempty"`
+}
+
+// UnreadSession is a delegated session a reader could not read: one
+// the store does not hold, one held in another system, or one whose
+// read failed, which Kind says, [UnreadNotFound], [UnreadElsewhere] or
+// [UnreadFailed]; Error is the reader's text.
+type UnreadSession struct {
+	Session string `json:"session"`
+	Kind    string `json:"kind"`
+	Error   string `json:"error"`
+}
+
+// DelegatedLeaf is the entry of a delegated session whose path was
+// counted.
+type DelegatedLeaf struct {
+	Session string `json:"session"`
+	Entry   string `json:"entry"`
+}
+
+// The kinds of [UnreadSession]: why a delegated session was not read.
+const (
+	// UnreadNotFound is a session the store does not hold, or one that
+	// holds no entry by the leaf the parent named.
+	UnreadNotFound = "not_found"
+	// UnreadElsewhere is a callee in another system, its link naming a
+	// URL, whose session the store does not hold.
+	UnreadElsewhere = "elsewhere"
+	// UnreadFailed is a session whose read failed.
+	UnreadFailed = "failed"
+)
 
 // MarshalJSON writes the result with Err as an "error" string.
 func (r Result) MarshalJSON() ([]byte, error) {
@@ -318,7 +394,7 @@ func (r *Runner) samples(task Task) ([]int, error) {
 // runTask runs one task in a fresh session and judges it.
 func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task, sample int) (res Result) {
 	res.Task, res.Sample = task, sample
-	inputs := task.Inputs()
+	inputs := task.Runs()
 	if len(inputs) == 0 {
 		res.Err = fmt.Errorf("agenteval: task %s has nothing to send", task.ID)
 		return res
@@ -368,8 +444,8 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task, sample in
 	a := agentturn.New(cfg, seed...)
 	unsubscribe := rec.Attach(a)
 	failed := false
-	for _, item := range inputs {
-		end, err := a.Prompt(ctx, item)
+	for _, items := range inputs {
+		end, err := a.Prompt(ctx, items...)
 		if end != nil {
 			res.Ends = append(res.Ends, end)
 			res.Runs++
@@ -392,7 +468,8 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task, sample in
 	}
 	unsubscribe()
 	res.Target = s.Leaf()
-	res.Usage, res.CostUSD = r.usage(s, res.Target)
+	m := measure(ctx, r.Store, r.Cost, s, res.Target)
+	res.Usage, res.ModelCalls, res.CostUSD, res.Subagents = m.usage, m.calls, m.cost, m.delegated
 	if res.Target == "" {
 		return res
 	}
@@ -932,7 +1009,7 @@ func (r *Runner) storedMembers(ctx context.Context, suite *Suite) (map[string]ma
 		if _, ok := out[rec.Task][rec.Sample]; ok {
 			continue
 		}
-		m, ok := r.storedMember(s, task, rec.Sample)
+		m, ok := r.storedMember(ctx, s, task, rec.Sample)
 		if !ok {
 			continue
 		}
@@ -949,7 +1026,7 @@ func (r *Runner) storedMembers(ctx context.Context, suite *Suite) (map[string]ma
 // target and the scores, and the entry at the target says how the run
 // ended. It reports false for a session that was not judged or whose
 // run did not end.
-func (r *Runner) storedMember(s *agentsession.Session, task Task, sample int) (storedMember, bool) {
+func (r *Runner) storedMember(ctx context.Context, s *agentsession.Session, task Task, sample int) (storedMember, bool) {
 	// A judge and a group judge sharing a name cannot be told apart in
 	// the record, which labels an outcome by name alone; the outcome
 	// is read as the group judge's, and the member is then short a
@@ -1020,35 +1097,36 @@ func (r *Runner) storedMember(s *agentsession.Session, task Task, sample int) (s
 		return storedMember{}, false
 	}
 	m.trajectory, m.judged = t, true
-	m.Usage, m.CostUSD = r.usage(s, m.Target)
+	cost := measure(ctx, r.Store, r.Cost, s, m.Target)
+	m.Usage, m.ModelCalls, m.CostUSD, m.Subagents = cost.usage, cost.calls, cost.cost, cost.delegated
 	return m, true
 }
 
 // taskRecordOf returns the last task record on the path to the
 // session's leaf: a fork's path holds its base's too.
 func taskRecordOf(s *agentsession.Session) (TaskRecord, bool) {
-	path := s.Path(s.Leaf())
-	for i := len(path) - 1; i >= 0; i-- {
-		c, ok := path[i].(*agentsession.CustomEntry)
-		if !ok || c.NS != TaskNS {
-			continue
-		}
-		var rec TaskRecord
-		if err := json.Unmarshal(c.Data, &rec); err != nil {
-			return TaskRecord{}, false
-		}
-		return rec, true
-	}
-	return TaskRecord{}, false
+	return lastTaskRecord(s.Path(s.Leaf()))
 }
 
 // readSession reads a stored session without holding it where the
-// store can, through agentsession.Reader, and through Open otherwise.
+// store can, through agentsession.Reader, and through Open otherwise,
+// letting the session go afterwards when the store is an
+// agentsession.Releaser: whether a store holds what it opens is the
+// store's policy, and a reader takes no hold it keeps.
 func readSession(ctx context.Context, store agentsession.Store, id string) (*agentsession.Session, error) {
 	if rd, ok := store.(agentsession.Reader); ok {
 		return rd.Read(ctx, id)
 	}
-	return store.Open(ctx, id)
+	s, err := store.Open(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if rel, ok := store.(agentsession.Releaser); ok {
+		if err := rel.Release(id); err != nil {
+			return nil, fmt.Errorf("release %s: %w", id, err)
+		}
+	}
+	return s, nil
 }
 
 // lastEnv returns the env entry in force at the session's leaf, or nil
@@ -1063,74 +1141,130 @@ func lastEnv(s *agentsession.Session) *agentsession.EnvEntry {
 	return nil
 }
 
-// usage sums the usage of the model calls on the path to leaf, the
-// responses and the folds, failed or not, and prices them when the
-// runner can.
-func (r *Runner) usage(s *agentsession.Session, leaf string) (openresponses.Usage, *float64) {
-	var u openresponses.Usage
-	cost, priced := 0.0, r.Cost != nil
-	// The model in force, for a fold or a response that does not name
-	// its own, replayed as the exporter replays it so the two price
-	// every call under the same model.
-	model := ""
-	for _, e := range s.Path(leaf) {
-		var eu *openresponses.Usage
-		m := model
-		switch v := e.(type) {
-		case *agentsession.ConfigEntry:
-			if v.Replace {
-				model = ""
-			}
-			if v.Model != "" {
-				model = v.Model
-			}
-			continue
-		case *agentsession.ResponseEntry:
-			eu = v.Usage
-			if v.Model != "" {
-				m = v.Model
-			}
-		case *agentsession.CompactionEntry:
-			model = v.Config.Model
-			eu, m = v.Usage, v.Config.Model
-		case *agentsession.BranchSummaryEntry:
-			eu = v.Usage
-		case *agentsession.CustomEntry:
-			// A fold that failed still made its summary calls, and
-			// paid for them; the entry holds their usage summed.
-			// It leaves the model in force as it was.
-			if v.NS != session.FailedFoldNS {
-				continue
-			}
-			var f session.FailedFold
-			if json.Unmarshal(v.Data, &f) != nil {
-				continue
-			}
-			eu = f.Usage
-			if f.Model != "" {
-				m = f.Model
-			}
-		default:
+// measured is what a run's path cost: its own model calls and the
+// work it delegated.
+type measured struct {
+	usage     openresponses.Usage
+	calls     int
+	cost      *float64
+	delegated *Delegated
+}
+
+// measure sums the usage of the model calls on the path to leaf, as
+// agentsession.ModelCalls reads them and the exported document counts
+// them: every response, every fold or branch summary that reported
+// usage, and every custom entry whose data carries a usage, a failed
+// fold's and a guard's refusal among them, whatever its namespace. It
+// counts how many calls they were, and prices each under the model
+// that served it, or the one in force, when price is set: the path's
+// cost when every call was priced. To that cost it adds the work the
+// path delegated, read from store, as RFC 0001 (link) counts it, each
+// child's calls priced at the model in force in the child; a child it
+// cannot read or price is named on the result and left out.
+func measure(ctx context.Context, store agentsession.Store, price func(string, openresponses.Usage) (float64, bool), s *agentsession.Session, leaf string) measured {
+	var m measured
+	path := s.Path(leaf)
+	cost, priced := 0.0, price != nil
+	for _, c := range agentsession.ModelCalls(path) {
+		m.calls += c.Calls
+		if c.Usage == nil {
 			continue
 		}
-		if eu == nil {
-			continue
-		}
-		u.InputTokens += eu.InputTokens
-		u.OutputTokens += eu.OutputTokens
-		u.TotalTokens += eu.TotalTokens
-		u.InputTokensDetails.CachedTokens += eu.InputTokensDetails.CachedTokens
-		u.OutputTokensDetails.ReasoningTokens += eu.OutputTokensDetails.ReasoningTokens
+		addUsage(&m.usage, *c.Usage)
 		if priced {
-			usd, ok := r.Cost(m, *eu)
+			usd, ok := price(c.Model, *c.Usage)
 			priced = ok
 			cost += usd
 		}
 	}
+	m.delegated = delegated(ctx, store, price, path)
 	if !priced {
-		return u, nil
+		return m
 	}
-	return u, &cost
+	if m.delegated != nil && m.delegated.CostUSD != nil {
+		cost += *m.delegated.CostUSD
+	}
+	m.cost = &cost
+	return m
+}
+
+// delegated reads the work path delegated, nil when it delegated none.
+func delegated(ctx context.Context, store agentsession.Store, price func(string, openresponses.Usage) (float64, bool), path []agentsession.Entry) *Delegated {
+	resolve := func(id string) (*agentsession.Session, error) {
+		s, err := readSession(ctx, store, id)
+		if errors.Is(err, agentsession.ErrNoSession) {
+			return nil, nil
+		}
+		return s, err
+	}
+	children, unread := agentsession.DelegatedWork(path, resolve)
+	if len(children) == 0 && len(unread) == 0 {
+		return nil
+	}
+	d := &Delegated{}
+	for _, u := range unread {
+		kind := UnreadFailed
+		switch {
+		case errors.Is(u.Err, agentsession.ErrChildElsewhere):
+			kind = UnreadElsewhere
+		case errors.Is(u.Err, agentsession.ErrChildNotFound):
+			kind = UnreadNotFound
+		}
+		d.Unread = append(d.Unread, UnreadSession{Session: u.Session, Kind: kind, Error: u.Err.Error()})
+	}
+	total := 0.0
+	var walk func([]agentsession.Delegated)
+	walk = func(ds []agentsession.Delegated) {
+		for _, child := range ds {
+			d.Sessions++
+			cost, priced := 0.0, price != nil
+			for _, c := range child.Calls {
+				d.ModelCalls += c.Calls
+				if c.Usage == nil {
+					continue
+				}
+				addUsage(&d.Usage, *c.Usage)
+				if priced {
+					usd, ok := price(c.Model, *c.Usage)
+					priced = ok
+					cost += usd
+				}
+			}
+			switch {
+			case priced:
+				total += cost
+			case price != nil:
+				d.Unpriced = append(d.Unpriced, child.Session)
+			}
+			for _, leaf := range child.Leaves {
+				if !leaf.Named {
+					d.AtResumeLeaf = append(d.AtResumeLeaf, DelegatedLeaf{Session: child.Session, Entry: leaf.Entry})
+				}
+			}
+			walk(child.Children)
+		}
+	}
+	walk(children)
+	if price != nil {
+		d.CostUSD = &total
+	}
+	return d
+}
+
+// addUsage adds one call's usage to a sum, the tokens written to the
+// prompt cache among them (openresponses docs/extensions.md section
+// 5), as a count: a split by TTL does not survive a sum over calls that
+// did not all report one, and each call was priced with its own.
+func addUsage(sum *openresponses.Usage, u openresponses.Usage) {
+	sum.InputTokens += u.InputTokens
+	sum.OutputTokens += u.OutputTokens
+	sum.TotalTokens += u.TotalTokens
+	sum.InputTokensDetails.CachedTokens += u.InputTokensDetails.CachedTokens
+	sum.OutputTokensDetails.ReasoningTokens += u.OutputTokensDetails.ReasoningTokens
+	if n, ok := u.InputTokensDetails.CacheWriteTokens(); ok {
+		have, _ := sum.InputTokensDetails.CacheWriteTokens()
+		sum.InputTokensDetails.SetCacheWriteTokens(have + n)
+	}
 }
 
 // trajectoryAt returns the session's trajectory ending at leaf.
