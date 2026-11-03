@@ -286,6 +286,10 @@ func flatten(out map[string]string, prefix string, value any) {
 // judge's score of the same name.
 const LabelPrefix = "harbor/"
 
+// TrialMeta is the Task.Meta key [ImportJob] names a result's trial
+// directory under.
+const TrialMeta = "harbor.trial"
+
 // ResultFile is the result.json Harbor writes for a job and for each of
 // its trials.
 const ResultFile = "result.json"
@@ -334,7 +338,11 @@ type trialResult struct {
 //
 // The report's results, in trial order, are each session read back
 // with agenteval.ResultAt at the target, its Task named by the trial's
-// task_name and its Meta carrying the trial's name under "harbor.trial".
+// task_name and its Meta carrying the trial's directory under
+// [TrialMeta]. A task the job ran more than once, Harbor's n_attempts,
+// is sampled: its trials are its samples, numbered from 1 in trial
+// order on Result.Sample and Meta["sample"], as the runner numbers a
+// task's samples, so two imported jobs pair attempt with attempt.
 // A trial whose session cannot be found or written is reported with
 // the error on Err. ImportJob fails only when the job cannot be read.
 func ImportJob(ctx context.Context, job fs.FS, open func(trial string) (agentsession.Store, error), opts ...Option) (*agenteval.Report, error) {
@@ -355,6 +363,12 @@ func ImportJob(ctx context.Context, job fs.FS, open func(trial string) (agentses
 			report.Suite = "harbor/" + j.ID
 		}
 	}
+	type trial struct {
+		dir    string
+		result trialResult
+	}
+	var trials []trial
+	attempts := map[string]int{}
 	for _, d := range dirs {
 		if !d.IsDir() {
 			continue
@@ -370,7 +384,22 @@ func ImportJob(ctx context.Context, job fs.FS, open func(trial string) (agentses
 		if err := json.Unmarshal(data, &tr); err != nil {
 			return nil, fmt.Errorf("harbor: %s: %w", path.Join(d.Name(), ResultFile), err)
 		}
-		report.Results = append(report.Results, importTrial(ctx, d.Name(), tr, open, o))
+		if tr.TaskName == "" {
+			tr.TaskName = d.Name()
+		}
+		trials = append(trials, trial{d.Name(), tr})
+		attempts[tr.TaskName]++
+	}
+	// A task run more than once, Harbor's n_attempts, is sampled: its
+	// trials are its samples, numbered from 1 in trial order.
+	seen := map[string]int{}
+	for _, t := range trials {
+		sample := 0
+		if attempts[t.result.TaskName] > 1 {
+			seen[t.result.TaskName]++
+			sample = seen[t.result.TaskName]
+		}
+		report.Results = append(report.Results, importTrial(ctx, t.dir, t.result, sample, open, o))
 	}
 	report.ByJudge = agenteval.Summarize(report.Results)
 	return report, nil
@@ -378,12 +407,12 @@ func ImportJob(ctx context.Context, job fs.FS, open func(trial string) (agentses
 
 // importTrial writes one trial's rewards onto its session and reads the
 // session back as a result.
-func importTrial(ctx context.Context, dir string, tr trialResult, open func(string) (agentsession.Store, error), o rewardOptions) agenteval.Result {
-	task := agenteval.Task{ID: tr.TaskName, Meta: map[string]string{"harbor.trial": dir}}
-	if task.ID == "" {
-		task.ID = dir
+func importTrial(ctx context.Context, dir string, tr trialResult, sample int, open func(string) (agentsession.Store, error), o rewardOptions) agenteval.Result {
+	task := agenteval.Task{ID: tr.TaskName, Meta: map[string]string{TrialMeta: dir}}
+	if sample > 0 {
+		task.Meta[agenteval.SampleMeta] = strconv.Itoa(sample)
 	}
-	res := agenteval.Result{Task: task}
+	res := agenteval.Result{Task: task, Sample: sample}
 	fail := func(err error) agenteval.Result {
 		res.Err = errors.Join(res.Err, fmt.Errorf("harbor: trial %s: %w", dir, err))
 		return res
@@ -421,7 +450,7 @@ func importTrial(ctx context.Context, dir string, tr trialResult, open func(stri
 	if err != nil {
 		return fail(err)
 	}
-	read.Task = task
+	read.Task, read.Sample = task, sample
 	read.Err = errors.Join(res.Err, read.Err)
 	if exception != "" {
 		// ResultAt says the same of an errored trial's 0; once is enough.

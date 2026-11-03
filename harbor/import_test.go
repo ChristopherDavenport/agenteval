@@ -3,10 +3,12 @@ package harbor_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"iter"
 	"os"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/ChristopherDavenport/agenteval"
 	"github.com/ChristopherDavenport/agenteval/harbor"
@@ -181,5 +183,43 @@ func TestImportJob(t *testing.T) {
 	}
 	if after := entries(t, store); after != before {
 		t.Errorf("a second import appended %d entries", after-before)
+	}
+}
+
+// A job that ran a task more than once, Harbor's n_attempts, holds one
+// trial per attempt: each is a sample of the task, numbered from 1 in
+// trial order, so two imported jobs pair attempt with attempt rather
+// than every attempt with the first (review of #66).
+func TestImportJobNumbersAttempts(t *testing.T) {
+	ctx := context.Background()
+	store := agentsession.NewMemoryStore()
+	trial := func(task string) []byte {
+		return []byte(`{"task_name":"` + task + `","verifier_result":{"rewards":{"reward":1}}}`)
+	}
+	job := fstest.MapFS{
+		"hello__aaa/result.json": {Data: trial("agenteval/hello")},
+		"hello__bbb/result.json": {Data: trial("agenteval/hello")},
+		"other__ccc/result.json": {Data: trial("agenteval/other")},
+	}
+	sessions := map[string]string{}
+	for _, name := range []string{"hello__aaa", "hello__bbb", "other__ccc"} {
+		sessions[name], _ = trialSession(t, store, name, "done")
+	}
+	open := func(name string) (agentsession.Store, error) {
+		return trialStore{MemoryStore: store, session: sessions[name]}, nil
+	}
+	report, err := harbor.ImportJob(ctx, job, open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, r := range report.Results {
+		if r.Err != nil {
+			t.Errorf("%s: %v", r.Task.Meta["harbor.trial"], r.Err)
+		}
+		got = append(got, fmt.Sprintf("%s#%d(%s)", r.Task.ID, r.Sample, r.Task.Meta[agenteval.SampleMeta]))
+	}
+	if want := "agenteval/hello#1(1) agenteval/hello#2(2) agenteval/other#0()"; strings.Join(got, " ") != want {
+		t.Errorf("results = %s, want %s", strings.Join(got, " "), want)
 	}
 }

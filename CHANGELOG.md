@@ -127,7 +127,9 @@ versions may break the API.
   job is returned as a `Report`. An errored trial with no reward is
   recorded as Harbor's 0 with the exception in the details' new
   `error` (`OutcomeDetails.Error`), and is unjudged in the report. An
-  import writes an outcome the session holds only once. `ReadOutcome`
+  import writes an outcome the session holds only once. A task the
+  job ran more than once has its trials numbered as samples, from 1 in
+  trial order. `ReadOutcome`
   and `ResultAt` read `test` outcomes beside `eval` ones, and leave a
   score carrying `error` out, on `Err`. The README says why `test` and
   how errored trials are recorded. (#66)
