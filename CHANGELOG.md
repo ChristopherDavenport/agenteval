@@ -125,7 +125,8 @@ versions may break the API.
   session in the trial's store as outcomes of kind `test`, labelled
   `harbor/<reward key>` and targeting the run's last entry, and the
   job is returned as a `Report`. An errored trial with no reward is
-  recorded as Harbor's 0 with the exception in the details' new
+  recorded as Harbor's 0, with no `pass`, and the exception in the
+  details' new
   `error` (`OutcomeDetails.Error`), and is unjudged in the report. An
   import writes an outcome the session holds only once. A task the
   job ran more than once has its trials numbered as samples, from 1 in

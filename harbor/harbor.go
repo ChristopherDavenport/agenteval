@@ -328,8 +328,8 @@ type trialResult struct {
 // the run's last entry, the last on the session's path that is not an
 // outcome. Its details are agenteval.OutcomeDetails naming the trial's
 // task. A trial that errored with no rewards, which Harbor counts as 0,
-// is recorded as that 0 under [DefaultLabel], with the exception in the
-// details' error, and is reported unjudged, with the exception on the
+// is recorded as that 0 under [DefaultLabel], with no pass, which RFC
+// 0001 reads as a verdict, and the exception in the details' error, and is reported unjudged, with the exception on the
 // result's Err, so the 0 is not read as the verifier's verdict; one
 // that errored after its verifier wrote rewards keeps the rewards and
 // carries the exception on Err. An outcome the session already holds,
@@ -470,7 +470,7 @@ func rewardOutcomes(tr trialResult, exception, task, target string, o rewardOpti
 			return nil, errors.New("no rewards and no exception")
 		}
 		// Harbor counts an errored trial with no reward as 0.
-		e, err := outcome(DefaultLabel, 0, false, agenteval.OutcomeDetails{Task: task, Reason: "the trial errored and its verifier wrote no reward, which Harbor counts as 0", Error: exception}, target)
+		e, err := outcome(DefaultLabel, 0, nil, agenteval.OutcomeDetails{Task: task, Reason: "the trial errored and its verifier wrote no reward, which Harbor counts as 0", Error: exception}, target)
 		if err != nil {
 			return nil, err
 		}
@@ -488,7 +488,8 @@ func rewardOutcomes(tr trialResult, exception, task, target string, o rewardOpti
 			return nil, fmt.Errorf("reward %s is not a finite number: %s", label, rewards[label])
 		}
 		reason := fmt.Sprintf("the verifier rewarded %s", strconv.FormatFloat(v, 'g', -1, 64))
-		e, err := outcome(label, v, o.pass(label, v), agenteval.OutcomeDetails{Task: task, Reason: reason}, target)
+		pass := o.pass(label, v)
+		e, err := outcome(label, v, &pass, agenteval.OutcomeDetails{Task: task, Reason: reason}, target)
 		if err != nil {
 			return nil, err
 		}
@@ -497,13 +498,17 @@ func rewardOutcomes(tr trialResult, exception, task, target string, o rewardOpti
 	return out, nil
 }
 
-// outcome builds one reward's outcome entry.
-func outcome(label string, v float64, pass bool, d agenteval.OutcomeDetails, target string) (*agentsession.OutcomeEntry, error) {
+// outcome builds one reward's outcome entry, with no pass when pass is
+// nil.
+func outcome(label string, v float64, pass *bool, d agenteval.OutcomeDetails, target string) (*agentsession.OutcomeEntry, error) {
 	details, err := json.Marshal(d)
 	if err != nil {
 		return nil, err
 	}
-	e := agentsession.NewOutcomeEntry(agentsession.OutcomeTest, target).WithScore(v).WithPass(pass).WithLabel(LabelPrefix + label)
+	e := agentsession.NewOutcomeEntry(agentsession.OutcomeTest, target).WithScore(v).WithLabel(LabelPrefix + label)
+	if pass != nil {
+		e = e.WithPass(*pass)
+	}
 	e.Details = details
 	return e, nil
 }
@@ -515,7 +520,8 @@ func holds(s *agentsession.Session, e *agentsession.OutcomeEntry) bool {
 		if !ok || o.Kind != e.Kind || o.Target != e.Target || o.Label != e.Label {
 			continue
 		}
-		if o.Score != nil && *o.Score == *e.Score && o.Pass != nil && *o.Pass == *e.Pass {
+		samePass := o.Pass == nil && e.Pass == nil || o.Pass != nil && e.Pass != nil && *o.Pass == *e.Pass
+		if o.Score != nil && *o.Score == *e.Score && samePass {
 			return true
 		}
 	}

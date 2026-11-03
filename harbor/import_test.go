@@ -162,7 +162,9 @@ func TestImportJob(t *testing.T) {
 		}
 	}
 	errored := outcomes(t, store, trials["broken__i7j8k9l"].session)
-	if len(errored) != 1 || errored[0].Score == nil || *errored[0].Score != 0 || !strings.Contains(string(errored[0].Details), "AgentTimeoutError") {
+	// The 0 is Harbor's count, not a verdict: it carries no pass, which
+	// RFC 0001 reads as the judge's (review of #66).
+	if len(errored) != 1 || errored[0].Score == nil || *errored[0].Score != 0 || errored[0].Pass != nil || !strings.Contains(string(errored[0].Details), "AgentTimeoutError") {
 		t.Errorf("errored trial's outcome = %+v", errored)
 	}
 	var d agenteval.OutcomeDetails

@@ -240,8 +240,9 @@ makes them so:
   its `target` the run's last entry. `agenteval.ReadOutcome` reads
   both kinds.
 - An errored trial with no reward, which Harbor counts as 0, is
-  recorded as that 0, under `harbor/reward`, with the exception in the
-  details' `error`, so the session holds what Harbor counted and why.
+  recorded as that 0, under `harbor/reward`, with no `pass`, which
+  RFC 0001 reads as a verdict, and the exception in the details'
+  `error`, so the session holds what Harbor counted and why.
   In the `Report` it is unjudged, with the exception on its error, and
   `ResultAt` reads it back the same way, so the 0 is not read as the
   verifier failing the agent; a reader that wants Harbor's mean counts
