@@ -138,8 +138,9 @@ versions may break the API.
   `CompareReports` compares two reports' results without running
   anything, each read again from its own store, so a candidate is
   compared against a baseline a ref pins, or against a report read
-  from a file. `Compare` is now two runs followed by the same pairing.
-  (#59)
+  from a file. A session with no task record, as Harbor's are, takes
+  the task and sample its report names. `Compare` is now two runs
+  followed by the same pairing. (#59)
 - `replay.WithBlobs`, `replay.ResolveMedia`, `replay.KindBlocked` and
   `FromSessionMedia`. (#70)
 - `LeftOutMeta`, `InputsMeta` and `InputsByResponses`, the `Task.Meta`

@@ -113,3 +113,48 @@ func TestCompareAgainstAPinnedBaseline(t *testing.T) {
 		t.Errorf("greet config = %+v", gd)
 	}
 }
+
+// storedRun records a run with no task record, as a session another
+// harness wrote, scored value by judge, and returns it as a report's
+// result names it.
+func storedRun(t *testing.T, store agentsession.Store, task string, value float64) agenteval.Result {
+	t.Helper()
+	ctx := context.Background()
+	s, err := store.Create(ctx, agentsession.Header{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, s.ID(), agentsession.NewRunStart("run_"+task, agentsession.SourceInput, "")); err != nil {
+		t.Fatal(err)
+	}
+	target, err := store.Append(ctx, s.ID(), agentsession.NewRunEnd("run_"+task, "done", "", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := agenteval.NewOutcome(agenteval.Score{Judge: "judge", Value: value, Pass: value >= 1}, target, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, s.ID(), out); err != nil {
+		t.Fatal(err)
+	}
+	return agenteval.Result{Task: agenteval.Task{ID: task}, SessionID: s.ID(), Target: target}
+}
+
+// A session with no task record, every one Harbor's import reads, is
+// paired by the task its report names (review of #59).
+func TestCompareReportsWithoutTaskRecords(t *testing.T) {
+	store := newStableStore()
+	a := &agenteval.Report{Suite: "s", Results: []agenteval.Result{storedRun(t, store, "one", 1), storedRun(t, store, "two", 0)}}
+	b := &agenteval.Report{Suite: "s", Results: []agenteval.Result{storedRun(t, store, "one", 0), storedRun(t, store, "two", 1)}}
+	c, err := agenteval.CompareReports(context.Background(), a, b, store, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Pairs) != 2 || c.Pairs[0].Task != "one" || c.Pairs[1].Task != "two" {
+		t.Fatalf("pairs = %+v", c.Pairs)
+	}
+	if c.Pairs[0].Delta["judge"] != -1 || c.Pairs[1].Delta["judge"] != 1 || c.Pairs[1].B.SessionID != b.Results[1].SessionID {
+		t.Errorf("deltas %v %v, b of two %s", c.Pairs[0].Delta, c.Pairs[1].Delta, c.Pairs[1].B.SessionID)
+	}
+}

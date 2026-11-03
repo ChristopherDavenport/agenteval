@@ -380,7 +380,8 @@ func lastTaskRecord(path []agentsession.Entry) (TaskRecord, bool) {
 // its sessions lack, so each result is read again from its store, a's
 // from storeA and b's from storeB, at the session and target it names,
 // with [ResultAt]: the scores, the run's end and the settings compared
-// are the record's, not the report's. A result whose session cannot be
+// are the record's, not the report's. A session with no task record
+// takes the task and sample its report names. A result whose session cannot be
 // read fails the comparison. The suite and manifest are a's.
 func CompareReports(ctx context.Context, a, b *Report, storeA, storeB agentsession.Store, opts ...ReadOption) (*Comparison, error) {
 	if a == nil || b == nil || storeA == nil || storeB == nil {
@@ -409,9 +410,14 @@ func storedReport(ctx context.Context, r *Report, store agentsession.Store, opts
 			return nil, fmt.Errorf("task %s: %w", was.Task.ID, err)
 		}
 		// The task as the report names it, the record holding only its
-		// ID, setup and metadata.
-		if res.Task.ID == was.Task.ID {
+		// ID, setup and metadata; and the report's task and sample for a
+		// session that holds no record, as no session another harness
+		// wrote does, Harbor's among them.
+		switch res.Task.ID {
+		case was.Task.ID:
 			res.Task = was.Task
+		case "":
+			res.Task, res.Sample = was.Task, was.Sample
 		}
 		out.Results[i] = *res
 	}
