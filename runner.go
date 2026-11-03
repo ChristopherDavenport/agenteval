@@ -1078,19 +1078,7 @@ func (r *Runner) storedMember(ctx context.Context, s *agentsession.Session, task
 // taskRecordOf returns the last task record on the path to the
 // session's leaf: a fork's path holds its base's too.
 func taskRecordOf(s *agentsession.Session) (TaskRecord, bool) {
-	path := s.Path(s.Leaf())
-	for i := len(path) - 1; i >= 0; i-- {
-		c, ok := path[i].(*agentsession.CustomEntry)
-		if !ok || c.NS != TaskNS {
-			continue
-		}
-		var rec TaskRecord
-		if err := json.Unmarshal(c.Data, &rec); err != nil {
-			return TaskRecord{}, false
-		}
-		return rec, true
-	}
-	return TaskRecord{}, false
+	return lastTaskRecord(s.Path(s.Leaf()))
 }
 
 // readSession reads a stored session without holding it where the

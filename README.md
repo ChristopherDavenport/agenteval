@@ -148,6 +148,14 @@ injected item are not settings. A context strategy that folds only
 later in the run shows as `folded`, whether each side's path held a
 compaction entry, when one did and the other did not.
 
+`CompareReports` compares two sets of stored results without running
+anything: a candidate against a baseline a ref pins under
+`eval/baseline/<task>` (RFC 0002, Refs), or two report files. A report
+holds no fact its sessions lack, so each result is read again from its
+store at the session and target it names, with `ResultAt`, which reads
+any stored run back as a `Result`: its task, end, scores, usage and
+cost. `Compare` is two runs followed by the same pairing.
+
 `price` loads a table of rates and prices a run with ATIF's formula,
 and the runner and the exporter take the same hook. The table is JSON,
 the reader's own configuration: a model name, with or without its

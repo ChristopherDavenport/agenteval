@@ -109,6 +109,15 @@ versions may break the API.
   at a resume leaf because no output named one, and those that could
   not be read or priced, which are named and left out of the cost
   rather than guessed at. Nil for a run that delegated nothing. (#56)
+- `ResultAt` reads a stored run back as a `Result`, with no model or
+  judge called: the task and sample from its task record, the scores
+  from the outcomes targeting the entry, the end, the runs, and usage
+  and cost read as the runner reads them (`WithCost` prices it).
+  `CompareReports` compares two reports' results without running
+  anything, each read again from its own store, so a candidate is
+  compared against a baseline a ref pins, or against a report read
+  from a file. `Compare` is now two runs followed by the same pairing.
+  (#59)
 - `replay.WithBlobs`, `replay.ResolveMedia`, `replay.KindBlocked` and
   `FromSessionMedia`. (#70)
 - `LeftOutMeta`, `InputsMeta` and `InputsByResponses`, the `Task.Meta`

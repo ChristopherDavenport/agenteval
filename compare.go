@@ -10,6 +10,7 @@ import (
 	"sort"
 
 	"github.com/ChristopherDavenport/agentsession"
+	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/agentturn/session"
 	"github.com/ChristopherDavenport/openresponses"
 )
@@ -163,7 +164,13 @@ func Compare(ctx context.Context, suite *Suite, a, b *Runner) (*Comparison, erro
 	if err != nil {
 		return nil, fmt.Errorf("agenteval: compare: b: %w", err)
 	}
-	c := &Comparison{Suite: suite.Name, Manifest: suite.Manifest, A: ra, B: rb, Uniform: true, ByJudge: map[string]float64{}}
+	return compareResults(ctx, ra, rb, a.Store, b.Store), nil
+}
+
+// compareResults pairs two reports' results by task and sample, the
+// settings each run started under read from its session in its store.
+func compareResults(ctx context.Context, ra, rb *Report, storeA, storeB agentsession.Store) *Comparison {
+	c := &Comparison{Suite: ra.Suite, Manifest: ra.Manifest, A: ra, B: rb, Uniform: true, ByJudge: map[string]float64{}}
 	counts := map[string]int{}
 	var foldedA, foldedB, failedA, failedB bool
 	for i := range ra.Results {
@@ -196,8 +203,8 @@ func Compare(ctx context.Context, suite *Suite, a, b *Runner) (*Comparison, erro
 				counts[s.Judge]++
 			}
 		}
-		sa, ha, fa, errA := initialCall(ctx, a.Store, pa)
-		sb, hb, fb, errB := initialCall(ctx, b.Store, pb)
+		sa, ha, fa, errA := initialCall(ctx, storeA, pa)
+		sb, hb, fb, errB := initialCall(ctx, storeB, pb)
 		if errA == nil && errB == nil {
 			pair.Config = DiffSettings(sa, sb)
 			// The same settings and a different request is something
@@ -236,7 +243,170 @@ func Compare(ctx context.Context, suite *Suite, a, b *Runner) (*Comparison, erro
 	if failedA != failedB {
 		c.Config.FoldFailed = &Change{A: failedA, B: failedB}
 	}
-	return c, nil
+	return c
+}
+
+// ReadOption configures how [ResultAt] and [CompareReports] read a
+// stored run back.
+type ReadOption func(*readOptions)
+
+type readOptions struct {
+	cost func(string, openresponses.Usage) (float64, bool)
+}
+
+// WithCost prices each model call of a stored run, as [Runner.Cost]
+// prices a run, so the result carries its cost.
+func WithCost(fn func(model string, usage openresponses.Usage) (float64, bool)) ReadOption {
+	return func(o *readOptions) { o.cost = fn }
+}
+
+// ResultAt reads a run back from its session in store as a result,
+// with no model and no judge called: an evaluation baseline a ref pins
+// (RFC 0002, Refs), a run another process made, the results a report
+// file names. target is the entry the run's scores target, as
+// [Result.Target] is; "" takes the target of the last outcome on the
+// path to the session's leaf, else its last run end. The task and
+// sample are the path's last agenteval:task record, the scores the
+// outcomes targeting target that the runner wrote for that task and
+// sample (RFC 0001, outcome), in the order they were appended, the
+// reason the last run end on the path to target, Runs and Resumes the
+// runs there, and Usage, ModelCalls, CostUSD and Subagents are read as
+// the runner reads them, so a stored result and the one Run returned
+// agree. The result counts as judged when it holds a score, or when
+// its run ended other than in error, as the runner judges it under the
+// default; Ends and Err are not read back. The session is read without
+// a hold where the store can.
+func ResultAt(ctx context.Context, store agentsession.Store, sessionID, target string, opts ...ReadOption) (*Result, error) {
+	var o readOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	s, err := readSession(ctx, store, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("agenteval: session %s: %w", sessionID, err)
+	}
+	if target == "" {
+		target = storedTarget(s)
+	}
+	path := s.Path(target)
+	if path == nil {
+		return nil, fmt.Errorf("agenteval: session %s: %w: %s", sessionID, agentsession.ErrNoEntry, target)
+	}
+	res := &Result{SessionID: s.ID(), Target: target}
+	rec, hasRecord := lastTaskRecord(path)
+	if hasRecord {
+		res.Task = Task{ID: rec.Task, Setup: rec.Setup, Meta: rec.Meta}
+		if rec.Sample > 0 {
+			res.Sample = rec.Sample
+			res.Task = withSample(res.Task, rec.Sample)
+		}
+	}
+	ended := false
+	for _, run := range agentsession.Runs(path) {
+		res.Runs++
+		if run.Start.Source == agentsession.SourceResume {
+			res.Resumes++
+		}
+		if run.End != nil {
+			res.Reason, ended = agentturn.Reason(run.End.Reason), true
+		}
+	}
+	for _, e := range s.Entries() {
+		out, ok := e.(*agentsession.OutcomeEntry)
+		if !ok || out.Target != target {
+			continue
+		}
+		score, d, ok := ReadOutcome(out)
+		if !ok || hasRecord && (d.Task != rec.Task || d.Sample != rec.Sample) {
+			continue
+		}
+		res.Scores = append(res.Scores, score)
+	}
+	res.judged = len(res.Scores) > 0 || ended && res.Reason != agentturn.ReasonError
+	m := measure(ctx, store, o.cost, s, target)
+	res.Usage, res.ModelCalls, res.CostUSD, res.Subagents = m.usage, m.calls, m.cost, m.delegated
+	return res, nil
+}
+
+// storedTarget is the entry a stored run's scores target: the target of
+// the last outcome on the path to the leaf, else the last run end
+// there, else the leaf.
+func storedTarget(s *agentsession.Session) string {
+	path := s.Path(s.Leaf())
+	for i := len(path) - 1; i >= 0; i-- {
+		if out, ok := path[i].(*agentsession.OutcomeEntry); ok && out.Kind == agentsession.OutcomeEval {
+			return out.Target
+		}
+	}
+	for i := len(path) - 1; i >= 0; i-- {
+		if run, ok := path[i].(*agentsession.RunEntry); ok && run.IsEnd() {
+			return run.ID
+		}
+	}
+	return s.Leaf()
+}
+
+// lastTaskRecord returns the last task record on a path: a fork's path
+// holds its base's too.
+func lastTaskRecord(path []agentsession.Entry) (TaskRecord, bool) {
+	for i := len(path) - 1; i >= 0; i-- {
+		c, ok := path[i].(*agentsession.CustomEntry)
+		if !ok || c.NS != TaskNS {
+			continue
+		}
+		var rec TaskRecord
+		if err := json.Unmarshal(c.Data, &rec); err != nil {
+			return TaskRecord{}, false
+		}
+		return rec, true
+	}
+	return TaskRecord{}, false
+}
+
+// CompareReports compares two sets of stored results, paired by task
+// and sample as [Compare] pairs them, without running anything: a
+// candidate against a baseline a ref pins, two reports read from
+// files, a Harbor job imported against another. A report holds no fact
+// its sessions lack, so each result is read again from its store, a's
+// from storeA and b's from storeB, at the session and target it names,
+// with [ResultAt]: the scores, the run's end and the settings compared
+// are the record's, not the report's. A result whose session cannot be
+// read fails the comparison. The suite and manifest are a's.
+func CompareReports(ctx context.Context, a, b *Report, storeA, storeB agentsession.Store, opts ...ReadOption) (*Comparison, error) {
+	if a == nil || b == nil || storeA == nil || storeB == nil {
+		return nil, errors.New("agenteval: compare reports needs two reports and their stores")
+	}
+	ra, err := storedReport(ctx, a, storeA, opts)
+	if err != nil {
+		return nil, fmt.Errorf("agenteval: compare: a: %w", err)
+	}
+	rb, err := storedReport(ctx, b, storeB, opts)
+	if err != nil {
+		return nil, fmt.Errorf("agenteval: compare: b: %w", err)
+	}
+	return compareResults(ctx, ra, rb, storeA, storeB), nil
+}
+
+// storedReport is r with each result read again from store.
+func storedReport(ctx context.Context, r *Report, store agentsession.Store, opts []ReadOption) (*Report, error) {
+	out := &Report{Suite: r.Suite, Manifest: r.Manifest, Results: make([]Result, len(r.Results))}
+	for i, was := range r.Results {
+		if was.SessionID == "" {
+			return nil, fmt.Errorf("task %s: no session", was.Task.ID)
+		}
+		res, err := ResultAt(ctx, store, was.SessionID, was.Target, opts...)
+		if err != nil {
+			return nil, fmt.Errorf("task %s: %w", was.Task.ID, err)
+		}
+		// The task as the report names it, the record holding only its
+		// ID, setup and metadata.
+		if res.Task.ID == was.Task.ID {
+			res.Task = was.Task
+		}
+		out.Results[i] = *res
+	}
+	out.ByJudge = Summarize(out.Results)
+	return out, nil
 }
 
 // initialCall replays the settings the result's first model call was
