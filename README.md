@@ -131,14 +131,17 @@ later in the run shows as `folded`, whether each side's path held a
 compaction entry, when one did and the other did not.
 
 `price` loads a table of rates and prices a run with ATIF's formula,
-and the runner and the exporter take the same hook. A result's `usage`
-and `cost_usd` sum every model call on the run's path, the folds a
-compacting configuration made included, which is what the exported
-document's final metrics sum, so the two agree on the total, a fold
-that failed included: its summary calls are counted by both from
-agentsession v0.0.20 (agentsession#184). A run
-with a call the hook cannot price has no `cost_usd`, where the
-document reports the sum of the calls it could.
+and the runner and the exporter take the same hook. A result's `usage`,
+`model_calls` and `cost_usd` sum every model call on the run's path as
+`agentsession.ModelCalls` reads it, which is what the exported
+document's final metrics sum, so the two agree on the total: every
+response, the folds a compacting configuration made, and every
+`custom` entry whose data carries a `usage`, as many calls as its
+`attempts`, whatever its namespace (RFC 0001, `custom`): a fold that
+failed, a call a model guard refused after the provider billed it
+(`agentturn:model_blocked`), a product's own record. A run with a call
+the hook cannot price has no `cost_usd`, where the document reports
+the sum of the calls it could.
 
 ## Harbor
 

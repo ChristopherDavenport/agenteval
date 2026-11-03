@@ -7,6 +7,31 @@ versions may break the API.
 
 ## Unreleased
 
+### Fixed
+
+- A comparison takes no hold on the sessions it reads. `Compare` read
+  each run's first call through `Store.Open`, which on jsonl and cas
+  takes the session's lock and on RFC 0003's client a writer lease,
+  kept until the store closed. It now reads through
+  `agentsession.Reader`, and a store that can only `Open` is let go of
+  afterwards through `agentsession.Releaser`, as every other read of
+  this package (`JudgeGroups`) now is too. (#64)
+- `Result.Usage` and `CostUSD` count every `custom` entry whose data
+  carries a `usage`, whatever its namespace, as RFC 0001 (`custom`)
+  defines a record of paid calls and the exported document counts it.
+  They counted only `agentturn:compaction_failed`, so a call a model
+  guard refused after the provider billed it, which agentturn v0.0.35
+  records as `agentturn:model_blocked` with its usage, and a product's
+  own paid record, were left out of the report and not of the
+  document. The path is read with `agentsession.ModelCalls`, the
+  reader the export uses, so the two cannot drift again. (#58)
+
+### Added
+
+- `Result.ModelCalls`: how many model calls the run's path paid for,
+  each response's and each paid record's `attempts` among them, which
+  is the exported document's `total_steps`. (#58)
+
 ### Dependencies
 
 - agentsession v0.0.27 to v0.0.34, agenttool v0.0.23 to v0.0.28,

@@ -249,7 +249,7 @@ func initialCall(ctx context.Context, store agentsession.Store, res *Result) (ag
 	if res.SessionID == "" {
 		return agentsession.Settings{}, "", folds{}, errors.New("agenteval: no session")
 	}
-	s, err := store.Open(ctx, res.SessionID)
+	s, err := readSession(ctx, store, res.SessionID)
 	if err != nil {
 		return agentsession.Settings{}, "", folds{}, err
 	}

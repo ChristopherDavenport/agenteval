@@ -159,17 +159,23 @@ type Result struct {
 	// input_required without it stopped because there was no Answer,
 	// or it had nothing to say or failed.
 	ResumeBound bool `json:"resume_bound,omitempty"`
-	// Usage is the sum over the model calls on the run's path: every
-	// response, every fold or branch summary that reported usage, and
-	// the summary calls of every fold that failed. It is the path the
-	// exported document's final metrics sum, and the runner prices
-	// each call under the model the exporter does, so with the same
-	// price hook the two agree on the total whenever every call was
-	// priced. A failed fold's calls are in the document's from
-	// agentsession v0.0.20, which counts a custom entry whose data
-	// carries usage (agentsession#184); before it, the document left
-	// them out.
+	// Usage is the sum over the model calls on the run's path, as
+	// agentsession.ModelCalls reads them: every response, every fold
+	// or branch summary that reported usage, and every custom entry
+	// whose data carries a usage, which RFC 0001 (custom) makes a
+	// record of calls the path paid for whatever its namespace: the
+	// summary calls of a fold that failed, a call a model guard
+	// refused after the provider billed it (agentturn:model_blocked),
+	// a product's own. It is the path the exported document's final
+	// metrics sum, and the runner prices each call under the model the
+	// exporter does, so with the same price hook the two agree on the
+	// total whenever every call was priced.
 	Usage openresponses.Usage `json:"usage"`
+	// ModelCalls is how many model calls the run's path paid for: each
+	// response's attempts, each fold and branch summary, and each
+	// record of calls that produced no response, as its attempts. It is
+	// the exported document's total_steps.
+	ModelCalls int `json:"model_calls,omitempty"`
 	// CostUSD is the run's cost under Runner.Cost, when every call was
 	// priced.
 	CostUSD *float64 `json:"cost_usd,omitempty"`
@@ -392,7 +398,7 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task, sample in
 	}
 	unsubscribe()
 	res.Target = s.Leaf()
-	res.Usage, res.CostUSD = r.usage(s, res.Target)
+	res.Usage, res.ModelCalls, res.CostUSD = r.usage(s, res.Target)
 	if res.Target == "" {
 		return res
 	}
@@ -1020,7 +1026,7 @@ func (r *Runner) storedMember(s *agentsession.Session, task Task, sample int) (s
 		return storedMember{}, false
 	}
 	m.trajectory, m.judged = t, true
-	m.Usage, m.CostUSD = r.usage(s, m.Target)
+	m.Usage, m.ModelCalls, m.CostUSD = r.usage(s, m.Target)
 	return m, true
 }
 
@@ -1043,12 +1049,24 @@ func taskRecordOf(s *agentsession.Session) (TaskRecord, bool) {
 }
 
 // readSession reads a stored session without holding it where the
-// store can, through agentsession.Reader, and through Open otherwise.
+// store can, through agentsession.Reader, and through Open otherwise,
+// letting the session go afterwards when the store is an
+// agentsession.Releaser: whether a store holds what it opens is the
+// store's policy, and a reader takes no hold it keeps.
 func readSession(ctx context.Context, store agentsession.Store, id string) (*agentsession.Session, error) {
 	if rd, ok := store.(agentsession.Reader); ok {
 		return rd.Read(ctx, id)
 	}
-	return store.Open(ctx, id)
+	s, err := store.Open(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if rel, ok := store.(agentsession.Releaser); ok {
+		if err := rel.Release(id); err != nil {
+			return nil, fmt.Errorf("release %s: %w", id, err)
+		}
+	}
+	return s, nil
 }
 
 // lastEnv returns the env entry in force at the session's leaf, or nil
@@ -1063,74 +1081,42 @@ func lastEnv(s *agentsession.Session) *agentsession.EnvEntry {
 	return nil
 }
 
-// usage sums the usage of the model calls on the path to leaf, the
-// responses and the folds, failed or not, and prices them when the
-// runner can.
-func (r *Runner) usage(s *agentsession.Session, leaf string) (openresponses.Usage, *float64) {
+// usage sums the usage of the model calls on the path to leaf, as
+// agentsession.ModelCalls reads them and the exported document counts
+// them: every response, every fold or branch summary that reported
+// usage, and every custom entry whose data carries a usage, a failed
+// fold's and a guard's refusal among them, whatever its namespace. It
+// returns how many calls they were, and prices each under the model
+// that served it, or the one in force, when the runner can.
+func (r *Runner) usage(s *agentsession.Session, leaf string) (openresponses.Usage, int, *float64) {
 	var u openresponses.Usage
+	calls := 0
 	cost, priced := 0.0, r.Cost != nil
-	// The model in force, for a fold or a response that does not name
-	// its own, replayed as the exporter replays it so the two price
-	// every call under the same model.
-	model := ""
-	for _, e := range s.Path(leaf) {
-		var eu *openresponses.Usage
-		m := model
-		switch v := e.(type) {
-		case *agentsession.ConfigEntry:
-			if v.Replace {
-				model = ""
-			}
-			if v.Model != "" {
-				model = v.Model
-			}
-			continue
-		case *agentsession.ResponseEntry:
-			eu = v.Usage
-			if v.Model != "" {
-				m = v.Model
-			}
-		case *agentsession.CompactionEntry:
-			model = v.Config.Model
-			eu, m = v.Usage, v.Config.Model
-		case *agentsession.BranchSummaryEntry:
-			eu = v.Usage
-		case *agentsession.CustomEntry:
-			// A fold that failed still made its summary calls, and
-			// paid for them; the entry holds their usage summed.
-			// It leaves the model in force as it was.
-			if v.NS != session.FailedFoldNS {
-				continue
-			}
-			var f session.FailedFold
-			if json.Unmarshal(v.Data, &f) != nil {
-				continue
-			}
-			eu = f.Usage
-			if f.Model != "" {
-				m = f.Model
-			}
-		default:
+	for _, c := range agentsession.ModelCalls(s.Path(leaf)) {
+		calls += c.Calls
+		if c.Usage == nil {
 			continue
 		}
-		if eu == nil {
-			continue
-		}
-		u.InputTokens += eu.InputTokens
-		u.OutputTokens += eu.OutputTokens
-		u.TotalTokens += eu.TotalTokens
-		u.InputTokensDetails.CachedTokens += eu.InputTokensDetails.CachedTokens
-		u.OutputTokensDetails.ReasoningTokens += eu.OutputTokensDetails.ReasoningTokens
+		addUsage(&u, *c.Usage)
 		if priced {
-			usd, ok := r.Cost(m, *eu)
+			usd, ok := r.Cost(c.Model, *c.Usage)
 			priced = ok
 			cost += usd
 		}
 	}
 	if !priced {
-		return u, nil
+		return u, calls, nil
 	}
-	return u, &cost
+	return u, calls, &cost
+}
+
+// addUsage adds one call's usage to a sum.
+func addUsage(sum *openresponses.Usage, u openresponses.Usage) {
+	sum.InputTokens += u.InputTokens
+	sum.OutputTokens += u.OutputTokens
+	sum.TotalTokens += u.TotalTokens
+	sum.InputTokensDetails.CachedTokens += u.InputTokensDetails.CachedTokens
+	sum.OutputTokensDetails.ReasoningTokens += u.OutputTokensDetails.ReasoningTokens
 }
 
 // trajectoryAt returns the session's trajectory ending at leaf.
