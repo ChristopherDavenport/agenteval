@@ -208,7 +208,15 @@ The `harbor` nested module reads a Harbor task directory as a `Task`
 and a finished trial's `reward.json` or `reward.txt` as scores.
 `Task.Meta` carries `[task]` and `[metadata]` under `task.` and
 `metadata.`, because the second table is free-form and invites the
-first table's words.
+first table's words. Every other table goes into `Task.Setup` under
+its own name, flattened with dots, and nothing here honours it. A
+runner that builds the environment itself reads the keys `harbor.Load`
+lists, as Harbor 0.25's `TaskConfig` defines them: the image or
+Dockerfile, `cpus`, `memory_mb` and `storage_mb` (or the `memory` and
+`storage` sizes Terminal-Bench 2.0 writes), `network_mode` (`no-network`,
+`public` or `allowlist` with `allowed_hosts`), the MCP servers, and
+the agent's and verifier's timeouts. The fixture under
+`harbor/testdata/task` is a task `harbor lint` accepts.
 
 ## Design
 

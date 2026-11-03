@@ -96,7 +96,9 @@ func TestLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if task.ID != "hello-miniturn" {
+	// The fixture is a task Harbor 0.25's lint accepts, shaped as a
+	// Terminal-Bench 2.0 task is (#67).
+	if task.ID != "agenteval/hello-miniturn" {
 		t.Errorf("id = %q", task.ID)
 	}
 	if !strings.HasPrefix(task.Instruction, "# Hello") || !strings.HasSuffix(task.Instruction, "`hello`.") {
@@ -106,12 +108,13 @@ func TestLoad(t *testing.T) {
 		t.Errorf("task carries prompts or expect: %+v", task)
 	}
 	wantMeta := map[string]string{
-		"task.name":           "hello-miniturn",
+		"task.name":           "agenteval/hello-miniturn",
 		"task.description":    "The smallest task.",
 		"task.keywords":       `["smoke","hello"]`,
-		"task.authors":        `["a","b"]`,
+		"task.authors":        `[{"name":"agenteval"}]`,
 		"metadata.difficulty": "easy",
 		"metadata.category":   "smoke",
+		"metadata.tags":       `["smoke"]`,
 	}
 	for k, v := range wantMeta {
 		if task.Meta[k] != v {
@@ -122,17 +125,16 @@ func TestLoad(t *testing.T) {
 		t.Errorf("meta = %v", task.Meta)
 	}
 	wantSetup := map[string]string{
-		"schema_version":             "1.4",
-		"multi_step_reward_strategy": "mean",
-		"environment.dockerfile":     "environment/Dockerfile",
-		"environment.network_mode":   "none",
-		"environment.cpus":           "2",
-		"environment.memory_mb":      "1024",
-		"environment.allowed_hosts":  "[]",
-		"environment.mcp_servers":    `[{"name":"fs","transport":"stdio"}]`,
-		"agent.timeout_sec":          "300.5",
-		"verifier.timeout_sec":       "60",
-		"verifier.environment_mode":  "shared",
+		"version":                       "1.0",
+		"environment.build_timeout_sec": "600",
+		"environment.docker_image":      "alpine:3.20",
+		"environment.cpus":              "1",
+		"environment.memory":            "2G",
+		"environment.storage":           "10G",
+		"environment.network_mode":      "no-network",
+		"environment.mcp_servers":       `[{"command":"mcp-fs","name":"fs","transport":"stdio"}]`,
+		"agent.timeout_sec":             "300.5",
+		"verifier.timeout_sec":          "60",
 	}
 	for k, v := range wantSetup {
 		if task.Setup[k] != v {

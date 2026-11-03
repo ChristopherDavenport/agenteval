@@ -84,6 +84,15 @@ versions may break the API.
   handed out references; `FromSessionMedia` resolves the prompts.
   (#70)
 
+- `harbor`'s task fixture is one Harbor accepts, shaped as a
+  Terminal-Bench 2.0 task: `version`, `docker_image`, `memory` and
+  `storage` as sizes, and `network_mode = "no-network"`. It set
+  `environment.dockerfile` and `network_mode = "none"`, which Harbor
+  refuses, and was the only guide a product had to the keys. `Load`'s
+  documentation and the README list the `Setup` keys a runner reads
+  for the environment, the agent and the verifier, against Harbor's
+  own schema. (#67)
+
 ### Changed
 
 - A fold's call at a step where the recording made a model call is a

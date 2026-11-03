@@ -167,6 +167,28 @@ func score(label string, v float64, file string, o rewardOptions) agenteval.Scor
 // directory. What Setup holds is recorded with the run and honoured
 // by nothing here.
 //
+// A runner that builds the task's environment itself reads these keys
+// of Setup, as Harbor 0.25's TaskConfig defines them (the harbor
+// package's models/task/config.py, which this does not restate):
+//
+//   - the environment: environment.docker_image, else the task's
+//     environment/Dockerfile; environment.cpus, environment.memory_mb
+//     and environment.storage_mb, or the sizes environment.memory and
+//     environment.storage ("2G") that Terminal-Bench 2.0 tasks write
+//     and Harbor converts; environment.gpus; environment.network_mode,
+//     one of no-network, public (the default) and allowlist, with
+//     environment.allowed_hosts for the last; environment.env,
+//     environment.workdir, environment.build_timeout_sec and
+//     environment.mcp_servers, a JSON list of {name, transport,
+//     command or url}.
+//   - the agent: agent.timeout_sec, agent.user, and agent.network_mode
+//     and agent.allowed_hosts overriding the environment's.
+//   - the verifier: verifier.timeout_sec, verifier.env and
+//     verifier.environment_mode, shared or separate.
+//
+// Harbor ignores a key it does not define, and harbor lint reports it:
+// environment.dockerfile is not one, nor is a network_mode of none.
+//
 // Harbor validates [task].name as org/name, so the ID of every real
 // Harbor task holds a slash: a product that writes one file per task
 // ID wants to know that before it tries.
