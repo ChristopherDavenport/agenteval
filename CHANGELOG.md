@@ -26,8 +26,27 @@ versions may break the API.
   document. The path is read with `agentsession.ModelCalls`, the
   reader the export uses, so the two cannot drift again. (#58)
 
+### Changed
+
+- `Result.CostUSD` includes the work the run delegated to subagents,
+  as RFC 0001 (`link`, since format 0.17) counts it and the exported
+  document's `total_cost_usd` does: each session a `subsession` link
+  on the path names, once, over its paths to the leaf each link
+  counts, its own children included, each call priced at the model in
+  force in the child, read with `agentsession.DelegatedWork` from the
+  runner's store. It was the path's alone, so a run that delegated
+  most of its work read as cheap. `Usage` and `ModelCalls` stay the
+  path's own, as the document's token totals and `total_steps` do.
+  A run whose path is priced and whose child is not now has a
+  `cost_usd`, without that child. (#56)
+
 ### Added
 
+- `Result.Subagents` (`Delegated`, `UnreadSession`): the delegated
+  sessions counted, their usage, model calls and cost, those counted
+  at a resume leaf because no output named one, and those that could
+  not be read or priced, which are named and left out of the cost
+  rather than guessed at. Nil for a run that delegated nothing. (#56)
 - `Result.ModelCalls`: how many model calls the run's path paid for,
   each response's and each paid record's `attempts` among them, which
   is the exported document's `total_steps`. (#58)

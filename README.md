@@ -143,6 +143,19 @@ failed, a call a model guard refused after the provider billed it
 the hook cannot price has no `cost_usd`, where the document reports
 the sum of the calls it could.
 
+A run that delegated work to subagents costs that work too, as RFC
+0001 (`link`) counts it and ATIF's `total_cost_usd` does: `cost_usd`
+adds each session a `subsession` link on the path names, once, at the
+leaf the call's output names or else the leaf a resume takes, each
+call priced at the model in force in the child, the child's own
+children included. `usage` and `model_calls` stay the path's own, as
+the document's token totals and `total_steps` do, and `subagents`
+holds the children's: how many sessions were counted, their usage,
+calls and cost, which were counted at a resume leaf, and which could
+not be read or priced and were left out rather than guessed at. The
+children are read from the runner's store, so the document agrees with
+the report when it is exported with `Subsessions` resolving there.
+
 ## Harbor
 
 The `harbor` nested module reads a Harbor task directory as a `Task`

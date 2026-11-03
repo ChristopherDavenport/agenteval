@@ -179,6 +179,9 @@ type Result struct {
 	// CostUSD is the run's cost under Runner.Cost, when every call was
 	// priced.
 	CostUSD *float64 `json:"cost_usd,omitempty"`
+	// Subagents is the work the run's path delegated to subsessions,
+	// nil when it delegated none.
+	Subagents *Delegated `json:"subagents,omitempty"`
 	// Scores are the judges' verdicts, in the runner's judge order. A
 	// judge that failed is missing here and named in Err; a task whose
 	// run failed has none, unless [Runner.JudgeFailedRuns].
@@ -194,6 +197,46 @@ type Result struct {
 	// for the group step.
 	trajectory export.Trajectory
 	judged     bool
+}
+
+// Delegated is the work a run's path delegated to subsessions, as RFC
+// 0001 (link, Cost across sessions) counts it and
+// agentsession.DelegatedWork reads it: each session a subsession link
+// on the path names, once however many links name it, over its paths
+// to the leaf each link counts, its own children included. Peer
+// callees, judges and forks are no delegated work.
+type Delegated struct {
+	// Sessions is how many delegated sessions were read and counted.
+	Sessions int `json:"sessions"`
+	// Usage and ModelCalls are those sessions' model calls, summed as
+	// [Result.Usage] and [Result.ModelCalls] sum the path's. They are
+	// apart from the path's own, as the exported document's token
+	// totals and total_steps are.
+	Usage      openresponses.Usage `json:"usage"`
+	ModelCalls int                 `json:"model_calls,omitempty"`
+	// CostUSD is the cost of the sessions whose every call was priced,
+	// under Runner.Cost; [Result.CostUSD] includes it. Nil when the
+	// runner has no price hook.
+	CostUSD *float64 `json:"cost_usd,omitempty"`
+	// AtResumeLeaf names the sessions counted at the leaf a reader
+	// resuming them takes, since no output named the one the call
+	// ended at.
+	AtResumeLeaf []string `json:"at_resume_leaf,omitempty"`
+	// Unread names the sessions that could not be read, and why; they
+	// are left out of everything above rather than guessed at.
+	Unread []UnreadSession `json:"unread,omitempty"`
+	// Unpriced names the sessions with a call the price hook could not
+	// price. Their usage is counted; their cost is left out of CostUSD
+	// and [Result.CostUSD] rather than counted in part.
+	Unpriced []string `json:"unpriced,omitempty"`
+}
+
+// UnreadSession is a delegated session a reader could not read: one
+// the store does not hold, one held in another system, or one whose
+// read failed.
+type UnreadSession struct {
+	Session string `json:"session"`
+	Error   string `json:"error"`
 }
 
 // MarshalJSON writes the result with Err as an "error" string.
@@ -398,7 +441,8 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task, sample in
 	}
 	unsubscribe()
 	res.Target = s.Leaf()
-	res.Usage, res.ModelCalls, res.CostUSD = r.usage(s, res.Target)
+	m := measure(ctx, r.Store, r.Cost, s, res.Target)
+	res.Usage, res.ModelCalls, res.CostUSD, res.Subagents = m.usage, m.calls, m.cost, m.delegated
 	if res.Target == "" {
 		return res
 	}
@@ -938,7 +982,7 @@ func (r *Runner) storedMembers(ctx context.Context, suite *Suite) (map[string]ma
 		if _, ok := out[rec.Task][rec.Sample]; ok {
 			continue
 		}
-		m, ok := r.storedMember(s, task, rec.Sample)
+		m, ok := r.storedMember(ctx, s, task, rec.Sample)
 		if !ok {
 			continue
 		}
@@ -955,7 +999,7 @@ func (r *Runner) storedMembers(ctx context.Context, suite *Suite) (map[string]ma
 // target and the scores, and the entry at the target says how the run
 // ended. It reports false for a session that was not judged or whose
 // run did not end.
-func (r *Runner) storedMember(s *agentsession.Session, task Task, sample int) (storedMember, bool) {
+func (r *Runner) storedMember(ctx context.Context, s *agentsession.Session, task Task, sample int) (storedMember, bool) {
 	// A judge and a group judge sharing a name cannot be told apart in
 	// the record, which labels an outcome by name alone; the outcome
 	// is read as the group judge's, and the member is then short a
@@ -1026,7 +1070,8 @@ func (r *Runner) storedMember(s *agentsession.Session, task Task, sample int) (s
 		return storedMember{}, false
 	}
 	m.trajectory, m.judged = t, true
-	m.Usage, m.ModelCalls, m.CostUSD = r.usage(s, m.Target)
+	cost := measure(ctx, r.Store, r.Cost, s, m.Target)
+	m.Usage, m.ModelCalls, m.CostUSD, m.Subagents = cost.usage, cost.calls, cost.cost, cost.delegated
 	return m, true
 }
 
@@ -1081,33 +1126,108 @@ func lastEnv(s *agentsession.Session) *agentsession.EnvEntry {
 	return nil
 }
 
-// usage sums the usage of the model calls on the path to leaf, as
+// measured is what a run's path cost: its own model calls and the
+// work it delegated.
+type measured struct {
+	usage     openresponses.Usage
+	calls     int
+	cost      *float64
+	delegated *Delegated
+}
+
+// measure sums the usage of the model calls on the path to leaf, as
 // agentsession.ModelCalls reads them and the exported document counts
 // them: every response, every fold or branch summary that reported
 // usage, and every custom entry whose data carries a usage, a failed
 // fold's and a guard's refusal among them, whatever its namespace. It
-// returns how many calls they were, and prices each under the model
-// that served it, or the one in force, when the runner can.
-func (r *Runner) usage(s *agentsession.Session, leaf string) (openresponses.Usage, int, *float64) {
-	var u openresponses.Usage
-	calls := 0
-	cost, priced := 0.0, r.Cost != nil
-	for _, c := range agentsession.ModelCalls(s.Path(leaf)) {
-		calls += c.Calls
+// counts how many calls they were, and prices each under the model
+// that served it, or the one in force, when price is set: the path's
+// cost when every call was priced. To that cost it adds the work the
+// path delegated, read from store, as RFC 0001 (link) counts it, each
+// child's calls priced at the model in force in the child; a child it
+// cannot read or price is named on the result and left out.
+func measure(ctx context.Context, store agentsession.Store, price func(string, openresponses.Usage) (float64, bool), s *agentsession.Session, leaf string) measured {
+	var m measured
+	path := s.Path(leaf)
+	cost, priced := 0.0, price != nil
+	for _, c := range agentsession.ModelCalls(path) {
+		m.calls += c.Calls
 		if c.Usage == nil {
 			continue
 		}
-		addUsage(&u, *c.Usage)
+		addUsage(&m.usage, *c.Usage)
 		if priced {
-			usd, ok := r.Cost(c.Model, *c.Usage)
+			usd, ok := price(c.Model, *c.Usage)
 			priced = ok
 			cost += usd
 		}
 	}
+	m.delegated = delegated(ctx, store, price, path)
 	if !priced {
-		return u, calls, nil
+		return m
 	}
-	return u, calls, &cost
+	if m.delegated != nil && m.delegated.CostUSD != nil {
+		cost += *m.delegated.CostUSD
+	}
+	m.cost = &cost
+	return m
+}
+
+// delegated reads the work path delegated, nil when it delegated none.
+func delegated(ctx context.Context, store agentsession.Store, price func(string, openresponses.Usage) (float64, bool), path []agentsession.Entry) *Delegated {
+	resolve := func(id string) (*agentsession.Session, error) {
+		s, err := readSession(ctx, store, id)
+		if errors.Is(err, agentsession.ErrNoSession) {
+			return nil, nil
+		}
+		return s, err
+	}
+	children, unread := agentsession.DelegatedWork(path, resolve)
+	if len(children) == 0 && len(unread) == 0 {
+		return nil
+	}
+	d := &Delegated{}
+	for _, u := range unread {
+		d.Unread = append(d.Unread, UnreadSession{Session: u.Session, Error: u.Err.Error()})
+	}
+	total := 0.0
+	var walk func([]agentsession.Delegated)
+	walk = func(ds []agentsession.Delegated) {
+		for _, child := range ds {
+			d.Sessions++
+			cost, priced := 0.0, price != nil
+			for _, c := range child.Calls {
+				d.ModelCalls += c.Calls
+				if c.Usage == nil {
+					continue
+				}
+				addUsage(&d.Usage, *c.Usage)
+				if priced {
+					usd, ok := price(c.Model, *c.Usage)
+					priced = ok
+					cost += usd
+				}
+			}
+			switch {
+			case priced:
+				total += cost
+			case price != nil:
+				d.Unpriced = append(d.Unpriced, child.Session)
+			}
+			for _, leaf := range child.Leaves {
+				if !leaf.Named {
+					d.AtResumeLeaf = append(d.AtResumeLeaf, child.Session)
+					break
+				}
+			}
+			walk(child.Children)
+		}
+	}
+	walk(children)
+	if price != nil {
+		d.CostUSD = &total
+	}
+	return d
 }
 
 // addUsage adds one call's usage to a sum.
