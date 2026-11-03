@@ -97,10 +97,14 @@ versions may break the API.
 
 ### Changed
 
-- A fold's call at a step where the recording made a model call is a
-  divergence in every mode, as `Model.Compact` at such a step already
-  was; a lenient model served the response there as the summary.
-  (#70)
+- **Breaking:** a fold's call at a step where the recording made a
+  model call is a divergence in every mode, as `Model.Compact` at such
+  a step already was; a lenient model served the response there as the
+  summary. (#70)
+- **Breaking:** `FromSession` and `FromSessionAt` refuse a sidecar
+  session whose prompts name media by `sidecar:` references, with
+  `session.ErrNoBlobReader`, where they handed the references out for
+  a provider to refuse; `FromSessionMedia` resolves them. (#70)
 - `Result.CostUSD` includes the work the run delegated to subagents,
   as RFC 0001 (`link`, since format 0.17) counts it and the exported
   document's `total_cost_usd` does: each session a `subsession` link
