@@ -140,12 +140,20 @@ versions may break the API.
   and `ResultAt` read `test` outcomes beside `eval` ones, and leave a
   score carrying `error` out, on `Err`. The README says why `test` and
   how errored trials are recorded. (#66)
+- `cmd/agenteval`, a nested module holding the command: `import` writes
+  a Harbor job's rewards onto its trials' sessions and prints the job
+  as a report, `report` reports stored runs named by ref or by
+  `SESSION[@ENTRY]`, `compare` compares two reports, each read again
+  from its store or its Harbor job, and `export` writes a stored run
+  as ATIF. Running tasks stays with Harbor or the product. (#65)
 - `ResultAt` reads a stored run back as a `Result`, with no model or
   judge called: the task and sample from its task record, the scores
   from the outcomes targeting the entry, the end, the runs, and usage
   and cost read as the runner reads them (`WithCost` prices it).
   `CompareReports` compares two reports' results without running
-  anything, each read again from its own store, so a candidate is
+  anything, each result read again from the store its side's resolver
+  gives it (`OneStore`, or `harbor.Resolver` for an imported job whose
+  trials each have a store), so a candidate is
   compared against a baseline a ref pins, or against a report read
   from a file. A session with no task record, as Harbor's are, takes
   the task and sample its report names. `Compare` is now two runs

@@ -164,12 +164,13 @@ func Compare(ctx context.Context, suite *Suite, a, b *Runner) (*Comparison, erro
 	if err != nil {
 		return nil, fmt.Errorf("agenteval: compare: b: %w", err)
 	}
-	return compareResults(ctx, ra, rb, a.Store, b.Store), nil
+	return compareResults(ctx, ra, rb, func(*Result) agentsession.Store { return a.Store }, func(*Result) agentsession.Store { return b.Store }), nil
 }
 
 // compareResults pairs two reports' results by task and sample, the
-// settings each run started under read from its session in its store.
-func compareResults(ctx context.Context, ra, rb *Report, storeA, storeB agentsession.Store) *Comparison {
+// settings each run started under read from its session in the store
+// storeA or storeB gives for it.
+func compareResults(ctx context.Context, ra, rb *Report, storeA, storeB func(*Result) agentsession.Store) *Comparison {
 	c := &Comparison{Suite: ra.Suite, Manifest: ra.Manifest, A: ra, B: rb, Uniform: true, ByJudge: map[string]float64{}}
 	counts := map[string]int{}
 	var foldedA, foldedB, failedA, failedB bool
@@ -203,8 +204,8 @@ func compareResults(ctx context.Context, ra, rb *Report, storeA, storeB agentses
 				counts[s.Judge]++
 			}
 		}
-		sa, ha, fa, errA := initialCall(ctx, storeA, pa)
-		sb, hb, fb, errB := initialCall(ctx, storeB, pb)
+		sa, ha, fa, errA := initialCall(ctx, storeA(pa), pa)
+		sb, hb, fb, errB := initialCall(ctx, storeB(pb), pb)
 		if errA == nil && errB == nil {
 			pair.Config = DiffSettings(sa, sb)
 			// The same settings and a different request is something
@@ -377,38 +378,64 @@ func lastTaskRecord(path []agentsession.Entry) (TaskRecord, bool) {
 // and sample as [Compare] pairs them, without running anything: a
 // candidate against a baseline a ref pins, two reports read from
 // files, a Harbor job imported against another. A report holds no fact
-// its sessions lack, so each result is read again from its store, a's
-// from storeA and b's from storeB, at the session and target it names,
+// its sessions lack, so each result is read again from its store, the
+// one resolveA gives for a's result and resolveB for b's: [OneStore]
+// for a report whose sessions share a store, as a runner's do, and
+// harbor.Resolver for an imported job, whose trials each have one. Each
+// is read at the session and target the result names,
 // with [ResultAt]: the scores, the run's end and the settings compared
 // are the record's, not the report's. A session with no task record
 // takes the task and sample its report names. A result whose session cannot be
 // read fails the comparison. The suite and manifest are a's.
-func CompareReports(ctx context.Context, a, b *Report, storeA, storeB agentsession.Store, opts ...ReadOption) (*Comparison, error) {
-	if a == nil || b == nil || storeA == nil || storeB == nil {
+func CompareReports(ctx context.Context, a, b *Report, resolveA, resolveB func(Result) (agentsession.Store, error), opts ...ReadOption) (*Comparison, error) {
+	if a == nil || b == nil || resolveA == nil || resolveB == nil {
 		return nil, errors.New("agenteval: compare reports needs two reports and their stores")
 	}
-	ra, err := storedReport(ctx, a, storeA, opts)
+	ra, storesA, err := storedReport(ctx, a, resolveA, opts)
 	if err != nil {
 		return nil, fmt.Errorf("agenteval: compare: a: %w", err)
 	}
-	rb, err := storedReport(ctx, b, storeB, opts)
+	rb, storesB, err := storedReport(ctx, b, resolveB, opts)
 	if err != nil {
 		return nil, fmt.Errorf("agenteval: compare: b: %w", err)
 	}
-	return compareResults(ctx, ra, rb, storeA, storeB), nil
+	return compareResults(ctx, ra, rb, storesA.of, storesB.of), nil
 }
 
-// storedReport is r with each result read again from store.
-func storedReport(ctx context.Context, r *Report, store agentsession.Store, opts []ReadOption) (*Report, error) {
+// OneStore is the resolver of a report whose every session is in
+// store, as a runner's are, for [CompareReports].
+func OneStore(store agentsession.Store) func(Result) (agentsession.Store, error) {
+	return func(Result) (agentsession.Store, error) {
+		if store == nil {
+			return nil, errors.New("no store")
+		}
+		return store, nil
+	}
+}
+
+// storesOf remembers the store each result was read from, by session.
+type storesOf map[string]agentsession.Store
+
+func (s storesOf) of(r *Result) agentsession.Store { return s[r.SessionID] }
+
+// storedReport is r with each result read again from the store resolve
+// gives for it, and the store of each.
+func storedReport(ctx context.Context, r *Report, resolve func(Result) (agentsession.Store, error), opts []ReadOption) (*Report, storesOf, error) {
 	out := &Report{Suite: r.Suite, Manifest: r.Manifest, Results: make([]Result, len(r.Results))}
+	stores := storesOf{}
 	for i, was := range r.Results {
 		if was.SessionID == "" {
-			return nil, fmt.Errorf("task %s: no session", was.Task.ID)
+			return nil, nil, fmt.Errorf("task %s: no session", was.Task.ID)
+		}
+		store, err := resolve(was)
+		if err != nil {
+			return nil, nil, fmt.Errorf("task %s: store: %w", was.Task.ID, err)
 		}
 		res, err := ResultAt(ctx, store, was.SessionID, was.Target, opts...)
 		if err != nil {
-			return nil, fmt.Errorf("task %s: %w", was.Task.ID, err)
+			return nil, nil, fmt.Errorf("task %s: %w", was.Task.ID, err)
 		}
+		stores[res.SessionID] = store
 		// The task as the report names it, the record holding only its
 		// ID, setup and metadata; and the report's task and sample for a
 		// session that holds no record, as no session another harness
@@ -422,7 +449,7 @@ func storedReport(ctx context.Context, r *Report, store agentsession.Store, opts
 		out.Results[i] = *res
 	}
 	out.ByJudge = Summarize(out.Results)
-	return out, nil
+	return out, stores, nil
 }
 
 // initialCall replays the settings the result's first model call was

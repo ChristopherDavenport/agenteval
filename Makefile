@@ -3,7 +3,9 @@ STATICCHECK ?= $(GO) run honnef.co/go/tools/cmd/staticcheck@latest
 GOVULNCHECK ?= $(GO) run golang.org/x/vuln/cmd/govulncheck@latest
 # Nested modules that are tested alongside the library but keep their own
 # dependencies out of it.
-SUBMODULES = harbor
+# harbor comes before cmd/agenteval, which requires it: a release
+# guards and tags them in this order.
+SUBMODULES = harbor cmd/agenteval
 
 .PHONY: build deps replaces test vet fmt tidy tidy-check lint vuln check \
 	extracted release-guard release clean

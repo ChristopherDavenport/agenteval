@@ -159,7 +159,10 @@ anything: a candidate against a baseline a ref pins under
 holds no fact its sessions lack, so each result is read again from its
 store at the session and target it names, with `ResultAt`, which reads
 any stored run back as a `Result`: its task, end, scores, usage and
-cost. `Compare` is two runs followed by the same pairing.
+cost. Each side's results are resolved to their stores: `OneStore`
+for a report whose sessions share one, as a runner's do, and
+`harbor.Resolver` for an imported job, whose trials each have one.
+`Compare` is two runs followed by the same pairing.
 
 `price` loads a table of rates and prices a run with ATIF's formula,
 and the runner and the exporter take the same hook. The table is JSON,
@@ -259,6 +262,28 @@ makes them so:
 An import is idempotent: an outcome the session already holds is not
 written again. Running a task, building its environment and running
 its verifier, stays with Harbor, or with a product's Harbor adapter.
+
+## Command
+
+`cmd/agenteval` is a nested module holding a command over what runs
+left behind, in jsonl session stores and Harbor job directories. It
+adds no format: a report is a value over the sessions, and `compare`
+reads the stores again rather than trusting the report files.
+
+```sh
+go install github.com/ChristopherDavenport/agenteval/cmd/agenteval@latest
+agenteval import -out a.json jobs/2026-10-30          # rewards onto each trial's sessions, the job as a report
+agenteval report -store runs -suite smoke eval/baseline/greet SESSION@ENTRY
+agenteval compare -a-job jobs/2026-10-30 -b-store runs a.json b.json
+agenteval export -store runs -price prices.json SESSION@ENTRY
+```
+
+A run is named by a ref the store holds or by `SESSION[@ENTRY]`. A
+job's trials keep their sessions in the store `-sessions` names under
+each trial directory, `agent/sessions` by default. Running a task,
+building its environment and running its verifier, stays with Harbor
+or with the product: a suite needs a Go configuration no generic
+binary has, and Harbor already runs tasks.
 
 ## Design
 

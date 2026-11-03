@@ -91,7 +91,7 @@ func TestCompareAgainstAPinnedBaseline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := agenteval.CompareReports(ctx, pinned, read, store, store)
+	c, err := agenteval.CompareReports(ctx, pinned, read, agenteval.OneStore(store), agenteval.OneStore(store))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestCompareReportsWithoutTaskRecords(t *testing.T) {
 	store := newStableStore()
 	a := &agenteval.Report{Suite: "s", Results: []agenteval.Result{storedRun(t, store, "one", 1), storedRun(t, store, "two", 0)}}
 	b := &agenteval.Report{Suite: "s", Results: []agenteval.Result{storedRun(t, store, "one", 0), storedRun(t, store, "two", 1)}}
-	c, err := agenteval.CompareReports(context.Background(), a, b, store, store)
+	c, err := agenteval.CompareReports(context.Background(), a, b, agenteval.OneStore(store), agenteval.OneStore(store))
 	if err != nil {
 		t.Fatal(err)
 	}

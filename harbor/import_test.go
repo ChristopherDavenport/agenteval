@@ -225,3 +225,38 @@ func TestImportJobNumbersAttempts(t *testing.T) {
 		t.Errorf("results = %s, want %s", strings.Join(got, " "), want)
 	}
 }
+
+// Two imported jobs compare though each trial's session is in a store
+// of its own: the resolver reuses the open the import was given, keyed
+// by the trial (review of #65).
+func TestImportedJobsCompare(t *testing.T) {
+	ctx := context.Background()
+	stores := map[string]*agentsession.MemoryStore{}
+	trial := func(reward string) []byte {
+		return []byte(`{"task_name":"agenteval/hello","verifier_result":{"rewards":{"reward":` + reward + `}}}`)
+	}
+	jobs := map[string]fstest.MapFS{
+		"a": {"hello__aaa/result.json": {Data: trial("1")}},
+		"b": {"hello__bbb/result.json": {Data: trial("0")}},
+	}
+	for _, name := range []string{"hello__aaa", "hello__bbb"} {
+		stores[name] = agentsession.NewMemoryStore()
+		trialSession(t, stores[name], name, "done")
+	}
+	open := func(name string) (agentsession.Store, error) { return stores[name], nil }
+	a, err := harbor.ImportJob(ctx, jobs["a"], open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := harbor.ImportJob(ctx, jobs["b"], open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := agenteval.CompareReports(ctx, a, b, harbor.Resolver(open), harbor.Resolver(open))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Pairs) != 1 || c.Pairs[0].Delta["harbor/reward"] != -1 {
+		t.Errorf("pairs = %+v", c.Pairs)
+	}
+}

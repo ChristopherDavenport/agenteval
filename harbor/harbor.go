@@ -564,3 +564,17 @@ func runTarget(s *agentsession.Session) string {
 	}
 	return ""
 }
+
+// Resolver is the store resolver of a Report [ImportJob] returned, for
+// agenteval.CompareReports: each result's store is the one open gives
+// for its trial, which the result names under [TrialMeta], so the open
+// the import was given serves the comparison too.
+func Resolver(open func(trial string) (agentsession.Store, error)) func(agenteval.Result) (agentsession.Store, error) {
+	return func(r agenteval.Result) (agentsession.Store, error) {
+		trial := r.Task.Meta[TrialMeta]
+		if trial == "" {
+			return nil, fmt.Errorf("harbor: task %s names no trial under %s", r.Task.ID, TrialMeta)
+		}
+		return open(trial)
+	}
+}

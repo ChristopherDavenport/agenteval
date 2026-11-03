@@ -17,7 +17,8 @@ scores written back as `outcome` entries. The design is in
   module, `github.com/ChristopherDavenport/agentsession` and the
   standard library. Nothing else. `make deps` and a test enforce it.
 - `replay`, `judge` and `price` are packages of the root module;
-  `harbor` is a nested module because it needs a TOML decoder.
+  `harbor` is a nested module because it needs a TOML decoder, and
+  `cmd/agenteval`, the command, is one because it needs `harbor`.
 - Pinned to the released siblings, not their working trees. Scores
   are written in the `outcome` shape RFC 0001 draft 0.2 defines,
   through `agentsession`'s own `Pass` field and `OutcomeEval` kind.
