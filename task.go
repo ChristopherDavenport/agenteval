@@ -1,6 +1,7 @@
 package agenteval
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/ChristopherDavenport/agenteval/replay"
 	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/openresponses"
 )
@@ -177,8 +179,35 @@ func FromSession(s *agentsession.Session) (Task, error) {
 	return FromSessionAt(s, s.Leaf())
 }
 
-// FromSessionAt is FromSession over the path to leaf.
+// FromSessionMedia is FromSessionAt for a sidecar session (RFC 0001,
+// File), whose items name their media by sidecar: references: each
+// among the prompts is resolved through br, the store holding the
+// session or the reader its recorder wrote the blobs with, to the data
+// URL it was, as replay.ResolveMedia does, since no provider can fetch
+// a reference. An inline session's prompts are as FromSessionAt gives
+// them.
+func FromSessionMedia(ctx context.Context, s *agentsession.Session, leaf string, br agentsession.BlobReader) (Task, error) {
+	task, err := fromSession(s, leaf)
+	if err != nil {
+		return Task{}, err
+	}
+	if task.Prompts, err = replay.ResolveMedia(ctx, br, s.ID(), task.Prompts); err != nil {
+		return Task{}, fmt.Errorf("agenteval: %w", err)
+	}
+	return task, nil
+}
+
+// FromSessionAt is FromSession over the path to leaf. A sidecar
+// session's prompts that name media by sidecar: references are refused
+// with session.ErrNoBlobReader, since no provider can fetch one; read
+// such a session with [FromSessionMedia].
 func FromSessionAt(s *agentsession.Session, leaf string) (Task, error) {
+	return FromSessionMedia(context.Background(), s, leaf, nil)
+}
+
+// fromSession is FromSessionAt with the prompts as the session holds
+// them.
+func fromSession(s *agentsession.Session, leaf string) (Task, error) {
 	path := s.Path(leaf)
 	if path == nil {
 		return Task{}, fmt.Errorf("agenteval: %w: %s", agentsession.ErrNoEntry, leaf)

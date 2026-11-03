@@ -25,6 +25,9 @@ type recorded struct {
 	// before is set when the output is before the entry From names,
 	// so the call is answered but not served.
 	before bool
+	// failed is set when the output's entry is marked failed: the
+	// tool reported failure (RFC 0001, item, since 0.14).
+	failed bool
 	// records are the records beside the call that may be its
 	// result's, in path order.
 	records []*agentsession.CustomEntry
@@ -138,6 +141,7 @@ func namesCalls(format string) bool {
 // and arguments, are served in path order.
 type recording struct {
 	opts   options
+	media  *resolver
 	byID   map[string][]*recorded
 	byArgs map[string][]*recorded
 
@@ -188,7 +192,7 @@ type recording struct {
 // name, is the same as no path: nothing is served.
 func Tools(s *agentsession.Session, tools []agenttool.Tool, opts ...Option) []agenttool.Tool {
 	o := apply(opts)
-	rec := &recording{opts: o, byID: map[string][]*recorded{}, byArgs: map[string][]*recorded{}}
+	rec := &recording{opts: o, media: newResolver(s, o.blobs), byID: map[string][]*recorded{}, byArgs: map[string][]*recorded{}}
 	path, err := pathTo(s, o.leaf)
 	if err == nil {
 		var start int
@@ -257,8 +261,16 @@ func (r *recording) index(path []agentsession.Entry, start int, format string) {
 			continue
 		}
 		nestedEnd = ""
+		failed := false
 		if ie, ok := e.(*agentsession.ItemEntry); ok {
-			item = ie.Item
+			if ie.CopiedFrom != nil {
+				// Another session's call, or its output, given to this
+				// one as context: no call of this session (RFC 0001,
+				// item, since 0.15), so a call made here is not served
+				// its output.
+				continue
+			}
+			item, failed = ie.Item, ie.Failed
 		}
 		if item == nil {
 			continue
@@ -274,6 +286,7 @@ func (r *recording) index(path []agentsession.Entry, start int, format string) {
 		case *openresponses.FunctionCallOutput:
 			if c, ok := calls[v.CallID]; ok && c.output == nil {
 				c.output = v
+				c.failed = failed
 				c.entryID = entryID
 				c.before = i < start
 				delete(waiting, v.CallID)
@@ -357,7 +370,60 @@ func (r *recording) serve(ctx context.Context, t agenttool.Tool, call agenttool.
 	if r.opts.observer != nil {
 		r.opts.observer(Served{Kind: KindCall, N: r.count(), EntryID: c.entryID, CallID: c.call.CallID, Name: t.Name(), ByID: byID, Match: true})
 	}
-	res := agenttool.Result{Output: c.output.Output}
+	output := c.output
+	if r.media != nil {
+		item, err := r.media.item(ctx, output)
+		if err != nil {
+			return agenttool.Result{}, err
+		}
+		output = item.(*openresponses.FunctionCallOutput)
+	}
+	res := agenttool.Result{Output: output.Output}
+	res, err := r.details(c, t, res)
+	if err != nil || !c.failed {
+		return res, err
+	}
+	return res, r.failure(c)
+}
+
+// failure is the error a call whose output is marked failed is served
+// with, so the replayed loop marks its output failed too. The loop
+// writes a tool's error as the text "Error: " and the message
+// (agenttool.ErrorResult), so the message is the recorded text after
+// it, and the output the model sees is the one recorded. A failed
+// output in any other form, one a hook or the harness wrote, cannot be
+// served as both: under Strict that is refused with ErrUnverifiable,
+// and otherwise the failure is served with the recorded text as its
+// message.
+func (r *recording) failure(c *recorded) error {
+	text := c.output.Output.Text
+	if c.output.Output.Parts == nil {
+		if msg, ok := strings.CutPrefix(text, errorPrefix); ok {
+			return toolFailure(msg)
+		}
+	}
+	if r.opts.strict {
+		return fmt.Errorf("%w: call %s: its output is marked failed and is not the text a tool's error leaves, so a replay cannot serve both", ErrUnverifiable, c.call.CallID)
+	}
+	if c.output.Output.Parts != nil {
+		data, _ := json.Marshal(c.output.Output.Parts)
+		text = string(data)
+	}
+	return toolFailure(text)
+}
+
+// errorPrefix is what agenttool.ErrorResult puts before a tool's error.
+const errorPrefix = "Error: "
+
+// toolFailure is a recorded tool failure served again: its message as
+// recorded.
+type toolFailure string
+
+func (f toolFailure) Error() string { return string(f) }
+
+// details sets the Details a served result carries from the records
+// beside its call.
+func (r *recording) details(c *recorded, t agenttool.Tool, res agenttool.Result) (agenttool.Result, error) {
 	if len(c.records) == 0 {
 		return res, nil
 	}

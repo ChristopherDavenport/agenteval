@@ -9,7 +9,13 @@
 // output item the filter kept from the model; each compaction entry
 // is the fold that preceded the call after it, and each
 // agentturn:compaction_failed entry is a fold that failed there, one
-// call per attempt it made. In strict mode a
+// call per attempt it made. A fold's own call is told from a turn's by
+// the mark agentturn's compact package puts on its context
+// (compact.IsFold; agentturn RFC 0001, The request, step 2), not by the
+// request's shape. Each agentturn:model_blocked entry is a call a guard
+// refused: served again as that refusal when the replayed run sends
+// it, and passed over when the replayed guard refuses it first, as a
+// BeforeModelCall guard does. In strict mode a
 // request whose hash differs from the one recorded on the entry about
 // to be served is refused with [ErrDiverged], a fold's own request
 // included, so a summary prompt, a budget or a filter that changed is
@@ -21,7 +27,10 @@
 // lenient mode the calls are served by position and the hashes are
 // reported through the observer. [Tools] wraps a tool list so that a
 // call matching a recorded function call returns its recorded output
-// instead of running.
+// instead of running, an output marked failed as the tool's failure,
+// and never one of a call another session's conversation was copied
+// with. A sidecar session's media is served resolved through the
+// reader [WithBlobs] names.
 //
 // A model and its tools are not the whole of what a call was made
 // under. [Model.BeforeModelCall] serves back the instructions and the
@@ -57,6 +66,7 @@ import (
 	"syscall"
 
 	"github.com/ChristopherDavenport/agentsession"
+	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/agentturn/compact"
 	"github.com/ChristopherDavenport/agentturn/session"
 	"github.com/ChristopherDavenport/openresponses"
@@ -123,6 +133,10 @@ const (
 	KindFailedFold Kind = "failed_fold"
 	// KindCall is a tool call served from a recorded output.
 	KindCall Kind = "call"
+	// KindBlocked is a model call a guard refused, served from an
+	// agentturn:model_blocked entry as that refusal, with what the
+	// provider billed for it.
+	KindBlocked Kind = "blocked"
 )
 
 // Served is what the model and the tools report through the observer
@@ -176,6 +190,7 @@ type Served struct {
 }
 
 type options struct {
+	blobs         agentsession.BlobReader
 	strict        bool
 	allowUnhashed bool
 	allowSubst    bool
@@ -240,6 +255,19 @@ func AllowUnhashed() Option { return func(o *options) { o.allowUnhashed = true }
 // recorded in a container was resumed on a laptop and the replay is
 // meant to cover both halves.
 func AllowSubstitution() Option { return func(o *options) { o.allowSubst = true } }
+
+// WithBlobs names the reader a sidecar session's blobs are read
+// through: the store holding the session, as every agentsession store
+// is an agentsession.BlobReader, or the reader its recorder's
+// session.WithMedia wrote them with. In a sidecar session (RFC 0001,
+// File) an item names its media by sidecar: references, which no
+// provider can fetch, so what a model or [Tools] serves from one is
+// resolved to the data URLs it was, with [ResolveMedia]'s rule, and a
+// request is hashed in the form the session recorded it, each medium
+// one of its blobs named by its reference. [NewModel] refuses a sidecar
+// session that names blobs without it, with session.ErrNoBlobReader.
+// An inline session needs none.
+func WithBlobs(br agentsession.BlobReader) Option { return func(o *options) { o.blobs = br } }
 
 // WithLeaf names the path to serve. The default is the session's
 // current leaf, which after judging is an outcome entry rather than a
@@ -318,6 +346,10 @@ type step struct {
 	// the error text it recorded, which it is served as.
 	retry   *agentsession.CustomEntry
 	failure string
+	// blocked is the agentturn:model_blocked entry of a call a guard
+	// refused, and block its data.
+	blocked *agentsession.CustomEntry
+	block   session.ModelBlocked
 	// failed is the compaction_failed entry of a fold that failed, and
 	// fold its data. A fold that asked twice is two steps, attempt 1
 	// and 2 of calls, which foldCalls reads from the record.
@@ -342,6 +374,11 @@ type step struct {
 type Model struct {
 	opts  options
 	steps []step
+	// media resolves a sidecar session's references in what is served,
+	// and named holds its blobs, for the request hash; both are nil for
+	// an inline session.
+	media *resolver
+	named map[string]bool
 
 	mu   sync.Mutex
 	next int
@@ -373,7 +410,13 @@ func NewModel(s *agentsession.Session, opts ...Option) (*Model, error) {
 			return nil, err
 		}
 	}
-	m := &Model{opts: o}
+	m := &Model{opts: o, media: newResolver(s, o.blobs)}
+	if m.named, err = namedBlobs(s); err != nil {
+		return nil, err
+	}
+	if len(m.named) > 0 && o.blobs == nil {
+		return nil, fmt.Errorf("replay: %w: session %s is a sidecar session naming %d blob(s) (see WithBlobs)", session.ErrNoBlobReader, s.ID(), len(m.named))
+	}
 	// The settings in force at each step are the config entries on the
 	// path applied in order, which is what a product whose layers
 	// re-read state each turn must send to replay strictly: the
@@ -446,6 +489,18 @@ func NewModel(s *agentsession.Session, opts ...Option) (*Model, error) {
 				for a := range calls {
 					m.steps = append(m.steps, step{failed: v, fold: f, attempt: a + 1, calls: calls, foldHash: f.RequestHash, settings: settings})
 				}
+				continue
+			}
+			// A call a guard refused is a step: served as that
+			// refusal when the replayed run sends it, and passed over
+			// when the replayed guard refuses it before the model is
+			// called, as a BeforeModelCall guard does (#70).
+			if v.NS == session.ModelBlockedNS {
+				var b session.ModelBlocked
+				if err := json.Unmarshal(v.Data, &b); err != nil {
+					return nil, fmt.Errorf("replay: model blocked %s: %w", v.ID, err)
+				}
+				m.steps = append(m.steps, step{blocked: v, block: b, settings: settings})
 				continue
 			}
 			// A failed attempt is served as a failure so the loop
@@ -994,13 +1049,17 @@ func (m *Model) BeforeModelCall(_ context.Context, req *openresponses.Request) e
 }
 
 // peek returns the next response step to be served, skipping the folds
-// before it, which are served by the transform and not by the loop.
+// before it, which are served by the transform and not by the loop. A
+// call a guard refused after the provider billed it is one the loop
+// sent, and is returned too; one with no usage is passed over, as most
+// likely refused by a BeforeModelCall guard before the model was
+// called, which the replayed guard refuses again with no call to serve.
 func (m *Model) peek() (step, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for i := m.next; i < len(m.steps); i++ {
-		if m.steps[i].resp != nil {
-			return m.steps[i], true
+		if st := m.steps[i]; st.resp != nil || st.blocked != nil && st.block.Usage != nil {
+			return st, true
 		}
 	}
 	return step{}, false
@@ -1090,27 +1149,35 @@ func (m *Model) skippedHint(n int, hashed bool) string {
 	return ""
 }
 
-// isFoldRequest reports whether a request is shaped like a local
-// fold's summary call: no tools and no instructions, which is what
-// compact.NewLocal sends.
-func isFoldRequest(req openresponses.Request) bool {
-	return len(req.Tools) == 0 && req.Instructions == ""
-}
-
 // CreateStream serves the next recorded call. When that is a fold, the
-// request must be a local fold's summary call and the compaction
-// entry's summary is served as the answer; when it is a response, the
-// response entry is served after its hash check in strict mode; when
-// it is an attempt that failed, its failure is returned for the loop
-// to retry, unchecked, since the record hashes only the attempt that
-// answered.
-func (m *Model) CreateStream(_ context.Context, req openresponses.Request, sink openresponses.EventSink) error {
+// call must be a fold's own, which ctx says (compact.IsFold, as agentturn
+// RFC 0001's The request, step 2, has a fold mark its call), and the
+// compaction entry's summary is served as the answer; when it is a
+// response, the response entry is served after its hash check in strict
+// mode; when it is an attempt that failed, its failure is returned for
+// the loop to retry, unchecked, since the record hashes only the
+// attempt that answered; when it is a call a guard refused, the refusal
+// is served when this is that call, and the step is passed over when
+// it is not, as a refusal by a BeforeModelCall guard never reached the
+// model and the replayed guard refuses it again.
+func (m *Model) CreateStream(ctx context.Context, req openresponses.Request, sink openresponses.EventSink) error {
 	st, n, err := m.take()
 	if err != nil {
 		return err
 	}
+	fold := compact.IsFold(ctx)
+	if st.blocked != nil {
+		served, err := m.serveBlocked(st, n, req, sink)
+		if served || err != nil {
+			return err
+		}
+		// Not this call: the refused one never reached the model.
+		if st, n, err = m.take(); err != nil {
+			return err
+		}
+	}
 	if st.retry != nil {
-		got, err := agentsession.RequestHash(session.Canonical(req))
+		got, err := requestHash(req, m.named)
 		if err != nil {
 			return err
 		}
@@ -1118,7 +1185,7 @@ func (m *Model) CreateStream(_ context.Context, req openresponses.Request, sink 
 		return serveFailure(n, st.retry.ID, st.failure)
 	}
 	if st.comp != nil {
-		if isFoldRequest(req) {
+		if fold {
 			return m.serveFold(st, n, req, sink)
 		}
 		// The configuration under test sent a turn where the
@@ -1126,16 +1193,28 @@ func (m *Model) CreateStream(_ context.Context, req openresponses.Request, sink 
 		return fmt.Errorf("%w: compaction %s (step %d): the recording folded here and the request did not%s", ErrDiverged, st.comp.ID, n, m.skippedHint(n, st.foldHash != ""))
 	}
 	if st.failed != nil {
-		if isFoldRequest(req) {
+		if fold {
 			return m.serveFailedFold(st, n, req, sink)
 		}
 		return fmt.Errorf("%w: failed fold %s (step %d): the recording tried to fold here and the request did not%s", ErrDiverged, st.failed.ID, n, m.skippedHint(n, true))
+	}
+	if st.blocked != nil {
+		return fmt.Errorf("%w: model blocked %s (step %d): the recording's guard refused a call here and the request was sent", ErrDiverged, st.blocked.ID, n)
+	}
+	if fold {
+		// The configuration under test folded where the recording made
+		// a model call, or asked again for a summary it refused.
+		got, err := requestHash(req, m.named)
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: response %s (step %d): the recording made a model call here and the request is a fold's%s", ErrDiverged, st.resp.ID, n, m.refolded(got, n))
 	}
 	// Got is computed whether or not the entry recorded a hash to
 	// compare it against: it is what this replay sent, and for a call
 	// the record is silent about it is the only account of that there
 	// is. Only the comparison needs a recorded hash.
-	got, err := agentsession.RequestHash(session.Canonical(req))
+	got, err := requestHash(req, m.named)
 	if err != nil {
 		return err
 	}
@@ -1151,8 +1230,59 @@ func (m *Model) CreateStream(_ context.Context, req openresponses.Request, sink 
 	if m.opts.strict && sv.Recorded != "" && !sv.Match {
 		return fmt.Errorf("%w: response %s (step %d): recorded %s, received %s%s", ErrDiverged, st.resp.ID, n, sv.Recorded, sv.Got, m.refolded(got, n))
 	}
-	return serveResponse(st, n, req, sink)
+	output := st.output.Clone()
+	if err := m.media.items(ctx, output); err != nil {
+		return err
+	}
+	return serveResponse(st, output, n, req, sink)
 }
+
+// serveBlocked serves a call a guard refused, when req is that call:
+// the request's hash is the one the record holds, or, with none
+// recorded, the provider billed the call, so it was sent. It is
+// served as the guard's refusal, an error wrapping agentturn.ErrGuard
+// carrying the recorded text, after a response carrying the recorded
+// usage opened, so the replayed recorder writes the record again with
+// the same hash and usage. served is false when req is not that call:
+// the refusal was a BeforeModelCall guard's, which never reached the
+// model. A call that was billed and whose request differs is a
+// divergence under Strict, and served by position otherwise.
+func (m *Model) serveBlocked(st step, n int, req openresponses.Request, sink openresponses.EventSink) (served bool, err error) {
+	got, err := requestHash(req, m.named)
+	if err != nil {
+		return false, err
+	}
+	b := st.block
+	sv := Served{Kind: KindBlocked, N: n, EntryID: st.blocked.ID, Recorded: b.RequestHash, Got: got}
+	sv.Match = sv.Recorded != "" && got == sv.Recorded
+	sent := b.Usage != nil
+	switch {
+	case sv.Match:
+	case sent && m.opts.strict && sv.Recorded != "":
+		m.observe(sv)
+		return true, fmt.Errorf("%w: model blocked %s (step %d): recorded %s, received %s", ErrDiverged, st.blocked.ID, n, sv.Recorded, sv.Got)
+	case !sent:
+		return false, nil
+	}
+	m.observe(sv)
+	resp := openresponses.NewResponse(req)
+	if b.Usage != nil {
+		u := *b.Usage
+		resp.Usage = &u
+	}
+	if err := openresponses.NewEmitter(sink, resp).Start(); err != nil {
+		return true, err
+	}
+	return true, guardRefusal(b.Error)
+}
+
+// guardRefusal is a recorded guard's refusal served again: its text as
+// recorded, and agentturn.ErrGuard, so the loop stops the run as the
+// guard did.
+type guardRefusal string
+
+func (g guardRefusal) Error() string { return string(g) }
+func (guardRefusal) Unwrap() error   { return agentturn.ErrGuard }
 
 // Create serves the next recorded call as a complete response.
 func (m *Model) Create(ctx context.Context, req openresponses.Request) (*openresponses.Response, error) {
@@ -1225,9 +1355,10 @@ func (m *Model) refolded(got string, n int) string {
 	return fmt.Sprintf("; that is the request of the fold served at step %d, sent again: the loop did not apply the summary served there, as compact.NewLocal from agentturn v0.0.13 refuses one no smaller than what it folds, which a recording made before it may have applied", n-1)
 }
 
-// serveResponse streams a recorded response: its items, complete and
-// without deltas, then the terminal event the entry recorded.
-func serveResponse(st step, n int, req openresponses.Request, sink openresponses.EventSink) error {
+// serveResponse streams a recorded response: its items, output,
+// complete and without deltas, then the terminal event the entry
+// recorded.
+func serveResponse(st step, output openresponses.Items, n int, req openresponses.Request, sink openresponses.EventSink) error {
 	resp := openresponses.NewResponse(req)
 	resp.ID = st.resp.ResponseID
 	if st.resp.Model != "" {
@@ -1254,7 +1385,7 @@ func serveResponse(st step, n int, req openresponses.Request, sink openresponses
 	// divergence names two hashes and no field. The emitter still owns
 	// the output indices, the response snapshot and the terminal
 	// event.
-	for _, item := range st.output {
+	for _, item := range output {
 		idx := len(resp.Output)
 		resp.Output = append(resp.Output, item)
 		if err := sink.Send(&openresponses.OutputItemAddedEvent{OutputIndex: idx, Item: item}); err != nil {
@@ -1276,7 +1407,7 @@ func serveResponse(st step, n int, req openresponses.Request, sink openresponses
 func (m *Model) serveFold(st step, n int, req openresponses.Request, sink openresponses.EventSink) error {
 	// As in CreateStream, Got is what this replay sent and is reported
 	// whether or not there is a recorded hash to compare it against.
-	got, err := agentsession.RequestHash(session.Canonical(req))
+	got, err := requestHash(req, m.named)
 	if err != nil {
 		return err
 	}
@@ -1301,7 +1432,7 @@ func (m *Model) serveFold(st step, n int, req openresponses.Request, sink openre
 		return fmt.Errorf("%w: compaction %s (step %d): the entry records no hash for the fold's own request", ErrUnverifiable, st.comp.ID, n)
 	}
 	if m.opts.strict && sv.Recorded != "" && !sv.Match {
-		return fmt.Errorf("%w: compaction %s (step %d): the fold's request: recorded %s, received %s%s", ErrDiverged, st.comp.ID, n, sv.Recorded, sv.Got, outputLimitOnly(req, sv.Recorded))
+		return fmt.Errorf("%w: compaction %s (step %d): the fold's request: recorded %s, received %s%s", ErrDiverged, st.comp.ID, n, sv.Recorded, sv.Got, outputLimitOnly(req, sv.Recorded, m.named))
 	}
 	resp := openresponses.NewResponse(req)
 	resp.Usage = st.comp.Usage
@@ -1325,12 +1456,12 @@ func (m *Model) serveFold(st step, n int, req openresponses.Request, sink openre
 // and a recording made before it never sent one, so without this every
 // fold such a recording holds diverges naming two hashes and no
 // member. It returns the sentence to add to the divergence, or "".
-func outputLimitOnly(req openresponses.Request, recorded string) string {
+func outputLimitOnly(req openresponses.Request, recorded string, named map[string]bool) string {
 	if req.MaxOutputTokens == nil {
 		return ""
 	}
 	req.MaxOutputTokens = nil
-	got, err := agentsession.RequestHash(session.Canonical(req))
+	got, err := requestHash(req, named)
 	if err != nil || got != recorded {
 		return ""
 	}
@@ -1376,7 +1507,7 @@ func foldCalls(f session.FailedFold) int {
 // response ID are served on the last call, so a record of the replay
 // sums to the recording's.
 func (m *Model) serveFailedFold(st step, n int, req openresponses.Request, sink openresponses.EventSink) error {
-	got, err := agentsession.RequestHash(session.Canonical(req))
+	got, err := requestHash(req, m.named)
 	if err != nil {
 		return err
 	}
@@ -1387,7 +1518,7 @@ func (m *Model) serveFailedFold(st step, n int, req openresponses.Request, sink 
 		return fmt.Errorf("%w: failed fold %s (step %d): the entry records no hash for the fold's own request", ErrUnverifiable, st.failed.ID, n)
 	}
 	if m.opts.strict && sv.Recorded != "" && !sv.Match {
-		return fmt.Errorf("%w: failed fold %s (step %d): the fold's request: recorded %s, received %s%s", ErrDiverged, st.failed.ID, n, sv.Recorded, sv.Got, outputLimitOnly(req, sv.Recorded))
+		return fmt.Errorf("%w: failed fold %s (step %d): the fold's request: recorded %s, received %s%s", ErrDiverged, st.failed.ID, n, sv.Recorded, sv.Got, outputLimitOnly(req, sv.Recorded, m.named))
 	}
 	text := st.fold.Error
 	if rest, ok := strings.CutPrefix(text, foldCallFailed); ok {

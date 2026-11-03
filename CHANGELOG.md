@@ -55,8 +55,41 @@ versions may break the API.
   **Breaking:** `Rates` holds a map, so it is no longer comparable
   with `==`.
 
+- Replay after the format 0.14 to 0.17 bump (#70). A fold's own call
+  is told from a turn's by `compact.IsFold` on the call's context, the
+  mark agentturn v0.0.35 puts there (agentturn RFC 0001, The request,
+  step 2), and no longer by a request with no tools and no
+  instructions: a fold whose request carries either is served, and a
+  turn sent bare where the recording folded is a divergence.
+  `Model.CreateStream` now reads its context. A call a guard refused,
+  `agentturn:model_blocked`, is a step: served again as the guard's
+  refusal, with the usage the provider billed, when the replayed run
+  sends it, and passed over when the replayed guard refuses it first,
+  as a `BeforeModelCall` guard does; a run with a model guard's
+  refusal did not replay. `replay.Tools` serves an output marked
+  `failed` as the tool's failure, so the replayed record keeps the
+  mark: as the error whose text the loop writes back as the recorded
+  output, and under `Strict` a failed output in another form is
+  refused with `ErrUnverifiable`. It no longer indexes a call or an
+  output carrying `copied_from`, another session's, so a child's own
+  call is not served its parent's output.
+- A sidecar session (format 0.16) replays and becomes a task. Its items
+  name media by `sidecar:` references, which no provider can fetch.
+  `replay.WithBlobs` names the session's blob reader: what the model
+  and the tools serve is resolved to data URLs, and each request is
+  hashed with the session's media named by their references, the
+  form the recorder hashed, so a strict replay verifies. `NewModel`
+  refuses a sidecar session naming blobs without it, with
+  `session.ErrNoBlobReader`, and so does `FromSession`, where it
+  handed out references; `FromSessionMedia` resolves the prompts.
+  (#70)
+
 ### Changed
 
+- A fold's call at a step where the recording made a model call is a
+  divergence in every mode, as `Model.Compact` at such a step already
+  was; a lenient model served the response there as the summary.
+  (#70)
 - `Result.CostUSD` includes the work the run delegated to subagents,
   as RFC 0001 (`link`, since format 0.17) counts it and the exported
   document's `total_cost_usd` does: each session a `subsession` link
@@ -76,6 +109,8 @@ versions may break the API.
   at a resume leaf because no output named one, and those that could
   not be read or priced, which are named and left out of the cost
   rather than guessed at. Nil for a run that delegated nothing. (#56)
+- `replay.WithBlobs`, `replay.ResolveMedia`, `replay.KindBlocked` and
+  `FromSessionMedia`. (#70)
 - `LeftOutMeta`, `InputsMeta` and `InputsByResponses`, the `Task.Meta`
   keys `FromSession` writes for the user messages it leaves out. (#57)
 - `Result.ModelCalls`: how many model calls the run's path paid for,

@@ -2,6 +2,8 @@ package agenteval_test
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -156,4 +158,38 @@ func TestFromSessionTakesOnlyInputs(t *testing.T) {
 			t.Errorf("meta %s = %q, want the copied items named (prompts %q)", agenteval.LeftOutMeta, lo, promptTexts(task))
 		}
 	})
+}
+
+// TestFromSessionResolvesSidecarMedia is #70's task half: a sidecar
+// session's prompts name their media by sidecar: references, which no
+// provider can fetch. FromSession refuses to hand one out, and
+// FromSessionMedia resolves each through the session's blob reader to
+// the data URL it was.
+func TestFromSessionResolvesSidecarMedia(t *testing.T) {
+	ctx := context.Background()
+	store := agentsession.NewMemoryStore()
+	rec, s, err := session.Start(ctx, store, agentsession.Header{Media: agentsession.MediaSidecar})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := echoConfig()
+	cfg.Tools = nil
+	a := agentturn.New(cfg)
+	defer rec.Attach(a)()
+	pixel := "data:image/png;base64,iVBORw0KGgo="
+	prompt := &openresponses.Message{Role: openresponses.RoleUser, Content: openresponses.Contents{&openresponses.InputText{Text: "look"}, &openresponses.InputImage{ImageURL: pixel}}}
+	if _, err := a.Prompt(ctx, prompt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agenteval.FromSession(s); !errors.Is(err, session.ErrNoBlobReader) {
+		t.Errorf("FromSession of a sidecar session: err = %v, want session.ErrNoBlobReader", err)
+	}
+	task, err := agenteval.FromSessionMedia(ctx, s, s.Leaf(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(task.Prompts)
+	if strings.Contains(string(data), "sidecar:") || !strings.Contains(string(data), pixel) {
+		t.Errorf("prompts = %s, want the data URL", data)
+	}
 }

@@ -83,6 +83,24 @@ which sends no request the format hashes.
 canonical arguments, so a whole run replays without touching the
 world.
 
+A fold's own model call is told from a turn's by the mark agentturn's
+`compact` package puts on its context (`compact.IsFold`, agentturn RFC
+0001, The request), not by a request with no tools and no
+instructions. A call a guard refused, recorded as
+`agentturn:model_blocked`, is served again as the guard's refusal with
+the usage the provider billed when the replayed run sends it, and
+passed over when the replayed guard refuses it before the model is
+called. An output marked `failed` is served as the tool's failure, so
+the replayed record keeps the mark, and a call carrying `copied_from`
+is another session's: it is not indexed, and a call of this session
+is never served its output. A sidecar session names its media by
+`sidecar:` references, which no provider can fetch: `replay.WithBlobs`
+gives the model and the tools the session's blob reader, through
+which what they serve is resolved to data URLs and each request is
+hashed in the form the session recorded it, and `FromSessionMedia`
+resolves a task's prompts the same way; `FromSession` refuses such a
+session with `session.ErrNoBlobReader`.
+
 ```go
 s, _ := store.Open(ctx, id)
 model, _ := replay.NewModel(s, replay.Strict())
