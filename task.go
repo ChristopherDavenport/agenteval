@@ -142,16 +142,37 @@ func checkIDs(tasks []Task) error {
 	return nil
 }
 
+// The Task.Meta keys FromSession writes beside "session" and "leaf".
+const (
+	// LeftOutMeta names the user messages on the path that are no
+	// input of a turn, in path order, each as kind=entry, the kind one
+	// of agentsession's NotInput values: a resume's note, a steer or a
+	// delivery drained mid-run, an item copied from another session's
+	// conversation, a peer's late report, a message composed from an
+	// instruction layer. A runner sending the task's prompts cannot
+	// reproduce them where they stood, so they are named here rather
+	// than sent as turns of their own.
+	LeftOutMeta = "left_out"
+	// InputsMeta is set to InputsByResponses on a path with no run
+	// entries, whose turns are split at responses: there a resume's note
+	// or a delivery that started a run cannot be told from an input.
+	InputsMeta        = "inputs"
+	InputsByResponses = "by_responses"
+)
+
 // ErrNoPrompts is returned by FromSession when the path holds no user
 // message.
 var ErrNoPrompts = errors.New("agenteval: session has no user prompts on its path")
 
-// FromSession turns a recorded run into a task: the user messages on
+// FromSession turns a recorded run into a task: the inputs that drove
 // the path to the session's current leaf, in order, become Prompts, so
 // the same conversation can be sent through another configuration. The
 // task is named after the session and Meta records the session and the
-// leaf. Model output, tool outputs, summaries and app-only entries are
-// not prompts and are left out.
+// leaf. The inputs are read as agentsession.PathInputs reads them (RFC
+// 0001, run): per run started by an input, the user messages before its
+// first response. Model output, tool outputs, summaries and app-only
+// entries are not prompts, and neither is a user message that started
+// no turn, which is named under [LeftOutMeta].
 func FromSession(s *agentsession.Session) (Task, error) {
 	return FromSessionAt(s, s.Leaf())
 }
@@ -163,14 +184,23 @@ func FromSessionAt(s *agentsession.Session, leaf string) (Task, error) {
 		return Task{}, fmt.Errorf("agenteval: %w: %s", agentsession.ErrNoEntry, leaf)
 	}
 	task := Task{ID: s.ID(), Meta: map[string]string{"session": s.ID(), "leaf": leaf}}
-	for _, e := range path {
-		item, ok := e.(*agentsession.ItemEntry)
-		if !ok || item.ResponseID != "" {
-			continue
+	turns, byRuns := agentsession.PathInputs(path)
+	var left []string
+	for _, turn := range turns {
+		for _, it := range turn.Inputs {
+			if m, ok := it.Item.(*openresponses.Message); ok {
+				task.Prompts = append(task.Prompts, m)
+			}
 		}
-		if m, ok := item.Item.(*openresponses.Message); ok && m.Role == openresponses.RoleUser {
-			task.Prompts = append(task.Prompts, m)
+		for _, lo := range turn.LeftOut {
+			left = append(left, lo.Kind+"="+lo.Entry.ID)
 		}
+	}
+	if len(left) > 0 {
+		task.Meta[LeftOutMeta] = strings.Join(left, " ")
+	}
+	if !byRuns && len(turns) > 0 {
+		task.Meta[InputsMeta] = InputsByResponses
 	}
 	if len(task.Prompts) == 0 {
 		return Task{}, ErrNoPrompts

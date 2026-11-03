@@ -26,6 +26,20 @@ versions may break the API.
   document. The path is read with `agentsession.ModelCalls`, the
   reader the export uses, so the two cannot drift again. (#58)
 
+- `FromSession` takes as prompts only the inputs that started the
+  path's runs, as RFC 0001 (`run`, since format 0.17) defines them and
+  `agentsession.PathInputs` reads them: per run whose source is
+  `input`, the user messages before its first response. It took every
+  user message no response produced, so a resume's note, a steer or a
+  delivery drained mid-run, an item copied from another session's
+  conversation (`copied_from`, a child opened with its parent's), a
+  peer's late report (`from_link`) and a message composed from an
+  instruction layer were each sent again as a turn of their own, and a
+  strict replay of the task diverged. Each is now named in
+  `Task.Meta[LeftOutMeta]` as `kind=entry`, and a path with no run
+  entries, whose turns are split at responses, is marked
+  `Meta[InputsMeta] = InputsByResponses`. (#57)
+
 ### Changed
 
 - `Result.CostUSD` includes the work the run delegated to subagents,
@@ -47,6 +61,8 @@ versions may break the API.
   at a resume leaf because no output named one, and those that could
   not be read or priced, which are named and left out of the cost
   rather than guessed at. Nil for a run that delegated nothing. (#56)
+- `LeftOutMeta`, `InputsMeta` and `InputsByResponses`, the `Task.Meta`
+  keys `FromSession` writes for the user messages it leaves out. (#57)
 - `Result.ModelCalls`: how many model calls the run's path paid for,
   each response's and each paid record's `attempts` among them, which
   is the exported document's `total_steps`. (#58)
