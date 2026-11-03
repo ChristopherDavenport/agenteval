@@ -118,6 +118,17 @@ versions may break the API.
   at a resume leaf because no output named one, and those that could
   not be read or priced, which are named and left out of the cost
   rather than guessed at. Nil for a run that delegated nothing. (#56)
+- `harbor.ImportJob` reads a finished Harbor job back: each trial's
+  `verifier_result.rewards` is written onto the agent's top-level
+  session in the trial's store as outcomes of kind `test`, labelled
+  `harbor/<reward key>` and targeting the run's last entry, and the
+  job is returned as a `Report`. An errored trial with no reward is
+  recorded as Harbor's 0 with the exception in the details' new
+  `error` (`OutcomeDetails.Error`), and is unjudged in the report. An
+  import writes an outcome the session holds only once. `ReadOutcome`
+  and `ResultAt` read `test` outcomes beside `eval` ones, and leave a
+  score carrying `error` out, on `Err`. The README says why `test` and
+  how errored trials are recorded. (#66)
 - `ResultAt` reads a stored run back as a `Result`, with no model or
   judge called: the task and sample from its task record, the scores
   from the outcomes targeting the entry, the end, the runs, and usage

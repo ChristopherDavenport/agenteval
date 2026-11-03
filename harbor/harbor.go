@@ -37,6 +37,7 @@
 package harbor
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,6 +50,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/ChristopherDavenport/agenteval"
+	"github.com/ChristopherDavenport/agentsession"
 )
 
 // File names Harbor uses.
@@ -277,4 +279,253 @@ func flatten(out map[string]string, prefix string, value any) {
 		}
 		out[prefix] = string(data)
 	}
+}
+
+// LabelPrefix precedes a reward's key in the label of the outcome
+// [ImportJob] writes, so a verifier's reward is told from an agenteval
+// judge's score of the same name.
+const LabelPrefix = "harbor/"
+
+// ResultFile is the result.json Harbor writes for a job and for each of
+// its trials.
+const ResultFile = "result.json"
+
+// trialResult is what ImportJob reads of a trial's result.json, as
+// Harbor 0.25's TrialResult writes it.
+type trialResult struct {
+	TaskName       string `json:"task_name"`
+	TrialName      string `json:"trial_name"`
+	VerifierResult *struct {
+		Rewards map[string]json.Number `json:"rewards"`
+	} `json:"verifier_result"`
+	ExceptionInfo *struct {
+		Type    string `json:"exception_type"`
+		Message string `json:"exception_message"`
+	} `json:"exception_info"`
+}
+
+// ImportJob reads a finished Harbor job back: each trial's
+// verifier_result.rewards is written onto the agent's session as
+// outcome entries, and the job is returned as a Report, so Harbor runs
+// get agenteval's reports and comparisons.
+//
+// job is the job directory, which holds one directory per trial with
+// its result.json. open returns the store holding a trial's sessions,
+// given the trial's directory name: the store the agent recorded into
+// under the trial's agent directory, such as a jsonl store over
+// agent/sessions. In it the trial's session is the one top-level
+// session, one that names no parent session: a subagent's and a fork's
+// are not the run, and a store holding more than one top-level session
+// is an error on that trial. ImportJob does not close the stores.
+//
+// Each reward becomes an outcome of kind test, the kind RFC 0001 gives
+// a verifier's score, labelled [LabelPrefix] and the reward's key, with
+// its value as the score and [WithPass]'s rule as its pass, targeting
+// the run's last entry, the last on the session's path that is not an
+// outcome. Its details are agenteval.OutcomeDetails naming the trial's
+// task. A trial that errored with no rewards, which Harbor counts as 0,
+// is recorded as that 0 under [DefaultLabel], with the exception in the
+// details' error, and is reported unjudged, with the exception on the
+// result's Err, so the 0 is not read as the verifier's verdict; one
+// that errored after its verifier wrote rewards keeps the rewards and
+// carries the exception on Err. An outcome the session already holds,
+// the same kind, target, label, score and pass, is not written again,
+// so importing a job twice writes nothing the second time.
+//
+// The report's results, in trial order, are each session read back
+// with agenteval.ResultAt at the target, its Task named by the trial's
+// task_name and its Meta carrying the trial's name under "harbor.trial".
+// A trial whose session cannot be found or written is reported with
+// the error on Err. ImportJob fails only when the job cannot be read.
+func ImportJob(ctx context.Context, job fs.FS, open func(trial string) (agentsession.Store, error), opts ...Option) (*agenteval.Report, error) {
+	o := rewardOptions{pass: func(_ string, v float64) bool { return v >= 1 }}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	dirs, err := fs.ReadDir(job, ".")
+	if err != nil {
+		return nil, fmt.Errorf("harbor: read job: %w", err)
+	}
+	report := &agenteval.Report{Suite: "harbor"}
+	if data, err := fs.ReadFile(job, ResultFile); err == nil {
+		var j struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(data, &j) == nil && j.ID != "" {
+			report.Suite = "harbor/" + j.ID
+		}
+	}
+	for _, d := range dirs {
+		if !d.IsDir() {
+			continue
+		}
+		data, err := fs.ReadFile(job, path.Join(d.Name(), ResultFile))
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("harbor: read %s: %w", path.Join(d.Name(), ResultFile), err)
+		}
+		var tr trialResult
+		if err := json.Unmarshal(data, &tr); err != nil {
+			return nil, fmt.Errorf("harbor: %s: %w", path.Join(d.Name(), ResultFile), err)
+		}
+		report.Results = append(report.Results, importTrial(ctx, d.Name(), tr, open, o))
+	}
+	report.ByJudge = agenteval.Summarize(report.Results)
+	return report, nil
+}
+
+// importTrial writes one trial's rewards onto its session and reads the
+// session back as a result.
+func importTrial(ctx context.Context, dir string, tr trialResult, open func(string) (agentsession.Store, error), o rewardOptions) agenteval.Result {
+	task := agenteval.Task{ID: tr.TaskName, Meta: map[string]string{"harbor.trial": dir}}
+	if task.ID == "" {
+		task.ID = dir
+	}
+	res := agenteval.Result{Task: task}
+	fail := func(err error) agenteval.Result {
+		res.Err = errors.Join(res.Err, fmt.Errorf("harbor: trial %s: %w", dir, err))
+		return res
+	}
+	var exception string
+	if e := tr.ExceptionInfo; e != nil {
+		exception = strings.TrimSuffix(e.Type+": "+e.Message, ": ")
+		res.Err = fmt.Errorf("harbor: trial %s: %s", dir, exception)
+	}
+	store, err := open(dir)
+	if err != nil {
+		return fail(err)
+	}
+	s, err := topLevel(ctx, store)
+	if err != nil {
+		return fail(err)
+	}
+	target := runTarget(s)
+	if target == "" {
+		return fail(fmt.Errorf("session %s holds no entry", s.ID()))
+	}
+	entries, err := rewardOutcomes(tr, exception, task.ID, target, o)
+	if err != nil {
+		return fail(err)
+	}
+	for _, e := range entries {
+		if holds(s, e) {
+			continue
+		}
+		if _, err := store.Append(ctx, s.ID(), e); err != nil {
+			return fail(err)
+		}
+	}
+	read, err := agenteval.ResultAt(ctx, store, s.ID(), target)
+	if err != nil {
+		return fail(err)
+	}
+	read.Task = task
+	read.Err = errors.Join(res.Err, read.Err)
+	if exception != "" {
+		// ResultAt says the same of an errored trial's 0; once is enough.
+		read.Err = res.Err
+	}
+	return *read
+}
+
+// rewardOutcomes builds the outcomes a trial's rewards are written as.
+func rewardOutcomes(tr trialResult, exception, task, target string, o rewardOptions) ([]*agentsession.OutcomeEntry, error) {
+	var rewards map[string]json.Number
+	if tr.VerifierResult != nil {
+		rewards = tr.VerifierResult.Rewards
+	}
+	if len(rewards) == 0 {
+		if exception == "" {
+			return nil, errors.New("no rewards and no exception")
+		}
+		// Harbor counts an errored trial with no reward as 0.
+		e, err := outcome(DefaultLabel, 0, false, agenteval.OutcomeDetails{Task: task, Reason: "the trial errored and its verifier wrote no reward, which Harbor counts as 0", Error: exception}, target)
+		if err != nil {
+			return nil, err
+		}
+		return []*agentsession.OutcomeEntry{e}, nil
+	}
+	labels := make([]string, 0, len(rewards))
+	for label := range rewards {
+		labels = append(labels, label)
+	}
+	sort.Strings(labels)
+	var out []*agentsession.OutcomeEntry
+	for _, label := range labels {
+		v, err := rewards[label].Float64()
+		if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
+			return nil, fmt.Errorf("reward %s is not a finite number: %s", label, rewards[label])
+		}
+		reason := fmt.Sprintf("the verifier rewarded %s", strconv.FormatFloat(v, 'g', -1, 64))
+		e, err := outcome(label, v, o.pass(label, v), agenteval.OutcomeDetails{Task: task, Reason: reason}, target)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
+
+// outcome builds one reward's outcome entry.
+func outcome(label string, v float64, pass bool, d agenteval.OutcomeDetails, target string) (*agentsession.OutcomeEntry, error) {
+	details, err := json.Marshal(d)
+	if err != nil {
+		return nil, err
+	}
+	e := agentsession.NewOutcomeEntry(agentsession.OutcomeTest, target).WithScore(v).WithPass(pass).WithLabel(LabelPrefix + label)
+	e.Details = details
+	return e, nil
+}
+
+// holds reports whether s already holds an outcome equal to e.
+func holds(s *agentsession.Session, e *agentsession.OutcomeEntry) bool {
+	for _, x := range s.Entries() {
+		o, ok := x.(*agentsession.OutcomeEntry)
+		if !ok || o.Kind != e.Kind || o.Target != e.Target || o.Label != e.Label {
+			continue
+		}
+		if o.Score != nil && *o.Score == *e.Score && o.Pass != nil && *o.Pass == *e.Pass {
+			return true
+		}
+	}
+	return false
+}
+
+// topLevel returns the one session of store that names no parent.
+func topLevel(ctx context.Context, store agentsession.Store) (*agentsession.Session, error) {
+	var found []string
+	for sum, err := range store.List(ctx, agentsession.ListFilter{}) {
+		if err != nil {
+			return nil, fmt.Errorf("list sessions: %w", err)
+		}
+		if sum.Header.ParentSession == "" {
+			found = append(found, sum.Header.ID)
+		}
+	}
+	switch len(found) {
+	case 0:
+		return nil, errors.New("no top-level session in the trial's store")
+	case 1:
+	default:
+		return nil, fmt.Errorf("%d top-level sessions in the trial's store: %s", len(found), strings.Join(found, ", "))
+	}
+	if rd, ok := store.(agentsession.Reader); ok {
+		return rd.Read(ctx, found[0])
+	}
+	return store.Open(ctx, found[0])
+}
+
+// runTarget is the run's last entry: the last on the path to the
+// session's leaf that is not an outcome, so a second import finds the
+// target the first wrote to.
+func runTarget(s *agentsession.Session) string {
+	path := s.Path(s.Leaf())
+	for i := len(path) - 1; i >= 0; i-- {
+		if _, ok := path[i].(*agentsession.OutcomeEntry); !ok {
+			return path[i].Base().ID
+		}
+	}
+	return ""
 }

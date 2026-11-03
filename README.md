@@ -218,6 +218,35 @@ Dockerfile, `cpus`, `memory_mb` and `storage_mb` (or the `memory` and
 the agent's and verifier's timeouts. The fixture under
 `harbor/testdata/task` is a task `harbor lint` accepts.
 
+`harbor.ImportJob` reads a finished Harbor job back. For each trial it
+finds the agent's session in the store the agent recorded into under
+the trial's `agent/` directory, the one session there that names no
+parent, writes each of the trial's `verifier_result.rewards` onto it as
+an `outcome`, and returns the job as a `Report`, which `CompareReports`
+compares with another. Harbor leaves two choices open, and this module
+makes them so:
+
+- An imported reward is an outcome of kind `test`, the kind RFC 0001
+  gives a verifier's score, not `eval`, which the runner's judges
+  write: Harbor's reward is its verifier's verdict on the trial.
+  Its `label` is `harbor/<reward key>`, so a reward is never taken
+  for a judge of the same name, its `score` the reward's value, its
+  `pass` a value of at least 1 unless `WithPass` says otherwise, and
+  its `target` the run's last entry. `agenteval.ReadOutcome` reads
+  both kinds.
+- An errored trial with no reward, which Harbor counts as 0, is
+  recorded as that 0, under `harbor/reward`, with the exception in the
+  details' `error`, so the session holds what Harbor counted and why.
+  In the `Report` it is unjudged, with the exception on its error, and
+  `ResultAt` reads it back the same way, so the 0 is not read as the
+  verifier failing the agent; a reader that wants Harbor's mean counts
+  it as 0 from the summary's `unjudged`. A trial that errored after
+  its verifier wrote rewards keeps them, and carries the exception.
+
+An import is idempotent: an outcome the session already holds is not
+written again. Running a task, building its environment and running
+its verifier, stays with Harbor, or with a product's Harbor adapter.
+
 ## Design
 
 The plan is in `docs/plans/eval-layer.md` and the findings of the

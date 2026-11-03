@@ -268,7 +268,10 @@ func WithCost(fn func(model string, usage openresponses.Usage) (float64, bool)) 
 // path to the session's leaf, else its last run end. The task and
 // sample are the path's last agenteval:task record, the scores the
 // outcomes targeting target that the runner wrote for that task and
-// sample (RFC 0001, outcome), in the order they were appended, the
+// sample (RFC 0001, outcome), kind eval or a verifier's test, in the
+// order they were appended, less a harness's score for a run that
+// failed with no verdict ([OutcomeDetails].Error), which is on Err and
+// leaves the run unjudged; the
 // reason the last run end on the path to target, Runs and Resumes the
 // runs there, and Usage, ModelCalls, CostUSD and Subagents are read as
 // the runner reads them, so a stored result and the one Run returned
@@ -301,7 +304,7 @@ func ResultAt(ctx context.Context, store agentsession.Store, sessionID, target s
 			res.Task = withSample(res.Task, rec.Sample)
 		}
 	}
-	ended := false
+	ended, errored := false, false
 	for _, run := range agentsession.Runs(path) {
 		res.Runs++
 		if run.Start.Source == agentsession.SourceResume {
@@ -320,9 +323,16 @@ func ResultAt(ctx context.Context, store agentsession.Store, sessionID, target s
 		if !ok || hasRecord && (d.Task != rec.Task || d.Sample != rec.Sample) {
 			continue
 		}
+		if d.Error != "" {
+			// A harness's score for a run that failed with no verdict:
+			// the run is unjudged, and the error says why.
+			errored = true
+			res.Err = errors.Join(res.Err, fmt.Errorf("%s: %s", score.Judge, d.Error))
+			continue
+		}
 		res.Scores = append(res.Scores, score)
 	}
-	res.judged = len(res.Scores) > 0 || ended && res.Reason != agentturn.ReasonError
+	res.judged = len(res.Scores) > 0 || !errored && ended && res.Reason != agentturn.ReasonError
 	m := measure(ctx, store, o.cost, s, target)
 	res.Usage, res.ModelCalls, res.CostUSD, res.Subagents = m.usage, m.calls, m.cost, m.delegated
 	return res, nil
@@ -334,7 +344,7 @@ func ResultAt(ctx context.Context, store agentsession.Store, sessionID, target s
 func storedTarget(s *agentsession.Session) string {
 	path := s.Path(s.Leaf())
 	for i := len(path) - 1; i >= 0; i-- {
-		if out, ok := path[i].(*agentsession.OutcomeEntry); ok && out.Kind == agentsession.OutcomeEval {
+		if out, ok := path[i].(*agentsession.OutcomeEntry); ok && (out.Kind == agentsession.OutcomeEval || out.Kind == agentsession.OutcomeTest) {
 			return out.Target
 		}
 	}

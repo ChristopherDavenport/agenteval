@@ -1,0 +1,8 @@
+{
+  "id": "0b8e6d2c-1111-4a2b-8c3d-000000000002",
+  "task_name": "agenteval/multi",
+  "trial_name": "multi__e4f5g6h",
+  "agent_info": {"name": "dax", "version": "0.0.30", "model_info": {"name": "echo-1", "provider": "echo"}},
+  "verifier_result": {"rewards": {"reward": 1, "style": 0.5}},
+  "exception_info": null
+}
