@@ -90,7 +90,12 @@ instructions. A call a guard refused, recorded as
 `agentturn:model_blocked`, is served again as the guard's refusal with
 the usage the provider billed when the replayed run sends it, and
 passed over when the replayed guard refuses it before the model is
-called. An output marked `failed` is served as the tool's failure, so
+called. The record says a refused call reached the model only by that
+usage: agentturn writes no flag saying it was sent. So a refusal with
+no usage is taken as a `BeforeModelCall` guard's, and a strict replay
+that sends its request anyway diverges rather than serve a refusal the
+model never made; a model guard's refusal the provider did not bill
+reads the same way until agentturn records whether the call was sent. An output marked `failed` is served as the tool's failure, so
 the replayed record keeps the mark, and a call carrying `copied_from`
 is another session's: it is not indexed, and a call of this session
 is never served its output. A sidecar session names its media by

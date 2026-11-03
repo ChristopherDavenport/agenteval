@@ -1237,16 +1237,19 @@ func (m *Model) CreateStream(ctx context.Context, req openresponses.Request, sin
 	return serveResponse(st, output, n, req, sink)
 }
 
-// serveBlocked serves a call a guard refused, when req is that call:
-// the request's hash is the one the record holds, or, with none
-// recorded, the provider billed the call, so it was sent. It is
+// serveBlocked serves a call a guard refused after it was sent, when
+// req is that call: the provider billed it, and the request's hash is
+// the one the record holds, or none is recorded. It is
 // served as the guard's refusal, an error wrapping agentturn.ErrGuard
 // carrying the recorded text, after a response carrying the recorded
 // usage opened, so the replayed recorder writes the record again with
 // the same hash and usage. served is false when req is not that call:
 // the refusal was a BeforeModelCall guard's, which never reached the
 // model. A call that was billed and whose request differs is a
-// divergence under Strict, and served by position otherwise.
+// divergence under Strict, and served by position otherwise; one that
+// was not billed and whose request was sent all the same is a
+// divergence under Strict, since the recording's guard stopped it
+// before the model, and passed over otherwise.
 func (m *Model) serveBlocked(st step, n int, req openresponses.Request, sink openresponses.EventSink) (served bool, err error) {
 	got, err := requestHash(req, m.named)
 	if err != nil {
@@ -1255,8 +1258,21 @@ func (m *Model) serveBlocked(st step, n int, req openresponses.Request, sink ope
 	b := st.block
 	sv := Served{Kind: KindBlocked, N: n, EntryID: st.blocked.ID, Recorded: b.RequestHash, Got: got}
 	sv.Match = sv.Recorded != "" && got == sv.Recorded
+	// The record says a call was sent only by the usage the provider
+	// billed: agentturn's model_blocked carries no flag of its own, so a
+	// model guard's refusal the provider did not bill reads as one a
+	// BeforeModelCall guard made before the call.
 	sent := b.Usage != nil
 	switch {
+	case sv.Match && !sent:
+		// The request the recording's guard refused before the model was
+		// called reached the model here: this configuration lacks that
+		// guard, or its guard let the request through.
+		if m.opts.strict {
+			m.observe(sv)
+			return true, fmt.Errorf("%w: model blocked %s (step %d): the recording's guard refused this request before the model was called, and the request was sent", ErrDiverged, st.blocked.ID, n)
+		}
+		return false, nil
 	case sv.Match:
 	case sent && m.opts.strict && sv.Recorded != "":
 		m.observe(sv)

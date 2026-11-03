@@ -333,3 +333,40 @@ func entryTypes(s *agentsession.Session) string {
 	}
 	return strings.Join(parts, " ")
 }
+
+// A BeforeModelCall guard's refusal records the request's hash though
+// the request never reached the model. A replay whose configuration
+// has no such guard sends that request: under Strict that is a
+// divergence, not the recording's refusal served as the model's.
+func TestUnsentBlockedCallIsNotServed(t *testing.T) {
+	guard := func(_ context.Context, req *openresponses.Request) error {
+		if lastText(*req) == "refuse" {
+			return fmt.Errorf("%w: policy", agentturn.ErrGuard)
+		}
+		return nil
+	}
+	ran := 0
+	cfg := fixtureConfig(&echo.Adapter{}, upperTool(&ran))
+	cfg.BeforeModelCall = guard
+	orig := record(t, cfg, "one", "refuse")
+	if b := blocked(t, orig); len(b) != 1 || b[0].RequestHash == "" || b[0].Usage != nil {
+		t.Fatalf("model_blocked records = %+v", b)
+	}
+	model, err := replay.NewModel(orig, replay.Strict())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg = fixtureConfig(model, replay.Tools(orig, []agenttool.Tool{upperTool(&ran)}, replay.Strict())...)
+	cfg.BeforeModelCall = model.BeforeModelCall
+	a := agentturn.New(cfg)
+	if _, err := a.Prompt(context.Background(), openresponses.UserText("one")); err != nil {
+		t.Fatal(err)
+	}
+	end, err := a.Prompt(context.Background(), openresponses.UserText("refuse"))
+	if err == nil && end != nil {
+		err = end.Err
+	}
+	if !errors.Is(err, replay.ErrDiverged) || errors.Is(err, agentturn.ErrGuard) {
+		t.Errorf("an unguarded replay of a guarded refusal: err = %v, want a divergence", err)
+	}
+}

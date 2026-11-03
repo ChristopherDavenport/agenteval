@@ -66,7 +66,9 @@ versions may break the API.
   refusal, with the usage the provider billed, when the replayed run
   sends it, and passed over when the replayed guard refuses it first,
   as a `BeforeModelCall` guard does; a run with a model guard's
-  refusal did not replay. `replay.Tools` serves an output marked
+  refusal did not replay. A refusal the provider did not bill is taken
+  as a `BeforeModelCall` guard's, which never reached the model: a
+  strict replay that sends its request diverges rather than serve it. `replay.Tools` serves an output marked
   `failed` as the tool's failure, so the replayed record keeps the
   mark: as the error whose text the loop writes back as the recorded
   output, and under `Strict` a failed output in another form is
