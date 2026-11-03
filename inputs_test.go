@@ -193,3 +193,41 @@ func TestFromSessionResolvesSidecarMedia(t *testing.T) {
 		t.Errorf("prompts = %s, want the data URL", data)
 	}
 }
+
+// One run that took two input messages, a prompt of two items, is one
+// run of the task built from it, not two (review of #57).
+func TestFromSessionKeepsARunsInputsTogether(t *testing.T) {
+	ctx := context.Background()
+	store := newStableStore()
+	rec, s, err := session.Start(ctx, store, agentsession.Header{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := echoConfig()
+	cfg.Tools = nil
+	a := agentturn.New(cfg)
+	unsubscribe := rec.Attach(a)
+	if _, err := a.Prompt(ctx, openresponses.UserText("first"), openresponses.UserText("second")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Prompt(ctx, openresponses.UserText("third")); err != nil {
+		t.Fatal(err)
+	}
+	unsubscribe()
+	task, err := agenteval.FromSession(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs := task.Runs()
+	if len(runs) != 2 || len(runs[0]) != 2 || len(runs[1]) != 1 {
+		t.Fatalf("runs = %v", runs)
+	}
+	r := &agenteval.Runner{Store: store, Config: func(agenteval.Task) agentturn.Config { return cfg }}
+	report, err := r.Run(ctx, &agenteval.Suite{Name: "s", Tasks: []agenteval.Task{task}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := report.Results[0]; res.Err != nil || res.Runs != 2 {
+		t.Errorf("runs = %d, err = %v, want the recording's two", res.Runs, res.Err)
+	}
+}

@@ -117,9 +117,11 @@ versions may break the API.
 
 - `Result.Subagents` (`Delegated`, `UnreadSession`): the delegated
   sessions counted, their usage, model calls and cost, those counted
-  at a resume leaf because no output named one, and those that could
-  not be read or priced, which are named and left out of the cost
-  rather than guessed at. Nil for a run that delegated nothing. (#56)
+  at a resume leaf because no output named one, with that leaf
+  (`DelegatedLeaf`), and those that could not be read, by kind
+  (`UnreadNotFound`, `UnreadElsewhere`, `UnreadFailed`), or priced,
+  which are named and left out of the cost rather than guessed at.
+  Nil for a run that delegated nothing. (#56)
 - `harbor.ImportJob` reads a finished Harbor job back: each trial's
   `verifier_result.rewards` is written onto the agent's top-level
   session in the trial's store as outcomes of kind `test`, labelled
@@ -146,6 +148,11 @@ versions may break the API.
   followed by the same pairing. (#59)
 - `replay.WithBlobs`, `replay.ResolveMedia`, `replay.KindBlocked` and
   `FromSessionMedia`. (#70)
+- `Task.Turns` and `Task.Runs`: a run that took several inputs at
+  once, as `Agent.Prompt` with more than one item does, is one run of
+  the task. `FromSession` sets `Turns` for a session holding such a
+  run, which it split into a run per message, and the runner sends
+  each run's items in one prompt. (#57)
 - `LeftOutMeta`, `InputsMeta` and `InputsByResponses`, the `Task.Meta`
   keys `FromSession` writes for the user messages it leaves out. (#57)
 - `Result.ModelCalls`: how many model calls the run's path paid for,

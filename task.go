@@ -25,6 +25,11 @@ type Task struct {
 	// Prompts is the multi-turn case: what the user says, in order,
 	// one run of the loop each. It wins over Instruction when set.
 	Prompts openresponses.Items `json:"prompts,omitempty"`
+	// Turns is the case where a run took several inputs at once: the
+	// items of each run, in order, a run of the loop each. It wins over
+	// Prompts and Instruction when set. FromSession sets it, beside
+	// Prompts, when a run of the session took more than one input.
+	Turns []openresponses.Items `json:"turns,omitempty"`
 	// Setup is product-defined, such as a repository revision to check
 	// out before the run. The runner records it and honours none of it.
 	Setup map[string]string `json:"setup,omitempty"`
@@ -45,6 +50,19 @@ func (t Task) Inputs() openresponses.Items {
 		return openresponses.Items{openresponses.UserText(t.Instruction)}
 	}
 	return nil
+}
+
+// Runs returns what the runner sends, one element per run of the
+// loop: Turns when set, else each of [Task.Inputs] as a run of its own.
+func (t Task) Runs() []openresponses.Items {
+	if len(t.Turns) > 0 {
+		return t.Turns
+	}
+	var out []openresponses.Items
+	for _, item := range t.Inputs() {
+		out = append(out, openresponses.Items{item})
+	}
+	return out
 }
 
 // Manifest says where a suite was loaded from and what it held: the
@@ -174,7 +192,8 @@ var ErrNoPrompts = errors.New("agenteval: session has no user prompts on its pat
 // 0001, run): per run started by an input, the user messages before its
 // first response. Model output, tool outputs, summaries and app-only
 // entries are not prompts, and neither is a user message that started
-// no turn, which is named under [LeftOutMeta].
+// no turn, which is named under [LeftOutMeta]. A run that took several
+// inputs at once stays one run: Turns then holds each run's inputs.
 func FromSession(s *agentsession.Session) (Task, error) {
 	return FromSessionAt(s, s.Leaf())
 }
@@ -193,6 +212,11 @@ func FromSessionMedia(ctx context.Context, s *agentsession.Session, leaf string,
 	}
 	if task.Prompts, err = replay.ResolveMedia(ctx, br, s.ID(), task.Prompts); err != nil {
 		return Task{}, fmt.Errorf("agenteval: %w", err)
+	}
+	for i, run := range task.Turns {
+		if task.Turns[i], err = replay.ResolveMedia(ctx, br, s.ID(), run); err != nil {
+			return Task{}, fmt.Errorf("agenteval: %w", err)
+		}
 	}
 	return task, nil
 }
@@ -215,15 +239,27 @@ func fromSession(s *agentsession.Session, leaf string) (Task, error) {
 	task := Task{ID: s.ID(), Meta: map[string]string{"session": s.ID(), "leaf": leaf}}
 	turns, byRuns := agentsession.PathInputs(path)
 	var left []string
+	together := false
 	for _, turn := range turns {
+		var run openresponses.Items
 		for _, it := range turn.Inputs {
 			if m, ok := it.Item.(*openresponses.Message); ok {
-				task.Prompts = append(task.Prompts, m)
+				run = append(run, m)
 			}
 		}
+		task.Prompts = append(task.Prompts, run...)
+		if len(run) > 0 {
+			task.Turns = append(task.Turns, run)
+		}
+		together = together || len(run) > 1
 		for _, lo := range turn.LeftOut {
 			left = append(left, lo.Kind+"="+lo.Entry.ID)
 		}
+	}
+	// A run that took several inputs is kept one run; otherwise Prompts
+	// says it all.
+	if !together {
+		task.Turns = nil
 	}
 	if len(left) > 0 {
 		task.Meta[LeftOutMeta] = strings.Join(left, " ")

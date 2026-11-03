@@ -201,10 +201,17 @@ call priced at the model in force in the child, the child's own
 children included. `usage` and `model_calls` stay the path's own, as
 the document's token totals and `total_steps` do, and `subagents`
 holds the children's: how many sessions were counted, their usage,
-calls and cost, which were counted at a resume leaf, and which could
-not be read or priced and were left out rather than guessed at. The
-children are read from the runner's store, so the document agrees with
-the report when it is exported with `Subsessions` resolving there.
+calls and cost, which were counted at a resume leaf and at which
+entry, and which could not be read (`kind` `not_found`, `elsewhere`
+for a callee in another system, or `failed`) or priced. A child that
+could not be read, or one with any call the hook cannot price, is left
+out of `cost_usd` rather than guessed at, and named there, so
+`cost_usd` is the whole run's only when `subagents` names neither.
+The children are read from the runner's store, and the document
+agrees with the report when it is exported with `Subsessions`
+resolving there and every child's calls are priced: agentsession's
+export counts the priced calls of a child it could only partly price,
+where this module, as RFC 0001 asks, leaves that child out.
 
 ## Harbor
 

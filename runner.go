@@ -176,8 +176,13 @@ type Result struct {
 	// record of calls that produced no response, as its attempts. It is
 	// the exported document's total_steps.
 	ModelCalls int `json:"model_calls,omitempty"`
-	// CostUSD is the run's cost under Runner.Cost, when every call was
-	// priced.
+	// CostUSD is the run's cost under Runner.Cost, when every call on
+	// the run's own path was priced, nil otherwise. It includes the
+	// work the run delegated, each subsession counted once, less any
+	// child that could not be read or whose calls were not all priced:
+	// such a child is left out rather than guessed at, and named in
+	// [Delegated.Unread] or [Delegated.Unpriced] on Subagents, which a
+	// reader checks before taking CostUSD as the whole run's.
 	CostUSD *float64 `json:"cost_usd,omitempty"`
 	// Subagents is the work the run's path delegated to subsessions,
 	// nil when it delegated none.
@@ -220,8 +225,9 @@ type Delegated struct {
 	CostUSD *float64 `json:"cost_usd,omitempty"`
 	// AtResumeLeaf names the sessions counted at the leaf a reader
 	// resuming them takes, since no output named the one the call
-	// ended at.
-	AtResumeLeaf []string `json:"at_resume_leaf,omitempty"`
+	// ended at, with that leaf, as RFC 0001 (link) asks a reader to
+	// say.
+	AtResumeLeaf []DelegatedLeaf `json:"at_resume_leaf,omitempty"`
 	// Unread names the sessions that could not be read, and why; they
 	// are left out of everything above rather than guessed at.
 	Unread []UnreadSession `json:"unread,omitempty"`
@@ -233,11 +239,32 @@ type Delegated struct {
 
 // UnreadSession is a delegated session a reader could not read: one
 // the store does not hold, one held in another system, or one whose
-// read failed.
+// read failed, which Kind says, [UnreadNotFound], [UnreadElsewhere] or
+// [UnreadFailed]; Error is the reader's text.
 type UnreadSession struct {
 	Session string `json:"session"`
+	Kind    string `json:"kind"`
 	Error   string `json:"error"`
 }
+
+// DelegatedLeaf is the entry of a delegated session whose path was
+// counted.
+type DelegatedLeaf struct {
+	Session string `json:"session"`
+	Entry   string `json:"entry"`
+}
+
+// The kinds of [UnreadSession]: why a delegated session was not read.
+const (
+	// UnreadNotFound is a session the store does not hold, or one that
+	// holds no entry by the leaf the parent named.
+	UnreadNotFound = "not_found"
+	// UnreadElsewhere is a callee in another system, its link naming a
+	// URL, whose session the store does not hold.
+	UnreadElsewhere = "elsewhere"
+	// UnreadFailed is a session whose read failed.
+	UnreadFailed = "failed"
+)
 
 // MarshalJSON writes the result with Err as an "error" string.
 func (r Result) MarshalJSON() ([]byte, error) {
@@ -367,7 +394,7 @@ func (r *Runner) samples(task Task) ([]int, error) {
 // runTask runs one task in a fresh session and judges it.
 func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task, sample int) (res Result) {
 	res.Task, res.Sample = task, sample
-	inputs := task.Inputs()
+	inputs := task.Runs()
 	if len(inputs) == 0 {
 		res.Err = fmt.Errorf("agenteval: task %s has nothing to send", task.ID)
 		return res
@@ -417,8 +444,8 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task, sample in
 	a := agentturn.New(cfg, seed...)
 	unsubscribe := rec.Attach(a)
 	failed := false
-	for _, item := range inputs {
-		end, err := a.Prompt(ctx, item)
+	for _, items := range inputs {
+		end, err := a.Prompt(ctx, items...)
 		if end != nil {
 			res.Ends = append(res.Ends, end)
 			res.Runs++
@@ -1176,7 +1203,14 @@ func delegated(ctx context.Context, store agentsession.Store, price func(string,
 	}
 	d := &Delegated{}
 	for _, u := range unread {
-		d.Unread = append(d.Unread, UnreadSession{Session: u.Session, Error: u.Err.Error()})
+		kind := UnreadFailed
+		switch {
+		case errors.Is(u.Err, agentsession.ErrChildElsewhere):
+			kind = UnreadElsewhere
+		case errors.Is(u.Err, agentsession.ErrChildNotFound):
+			kind = UnreadNotFound
+		}
+		d.Unread = append(d.Unread, UnreadSession{Session: u.Session, Kind: kind, Error: u.Err.Error()})
 	}
 	total := 0.0
 	var walk func([]agentsession.Delegated)
@@ -1204,8 +1238,7 @@ func delegated(ctx context.Context, store agentsession.Store, price func(string,
 			}
 			for _, leaf := range child.Leaves {
 				if !leaf.Named {
-					d.AtResumeLeaf = append(d.AtResumeLeaf, child.Session)
-					break
+					d.AtResumeLeaf = append(d.AtResumeLeaf, DelegatedLeaf{Session: child.Session, Entry: leaf.Entry})
 				}
 			}
 			walk(child.Children)

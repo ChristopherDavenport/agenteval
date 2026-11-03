@@ -108,6 +108,21 @@ func TestRunnerCostCountsDelegatedWork(t *testing.T) {
 		if len(sub.Unread) != 0 || len(sub.Unpriced) != 0 {
 			t.Errorf("subagents = %+v, want the child read and priced", sub)
 		}
+		// agentturn names no leaf in the call's output, so the child is
+		// counted at the leaf a resume takes, which is recorded.
+		var childID string
+		for _, e := range s.Entries() {
+			if l, ok := e.(*agentsession.LinkEntry); ok && l.Rel == agentsession.RelSubsession {
+				childID = l.Session
+			}
+		}
+		child, err := store.Read(context.Background(), childID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(sub.AtResumeLeaf) != 1 || sub.AtResumeLeaf[0].Session != childID || sub.AtResumeLeaf[0].Entry != child.Leaf() {
+			t.Errorf("at resume leaf = %+v, want %s at %s", sub.AtResumeLeaf, childID, child.Leaf())
+		}
 		if res.CostUSD == nil || *res.CostUSD != own+*sub.CostUSD {
 			t.Errorf("cost = %v, want the path's %v and the child's %v", res.CostUSD, own, *sub.CostUSD)
 		}
@@ -146,7 +161,7 @@ func TestRunnerCostCountsDelegatedWork(t *testing.T) {
 		res, s := run(t, unreadable{newStableStore()}, miniRate)
 		own, _ := pathCost(t, s, res.Target)
 		sub := res.Subagents
-		if sub == nil || len(sub.Unread) != 1 || sub.Unread[0].Session == "" || sub.Unread[0].Error == "" || sub.Sessions != 0 {
+		if sub == nil || len(sub.Unread) != 1 || sub.Unread[0].Session == "" || sub.Unread[0].Kind != agenteval.UnreadNotFound || sub.Unread[0].Error == "" || sub.Sessions != 0 {
 			t.Fatalf("subagents = %+v, want the child named unread", sub)
 		}
 		if res.CostUSD == nil || *res.CostUSD != own {
