@@ -131,7 +131,26 @@ later in the run shows as `folded`, whether each side's path held a
 compaction entry, when one did and the other did not.
 
 `price` loads a table of rates and prices a run with ATIF's formula,
-and the runner and the exporter take the same hook. A result's `usage`,
+and the runner and the exporter take the same hook. The table is JSON,
+the reader's own configuration: a model name, with or without its
+provider prefix, to rates in US dollars per million tokens.
+
+```json
+{
+  "gpt-5": {"input": 1.25, "cached": 0.125, "output": 10},
+  "claude-sonnet-4-5": {"input": 3, "cached": 0.3, "output": 15,
+    "cache_write": 3.75, "cache_write_by_ttl": {"5m": 3.75, "1h": 6}}
+}
+```
+
+`cached` prices prompt tokens read from the provider's cache.
+`cache_write` and `cache_write_by_ttl` price the tokens written to it,
+which openresponses reports as the
+`openresponses-experimental.cache_write_tokens` extension and its
+split by TTL (docs/extensions.md section 5): each TTL's writes at that
+TTL's rate when the usage splits them, else at `cache_write`, and the
+rest of the uncached prompt at `input`, as the extension's Readers rule
+asks. A table with no write rate prices writes as input. A result's `usage`,
 `model_calls` and `cost_usd` sum every model call on the run's path as
 `agentsession.ModelCalls` reads it, which is what the exported
 document's final metrics sum, so the two agree on the total: every

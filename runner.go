@@ -1230,13 +1230,20 @@ func delegated(ctx context.Context, store agentsession.Store, price func(string,
 	return d
 }
 
-// addUsage adds one call's usage to a sum.
+// addUsage adds one call's usage to a sum, the tokens written to the
+// prompt cache among them (openresponses docs/extensions.md section
+// 5), as a count: a split by TTL does not survive a sum over calls that
+// did not all report one, and each call was priced with its own.
 func addUsage(sum *openresponses.Usage, u openresponses.Usage) {
 	sum.InputTokens += u.InputTokens
 	sum.OutputTokens += u.OutputTokens
 	sum.TotalTokens += u.TotalTokens
 	sum.InputTokensDetails.CachedTokens += u.InputTokensDetails.CachedTokens
 	sum.OutputTokensDetails.ReasoningTokens += u.OutputTokensDetails.ReasoningTokens
+	if n, ok := u.InputTokensDetails.CacheWriteTokens(); ok {
+		have, _ := sum.InputTokensDetails.CacheWriteTokens()
+		sum.InputTokensDetails.SetCacheWriteTokens(have + n)
+	}
 }
 
 // trajectoryAt returns the session's trajectory ending at leaf.

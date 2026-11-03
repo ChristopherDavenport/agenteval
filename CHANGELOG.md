@@ -40,6 +40,21 @@ versions may break the API.
   entries, whose turns are split at responses, is marked
   `Meta[InputsMeta] = InputsByResponses`. (#57)
 
+- `price` prices a write to the provider's prompt cache at the write
+  rate, as openresponses docs/extensions.md section 5 asks of a price
+  table that has one: `Rates.CacheWrite`, and `Rates.CacheWriteByTTL`
+  per TTL as the usage keys its split (`"5m"`, `"1h"`), written
+  `cache_write` and `cache_write_by_ttl` in the table's JSON. The
+  writes, `openresponses-experimental.cache_write_tokens` or
+  OpenRouter's unprefixed count, come out of the uncached prompt;
+  each TTL of a split is priced at its own rate, else at
+  `cache_write`, else at `input`. Every write was priced as plain
+  input, so a Claude session writing its one-hour cache cost about
+  38% more than its `cost_usd` said. A table without a write rate
+  prices as before. `Result.Usage` sums the write count. (#68)
+  **Breaking:** `Rates` holds a map, so it is no longer comparable
+  with `==`.
+
 ### Changed
 
 - `Result.CostUSD` includes the work the run delegated to subagents,
