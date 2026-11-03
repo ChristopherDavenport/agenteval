@@ -9,9 +9,24 @@ versions may break the API.
 
 ### Dependencies
 
-- agentsession v0.0.27 to v0.0.28, in the root module and in
-  `harbor`. No API of this module changes with it. A redacted session
-  now hashes independently: a redactor gives each redacted response
+- agentsession v0.0.27 to v0.0.34, agenttool v0.0.23 to v0.0.28,
+  agentturn and its `session` module v0.0.30 to v0.0.35, and
+  openresponses v0.0.15 to v0.0.18, in the root module and in
+  `harbor`. agentsession v0.0.34 is format 0.17, so the runner records
+  `agentsession/0.17`, appending an outcome raises a session it judges
+  to 0.17, and agentsession v0.0.33 and earlier refuse those files.
+  The fixtures under `testdata/sessions` are re-recorded in that
+  format. Since format 0.14 a workspace's `host` and `instance` are
+  fields of `agentsession.Workspace`, no longer among its unknown
+  members, so strict replay's substitution error, which names the
+  members that differ when kind and ref agree, reads them there.
+  openresponses v0.0.18 keeps members it does not define in an `Extra`
+  map on `reasoning`, `usage` and their kin, which makes them no longer
+  comparable with `==`; `DiffSettings` compares the reasoning settings
+  by their JSON, so a member such as an effort extension that differs
+  is a difference. What the new formats change in how this module
+  reads a session is under Fixed and Changed. From agentsession
+  v0.0.28 a redacted session hashes independently: a redactor gives each redacted response
   the `request_hash` of the request the redacted session rebuilds for
   it, so readers verify and replay it with no exception for redacted
   entries. Strict replay, which has none, replays a redacted session

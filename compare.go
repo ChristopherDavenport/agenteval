@@ -309,7 +309,7 @@ func DiffSettings(a, b agentsession.Settings) ConfigDiff {
 	if a.Instructions != b.Instructions {
 		d.Instructions = &Change{A: a.Instructions, B: b.Instructions}
 	}
-	if a.Reasoning != b.Reasoning {
+	if !sameJSON(a.Reasoning, b.Reasoning) {
 		d.Reasoning = &Change{A: a.Reasoning, B: b.Reasoning}
 	}
 	if !sameJSON(a.Text, b.Text) {

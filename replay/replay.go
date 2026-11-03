@@ -871,20 +871,21 @@ func describeChange(was, now *agentsession.Workspace) string {
 	if was == nil || now == nil || was.Kind != now.Kind || was.Ref != now.Ref {
 		return fmt.Sprintf("runs in %s where the path before it ran in %s", describeWorkspace(now), describeWorkspace(was))
 	}
-	keys := make([]string, 0, len(was.Unknown)+len(now.Unknown))
-	for k := range was.Unknown {
+	wasMembers, nowMembers := workspaceMembers(was), workspaceMembers(now)
+	keys := make([]string, 0, len(wasMembers)+len(nowMembers))
+	for k := range wasMembers {
 		keys = append(keys, k)
 	}
-	for k := range now.Unknown {
-		if _, ok := was.Unknown[k]; !ok {
+	for k := range nowMembers {
+		if _, ok := wasMembers[k]; !ok {
 			keys = append(keys, k)
 		}
 	}
 	slices.Sort(keys)
 	var diffs []string
 	for _, k := range keys {
-		a, inWas := was.Unknown[k]
-		b, inNow := now.Unknown[k]
+		a, inWas := wasMembers[k]
+		b, inNow := nowMembers[k]
 		switch {
 		case !inWas:
 			diffs = append(diffs, fmt.Sprintf("%s %s where it had none", k, b))
@@ -895,6 +896,22 @@ func describeChange(was, now *agentsession.Workspace) string {
 		}
 	}
 	return fmt.Sprintf("runs in %s with %s", describeWorkspace(now), strings.Join(diffs, ", "))
+}
+
+// workspaceMembers is every member of w beyond kind and ref, as JSON:
+// host and instance, which the format defines as fields since 0.14,
+// and the members it does not define.
+func workspaceMembers(w *agentsession.Workspace) map[string]json.RawMessage {
+	m := make(map[string]json.RawMessage, len(w.Unknown)+2)
+	for k, v := range w.Unknown {
+		m[k] = v
+	}
+	for k, v := range map[string]string{"host": w.Host, "instance": w.Instance} {
+		if v != "" {
+			m[k], _ = json.Marshal(v)
+		}
+	}
+	return m
 }
 
 // sameJSON reports whether two JSON values are equal as values, so

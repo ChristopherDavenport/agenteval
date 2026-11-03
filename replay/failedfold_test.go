@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -177,7 +178,7 @@ func sameUsage(a, b *openresponses.Usage) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	return *a == *b
+	return reflect.DeepEqual(*a, *b)
 }
 
 // A fold whose request differs from the one the failed fold recorded
