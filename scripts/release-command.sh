@@ -10,8 +10,8 @@
 # first-party require at VERSION, tidies against the proxy, builds and
 # tests, commits, guards and tags <dir>/VERSION from that commit; then
 # it restores the command's go.mod and go.sum as they were before, in a
-# second commit, so the tree builds the command against itself again, and pushes the branch and the tags in
-# one atomic push. Nothing is pushed if any step fails: git reset --hard
+# second commit, so the tree builds the command against itself again,
+# and pushes the branch and the tags in one atomic push. Nothing is pushed if any step fails: git reset --hard
 # to the commit before, and git tag -d the tags written.
 set -Eeuo pipefail
 
@@ -46,6 +46,9 @@ export GOFLAGS
 VERSION="${1:-}"; shift || true
 [ -n "$VERSION" ] && [ $# -gt 0 ] || die "usage: $0 <version> <command-dir>..."
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# Scratch space, outside any module, removed however the script ends.
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
 [ -z "$(git status --porcelain)" ] || die "working tree is not clean"
 
 # Everything below is checked before anything is changed.
@@ -70,7 +73,7 @@ done
 # tidy below fails half way.
 on_proxy() {
   local err
-  err="$(cd "$(mktemp -d)" && GOWORK=off go list -m -e -f '{{with .Error}}{{.Err}}{{end}}' "$1@$VERSION" 2>&1)"
+  err="$(cd "$TMP" && GOWORK=off go list -m -e -f '{{with .Error}}{{.Err}}{{end}}' "$1@$VERSION" 2>&1)"
   [ -z "$err" ] || die "$1@$VERSION is not on the proxy yet: $err"
 }
 on_proxy "$(sed -n 's/^module[[:space:]]*//p' go.mod | head -1)"
@@ -104,8 +107,8 @@ for c in "$@"; do
   # go build ./... matching a single main package writes the binary
   # into the module's directory, where the add below would commit it
   # into the release; -o to a directory of its own keeps it out.
-  bin="$(mktemp -d)"
-  (cd "$c" && GOWORK=off GOFLAGS=-mod=mod go mod tidy && GOWORK=off GOFLAGS=-mod=readonly go build -o "$bin" ./... && GOWORK=off GOFLAGS=-mod=readonly go test ./...)
+  bin="$TMP/bin"
+  (cd "$c" && GOWORK=off GOFLAGS=-mod=mod go mod tidy && GOWORK=off GOFLAGS=-mod=readonly go build -o "$bin/" ./... && GOWORK=off GOFLAGS=-mod=readonly go test ./...)
   rm -rf "$bin"
 done
 # The go.mod and go.sum alone: anything else the steps above left would

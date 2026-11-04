@@ -140,13 +140,15 @@ case "$TAG" in
     # ",direct" would do the same. A GOPROXY set by the caller, such as
     # release-command's or its tests' file proxy, is kept.
     MODULE="$(sed -n 's/^module[[:space:]]*//p' go.mod | head -1)"
+    q="$(mktemp -d)"
+    trap 'rm -rf "$q"' EXIT
     for p in $(awk -v p="$MODULE" '
         /^require[[:space:]]*\(/ { blk = 1; next }
         blk && /^\)/             { blk = 0; next }
         blk && ($1 == p || index($1, p "/") == 1) { print $1; next }
         /^require[[:space:]]/ && ($2 == p || index($2, p "/") == 1) { print $2 }
       ' "$DIR/go.mod" | sort -u); do
-      err="$(cd "$(mktemp -d)" && GOENV=off GOPRIVATE= GONOPROXY= GOPROXY="${GOPROXY:-https://proxy.golang.org}" GOWORK=off GOFLAGS= go list -m -e -f '{{with .Error}}{{.Err}}{{end}}' "$p@$VERSION" 2>&1)"
+      err="$(cd "$q" && GOENV=off GOPRIVATE= GONOPROXY= GOPROXY="${GOPROXY:-https://proxy.golang.org}" GOWORK=off GOFLAGS= go list -m -e -f '{{with .Error}}{{.Err}}{{end}}' "$p@$VERSION" 2>&1)"
       [ -z "$err" ] || die "$p@$VERSION is not on the proxy yet: $err
             Release the command once the root and its libraries are served."
       ok "$p@$VERSION is on the proxy"
