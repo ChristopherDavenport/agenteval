@@ -83,8 +83,9 @@ make release-command VERSION=v0.1.0
 ```
 
 `scripts/release-command.sh` fetches origin and refuses, before changing
-anything, unless it is on `main`, HEAD contains `origin/main`, no
-`cmd/agenteval` tag of the version exists locally or on origin, and the
+anything, unless it is on `main`, HEAD contains `origin/main`, the version is the
+latest root release, no `cmd/agenteval` tag of the version exists
+locally or on origin, and the
 proxy serves the root and every library at the version; it asks
 `https://proxy.golang.org` alone, with the go env file off
 (`GOENV=off`: an empty `GOPRIVATE` would otherwise fall back to the
@@ -100,7 +101,8 @@ go.mod and go.sum from before in a second commit, so the tree builds
 the command against itself again, and pushes the branch and the tag
 atomically. On a failure it prints the `git reset --hard` and `git tag
 -d` that undo it. The guard refuses a command tag whose go.mod holds
-any replace, one whose root version is not tagged before it, one not
+any replace, one whose root version is not tagged before it or is not
+the latest root release, one not
 requiring its first-party modules at its version, and one whose root or
 `harbor` the proxy does not serve. On the tag, the release workflow runs
 `go install github.com/ChristopherDavenport/agenteval/cmd/agenteval@vX.Y.Z`.

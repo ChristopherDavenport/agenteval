@@ -122,6 +122,11 @@ case "$TAG" in
     git merge-base --is-ancestor "$VERSION" HEAD \
       || die "root $VERSION is not an ancestor of this commit"
     ok "root $VERSION was released before this commit"
+    # At an older root release the command would be tagged from today's
+    # tree against older libraries.
+    [ "$VERSION" = "$ROOT_LATEST" ] \
+      || die "$VERSION is not the latest root release, $ROOT_LATEST; a command is released at the latest"
+    ok "$VERSION is the latest root release"
     "$HERE/versions.sh" check "$VERSION" "$DIR" \
       || die "$DIR does not require its first-party modules at $VERSION"
     ok "requires every first-party module at $VERSION"

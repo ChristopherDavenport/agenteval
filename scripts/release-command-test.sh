@@ -14,7 +14,7 @@ export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER
 M=example.com/m
 fails=0
 
-# refuse <name> <setup: tagged|unserved-lib|behind-origin|no-test-flag|path-origin|branch> <what it says>
+# refuse <name> <setup: tagged|unserved-lib|behind-origin|no-test-flag|path-origin|branch|older> <what it says>
 refuse() {
   name="$1"; setup="$2"; says="$3"
   d="$(mktemp -d)"
@@ -46,6 +46,7 @@ refuse() {
     git push -q origin main --tags 2>/dev/null
     case "$setup" in
       tagged) git tag cmd/x/v0.0.2 ;;
+      older) git tag v0.0.3 && git push -q origin v0.0.3 2>/dev/null ;;
       behind-origin)
         git -c user.email=t@t -c user.name=t commit -q --allow-empty -m later
         git push -q origin main 2>/dev/null
@@ -75,6 +76,7 @@ refuse "HEAD behind origin/main" behind-origin "does not contain origin/main"
 refuse "RELEASE_PROXY outside a test" no-test-flag "RELEASE_PROXY"
 refuse "RELEASE_PROXY with an origin not file://" path-origin "RELEASE_PROXY"
 refuse "a branch other than main" branch "not on main"
+refuse "a root release that is not the latest" older "not the latest root release"
 
 # The whole second step, on a release the root and lib were tagged at:
 # the command is tagged from a commit whose go.mod holds no replace and
@@ -202,6 +204,7 @@ command refuse cmd/x/v0.0.2 v0.0.2 no root v0.0.1
 command refuse cmd/x/v0.0.2 v0.0.1 no all v0.0.1
 command refuse cmd/x/v0.0.2 v0.0.2 no all v0.0.1 cmd/x/v0.0.2
 command refuse cmd/x/v0.0.2 v0.0.2 no all v0.0.1 cmd/x/v0.0.3
+command refuse cmd/x/v0.0.2 v0.0.2 no all v0.0.1 v0.0.3
 
 [ "$fails" = 0 ] && echo "release-command tests passed"
 exit "$fails"

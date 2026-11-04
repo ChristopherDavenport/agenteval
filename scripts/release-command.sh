@@ -55,6 +55,11 @@ git merge-base --is-ancestor origin/main HEAD \
   || die "HEAD does not contain origin/main: pull first"
 git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null || die "the root is not tagged $VERSION: run make release first"
 remote_tags="$(git ls-remote --tags origin 2>/dev/null | sed -e 's|.*refs/tags/||' -e '/\^{}$/d')"
+# A command is released at the latest root release alone: at an older
+# one it would tag today's tree against older libraries, and the restore
+# below would point main's command back at them.
+latest="$( { git tag -l 'v*'; printf '%s\n' "$remote_tags"; } | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)"
+[ "$VERSION" = "$latest" ] || die "$VERSION is not the latest root release, $latest"
 for c in "$@"; do
   [ -f "$c/go.mod" ] || die "no module at $c"
   ! git rev-parse -q --verify "refs/tags/$c/$VERSION" >/dev/null || die "$c/$VERSION is tagged already"
