@@ -86,8 +86,10 @@ make release-command VERSION=v0.1.0
 anything, unless it is on `main`, HEAD contains `origin/main`, no
 `cmd/agenteval` tag of the version exists locally or on origin, and the
 proxy serves the root and every library at the version; it asks
-`https://proxy.golang.org` alone, with `GOPRIVATE`, `GONOPROXY` and
-`GONOSUMDB` cleared and no `-mod` flag, as `go install` would.
+`https://proxy.golang.org` alone, with the go env file off
+(`GOENV=off`: an empty `GOPRIVATE` would otherwise fall back to the
+file's), `GOPRIVATE`, `GONOPROXY` and `GONOSUMDB` empty and no `-mod`
+flag, as `go install` would; the guard asks the same way.
 `RELEASE_PROXY`, which its tests point at a file proxy, is honoured
 only with `RELEASE_COMMAND_TEST=1` and a `file://` origin. It then drops
 the command's replaces, points its first-party requires at the version,

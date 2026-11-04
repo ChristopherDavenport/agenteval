@@ -129,6 +129,11 @@ case "$TAG" in
     # (here harbor), must be on the proxy: go install resolves them
     # there. Asked from outside any module: inside the root, the go
     # command answers for the main module from the tree, not the proxy.
+    # And asked of the proxy alone, as go install asks: GOENV=off keeps a
+    # GOPRIVATE in the go env file from sending it to origin (an empty
+    # variable falls back to the file), and the default GOPROXY's
+    # ",direct" would do the same. A GOPROXY set by the caller, such as
+    # release-command's or its tests' file proxy, is kept.
     MODULE="$(sed -n 's/^module[[:space:]]*//p' go.mod | head -1)"
     for p in $(awk -v p="$MODULE" '
         /^require[[:space:]]*\(/ { blk = 1; next }
@@ -136,7 +141,7 @@ case "$TAG" in
         blk && ($1 == p || index($1, p "/") == 1) { print $1; next }
         /^require[[:space:]]/ && ($2 == p || index($2, p "/") == 1) { print $2 }
       ' "$DIR/go.mod" | sort -u); do
-      err="$(cd "$(mktemp -d)" && GOWORK=off GOFLAGS= go list -m -e -f '{{with .Error}}{{.Err}}{{end}}' "$p@$VERSION" 2>&1)"
+      err="$(cd "$(mktemp -d)" && GOENV=off GOPRIVATE= GONOPROXY= GOPROXY="${GOPROXY:-https://proxy.golang.org}" GOWORK=off GOFLAGS= go list -m -e -f '{{with .Error}}{{.Err}}{{end}}' "$p@$VERSION" 2>&1)"
       [ -z "$err" ] || die "$p@$VERSION is not on the proxy yet: $err
             Release the command once the root and its libraries are served."
       ok "$p@$VERSION is on the proxy"

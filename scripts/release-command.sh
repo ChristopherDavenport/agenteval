@@ -24,6 +24,13 @@ die() { echo "release-command: $*" >&2; exit 1; }
 # that is a file:// remote, a throwaway repository, and refused
 # otherwise, so one leaking in from the environment cannot have go.sum
 # written from an unverified source.
+#
+# GOENV=off is load-bearing. The go command reads an empty variable as
+# unset and falls back to the go env file (go env -w), so GOPRIVATE=
+# alone would leave a GOPRIVATE set there in force, and with it
+# GONOPROXY and GONOSUMDB: the root and its libraries would be fetched
+# from origin and their go.sum lines written unchecked. With the file
+# off, the defaults come from GOROOT/go.env and the variables here.
 if [ -n "${RELEASE_PROXY:-}" ]; then
   [ "${RELEASE_COMMAND_TEST:-}" = 1 ] || die "RELEASE_PROXY is set outside a test (RELEASE_COMMAND_TEST=1); unset it"
   case "$(git remote get-url origin 2>/dev/null)" in
@@ -31,7 +38,7 @@ if [ -n "${RELEASE_PROXY:-}" ]; then
     *) die "RELEASE_PROXY is honoured only for a file:// origin, a test's" ;;
   esac
 fi
-export GOPROXY="${RELEASE_PROXY:-https://proxy.golang.org}" GOPRIVATE= GONOPROXY= GOFLAGS="${GOFLAGS:+$GOFLAGS }"
+export GOENV=off GOPROXY="${RELEASE_PROXY:-https://proxy.golang.org}" GOPRIVATE= GONOPROXY= GOFLAGS="${GOFLAGS:+$GOFLAGS }"
 [ -n "${RELEASE_PROXY:-}" ] || export GONOSUMDB= GOSUMDB=sum.golang.org
 GOFLAGS="$(printf '%s' "$GOFLAGS" | sed -E 's/-mod=[a-z]+//g')"
 export GOFLAGS
