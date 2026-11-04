@@ -15,3 +15,14 @@ require (
 	github.com/ChristopherDavenport/agentturn v0.0.37 // indirect
 	github.com/ChristopherDavenport/agentturn/session v0.0.37 // indirect
 )
+
+// The replaces build the command against the tree. go install refuses
+// a module holding any, so make release-command releases it with them
+// dropped, tidied against the root and harbor releases the requires
+// name, and puts them back after the tag. make extracted copies this
+// module out of the tree, drops them and builds it against those
+// releases.
+replace (
+	github.com/ChristopherDavenport/agenteval => ../../
+	github.com/ChristopherDavenport/agenteval/harbor => ../../harbor
+)
