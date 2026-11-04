@@ -62,6 +62,8 @@ jobs:
         run: make lint
       - name: govulncheck
         run: make vuln
+      - name: Release script tests
+        run: make guard-test
 
   # The one job that resolves a nested module's require lines. Every
   # other job builds inside the tree, where the replace answers first and

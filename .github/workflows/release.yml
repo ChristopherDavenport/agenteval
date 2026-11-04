@@ -28,3 +28,26 @@ jobs:
           else
             gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes
           fi
+
+  install:
+    name: go install the command
+    # A command tag is the second step of a release: the proxy must take
+    # it the way a user installs it, which a replace left in its go.mod
+    # would refuse.
+    if: startsWith(github.ref_name, 'cmd/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - name: go install at the tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          dir="${TAG%/v*}"
+          version="v${TAG##*/v}"
+          for i in 1 2 3 4 5; do
+            GOWORK=off GOFLAGS= go install "github.com/ChristopherDavenport/agenteval/$dir@$version" && exit 0
+            sleep 30 # the proxy may not have seen the tag yet
+          done
+          exit 1

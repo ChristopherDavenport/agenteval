@@ -5,6 +5,22 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+### Changed
+
+- `go install github.com/ChristopherDavenport/agenteval/cmd/agenteval@vX.Y.Z`
+  works. `cmd/agenteval`'s go.mod carried the replaces that build it
+  against the tree, which `go install pkg@version` refuses, so no
+  released version of the command could be installed. A release is now
+  two steps: `make release` tags the root and `harbor` alone, and `make
+  release-command`, once the proxy serves them, tags
+  `cmd/agenteval/vX.Y.Z` from a commit whose go.mod holds no replace and
+  was tidied against the proxy, then points the tree at itself again.
+  The release guard refuses a command tag holding a replace or requiring
+  a module the proxy does not serve, and the release workflow runs `go
+  install` on each command tag.
+
 ## v0.0.12 - 2026-11-03
 
 ### Fixed
