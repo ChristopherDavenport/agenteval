@@ -11,8 +11,9 @@
 # tests, commits, guards and tags <dir>/VERSION from that commit; then
 # it restores the command's go.mod and go.sum as they were before, in a
 # second commit, so the tree builds the command against itself again,
-# and pushes the branch and the tags in one atomic push. Nothing is pushed if any step fails: git reset --hard
-# to the commit before, and git tag -d the tags written.
+# and pushes the branch and the tags in one atomic push. Nothing is
+# pushed if any step fails: git reset --hard to the commit before, and
+# git tag -d the tags written.
 set -Eeuo pipefail
 
 die() { echo "release-command: $*" >&2; exit 1; }
