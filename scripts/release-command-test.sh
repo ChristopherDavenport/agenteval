@@ -8,6 +8,9 @@
 #   scripts/release-command-test.sh
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# Every commit and annotated tag here, the script under test's among
+# them, needs an identity, and a CI runner has none configured.
+export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 M=example.com/m
 fails=0
 
