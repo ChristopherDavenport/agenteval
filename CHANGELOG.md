@@ -21,6 +21,18 @@ versions may break the API.
   a module the proxy does not serve, and the release workflow runs `go
   install` on each command tag.
 
+### Dependencies
+
+- agentsession v0.0.34 to v0.0.37, agenttool v0.0.28 to v0.0.29, and
+  agentturn and its `session` module v0.0.35 to v0.0.37, in the root
+  module, `harbor` and `cmd/agenteval`; openresponses stays at v0.0.18.
+  agentsession v0.0.37 is format 0.20, so the runner records
+  `agentsession/0.20`, appending an outcome raises a session it judges
+  to 0.20, and agentsession v0.0.36 and earlier refuse those files. The
+  fixtures under `testdata/sessions` are re-recorded in that format;
+  apart from their hashes and random run and call IDs they are
+  unchanged.
+
 ## v0.0.12 - 2026-11-03
 
 ### Fixed
