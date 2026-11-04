@@ -84,7 +84,13 @@ refuse "a root release that is not the latest" older "not the latest root releas
 # go.mod and go.sum from before, comment and replaces included, so the
 # tree builds the command against itself again. Branch and tag reach
 # origin. The proxy serves real module zips, written with python3.
-release_ok() {
+#
+# release_run stray: cmd/x's test writes a file into the command's
+# directory, and the run must refuse before its first commit, naming
+# the file, saying to remove it, and printing the undo; nothing is
+# committed, tagged or pushed.
+release_run() {
+  mode="$1"
   d="$(mktemp -d)"
   git init -q --bare "$d/origin.git"
   git init -q -b main "$d/work"
@@ -99,6 +105,9 @@ release_ok() {
     printf 'module %s/cmd/x\n\ngo 1.25\n\nrequire (\n\t%s v0.0.2\n\t%s/lib v0.0.2\n)\n\n// Why the replaces are here.\nreplace (\n\t%s => ../..\n\t%s/lib => ../../lib\n)\n' "$M" "$M" "$M" "$M" "$M" > cmd/x/go.mod
     : > cmd/x/go.sum
     printf 'package main\n\nimport (\n\t"fmt"\n\n\tm "%s"\n\t"%s/lib"\n)\n\nfunc main() { fmt.Println(m.Root() + lib.Lib()) }\n' "$M" "$M" > cmd/x/main.go
+    if [ "$mode" = stray ]; then
+      printf 'package main\n\nimport (\n\t"os"\n\t"testing"\n)\n\nfunc TestStray(t *testing.T) {\n\tif err := os.WriteFile("stray.txt", nil, 0o644); err != nil {\n\t\tt.Fatal(err)\n\t}\n}\n' > cmd/x/main_test.go
+    fi
     printf '# Changelog\n\n## v0.0.2 - 2026-01-01\n\n- x\n' > CHANGELOG.md
     git add . && git -c user.email=t@t -c user.name=t commit -qm "Release v0.0.2"
     git tag -a v0.0.2 -m v0.0.2 && git tag -a lib/v0.0.2 -m v0.0.2
@@ -120,6 +129,17 @@ with zipfile.ZipFile(out, "w") as z:
 ' "$mod" "$d/proxy/$mod/@v/v0.0.2.zip" "$dir/go.mod=go.mod" "$dir/$( [ "$dir" = . ] && echo m.go || echo lib.go )=$( [ "$dir" = . ] && echo m.go || echo lib.go )" || exit 1
     done
     start="$(git rev-parse HEAD)"
+    if [ "$mode" = stray ]; then
+      GOMODCACHE="$d/modcache" GOFLAGS=-modcacherw RELEASE_COMMAND_TEST=1 RELEASE_PROXY="file://$d/proxy" GONOSUMDB="$M" GOSUMDB=off GOWORK=off \
+        bash scripts/release-command.sh v0.0.2 cmd/x >"$d/out" 2>&1 && exit 20
+      [ "$(git rev-parse HEAD)" = "$start" ] || exit 21
+      ! git rev-parse -q --verify refs/tags/cmd/x/v0.0.2 >/dev/null || exit 21
+      [ "$(git ls-remote origin refs/heads/main | cut -f1)" = "$start" ] || exit 21
+      grep -qF "cmd/x/stray.txt" "$d/out" || { cat "$d/out"; exit 22; }
+      grep -qF "remove the files listed" "$d/out" || { cat "$d/out"; exit 22; }
+      grep -qF "undo with: git reset --hard $start" "$d/out" || { cat "$d/out"; exit 22; }
+      exit 0
+    fi
     GOMODCACHE="$d/modcache" GOFLAGS=-modcacherw RELEASE_COMMAND_TEST=1 RELEASE_PROXY="file://$d/proxy" GONOSUMDB="$M" GOSUMDB=off GOWORK=off \
       bash scripts/release-command.sh v0.0.2 cmd/x >"$d/out" 2>&1 || { cat "$d/out"; exit 10; }
     tagged="$(git rev-parse cmd/x/v0.0.2^{commit})" || exit 11
@@ -136,12 +156,13 @@ with zipfile.ZipFile(out, "w") as z:
   rc=$?
   chmod -R u+w "$d" 2>/dev/null; rm -rf "$d"
   if [ "$rc" != 0 ]; then
-    echo "FAIL: release-command on a published release: rc $rc (10 refused, 11 tag not on the release commit, 12 tagged go.mod has a replace or was not tidied against the proxy, 13 the tree's command differs from before, 14 not pushed, 15 tree dirty)"
+    echo "FAIL: release-command on a published release ($mode): rc $rc (10 refused, 11 tag not on the release commit, 12 tagged go.mod has a replace or was not tidied against the proxy, 13 the tree's command differs from before, 14 not pushed, 15 tree dirty; stray: 20 ran through, 21 committed, tagged or pushed, 22 refused for another reason, without naming the file and saying to remove it, or printed no undo)"
     fails=$((fails + 1))
   fi
 }
 
-release_ok
+release_run ok
+release_run stray
 
 # command <accept|refuse> <tag> <version cmd/x requires the root and lib at>
 #         <replace: yes|no> <what the proxy serves at the tag's version: all|root|none>

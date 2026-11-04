@@ -95,7 +95,10 @@ flag, as `go install` would; the guard asks the same way.
 only with `RELEASE_COMMAND_TEST=1` and a `file://` origin. It then drops
 the command's replaces, points its first-party requires at the version,
 tidies against the proxy, builds (to a temporary directory, so no binary
-lands in the tree) and tests, commits the go.mod and go.sum alone,
+lands in the tree) and tests, commits the go.mod and go.sum alone
+(any other change, an untracked file a test wrote included, is refused
+by name before the commit; remove it, since `git reset --hard` leaves
+an untracked file behind),
 guards and tags `cmd/agenteval/vX.Y.Z` from that commit, puts back the
 go.mod and go.sum from before in a second commit, so the tree builds
 the command against itself again, and pushes the branch and the tag

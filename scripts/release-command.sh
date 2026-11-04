@@ -111,9 +111,25 @@ for c in "$@"; do
   (cd "$c" && GOWORK=off GOFLAGS=-mod=mod go mod tidy && GOWORK=off GOFLAGS=-mod=readonly go build -o "$bin/" ./... && GOWORK=off GOFLAGS=-mod=readonly go test ./...)
   rm -rf "$bin"
 done
-# The go.mod and go.sum alone: anything else the steps above left would
-# otherwise go into the tag, and the guard's clean-tree check refuses it.
-for c in "$@"; do git add -- "$c/go.mod" "$c/go.sum"; done
+# Only the commands' go.mod and go.sum change in a release commit. Any
+# other change, untracked files included, such as one a test wrote, is
+# refused by name rather than committed or left behind; git reset --hard
+# does not remove an untracked file, so the refusal says to.
+add_mods() {
+  local c stray mods=()
+  for c in "$@"; do
+    git add -- "$c/go.mod"; mods+=(":(exclude)$c/go.mod")
+    if [ -f "$c/go.sum" ]; then git add -- "$c/go.sum"; mods+=(":(exclude)$c/go.sum"); fi
+  done
+  stray="$(git status --porcelain --untracked-files=all -- . "${mods[@]}")"
+  if [ -n "$stray" ]; then
+    echo "release-command: the tree holds changes beyond the commands' go.mod and go.sum:" >&2
+    echo "$stray" >&2
+    echo "release-command: remove the files listed (git reset --hard leaves an untracked one behind), then run it again" >&2
+    return 1
+  fi
+}
+add_mods "$@"
 git commit -q -m "Release $* $VERSION"
 
 tags=""
@@ -137,7 +153,7 @@ for c in "$@"; do
   (cd "$c" && GOWORK=off GOFLAGS=-mod=mod go mod tidy)
 done
 "$HERE/check-replaces.sh" "$@"
-for c in "$@"; do git add -- "$c/go.mod" "$c/go.sum"; done
+add_mods "$@"
 git commit -q -m "Point $* at the tree again after $VERSION"
 
 # shellcheck disable=SC2086
