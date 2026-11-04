@@ -61,18 +61,34 @@ With the changelog's *Unreleased* section written:
 make release VERSION=v0.1.0
 ```
 
-points `harbor` at the version, dates the changelog, runs `make tidy`
-and `make check`, reads the requires back to confirm tidy did not move
-them, commits, then guards and tags `v0.1.0` and `harbor/v0.1.0`, and
-pushes the branch and both tags with `git push origin --atomic`.
+points `harbor` and `cmd/agenteval` at the version, dates the
+changelog, runs `make tidy` and `make check`, reads the requires back to
+confirm tidy did not move them, commits, then guards and tags `v0.1.0`
+and `harbor/v0.1.0`, and pushes the branch and both tags with
+`git push origin --atomic`.
+
+The command is released in a second step, because `go install
+pkg@version` refuses a module whose go.mod holds a replace. Once the
+proxy serves the root and `harbor` at the version:
+
+```sh
+make release-command VERSION=v0.1.0
+```
+
+drops `cmd/agenteval`'s replaces, tidies it against the proxy, builds
+and tests it, commits, guards and tags `cmd/agenteval/v0.1.0`, puts the
+replaces back in a second commit and pushes both commits and the tag
+atomically. `AGENTS.md` (Releases) lists what it refuses.
 
 `make release-guard TAG=<tag>` is what stands between a mistake and a
-permanent one, and `make release` runs it for every tag it writes. It
-refuses a dirty tree, a tag that already exists locally or on origin, a
-version that sorts below the current root release or does not move its
-module forward, a first-party require that does not name that version, a
-root tag that is not this commit, and a module that will not build with
-`GOWORK=off`. The root is guarded and tagged first, because a nested
+permanent one, and `make release` and `make release-command` run it for
+every tag they write. It refuses a dirty tree, a tag that already exists
+locally or on origin, a version that sorts below the current root
+release or does not move its module forward, a first-party require that
+does not name that version, a library tag whose root tag is not this
+commit, a module that will not build with `GOWORK=off`, and a command
+tag whose go.mod holds any replace or whose root and `harbor` the proxy
+does not serve. The root is guarded and tagged first, because a nested
 module's guard needs the root tag to exist. Nothing is public until the
 push, so a refusal costs a `git reset --hard HEAD~1` and a `git tag -d`.
 

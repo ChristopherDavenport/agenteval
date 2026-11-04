@@ -5,6 +5,7 @@
 #
 #   scripts/release-guard.sh v0.0.7
 #   scripts/release-guard.sh harbor/v0.0.7
+#   scripts/release-guard.sh cmd/agenteval/v0.0.7
 #
 # Exits non-zero, with the reason, if the tag would publish a version
 # that sorts below one already released, or a module whose go.mod does
@@ -14,6 +15,12 @@
 # exists locally, so run this in the order `make release` does: guard the
 # root, tag it, then guard and tag each nested module. Nothing is public
 # until the push.
+#
+# A command's tag, cmd/<name>/vX.Y.Z, is the second step of a release
+# (make release-command): the root and its libraries were tagged at that
+# version from an earlier commit and are on the proxy, and the command's
+# go.mod requires them there with no replace, since go install refuses a
+# module that holds one.
 
 set -euo pipefail
 
@@ -21,6 +28,10 @@ TAG="${1:-}"
 
 die() { echo "release-guard: $*" >&2; exit 1; }
 ok()  { echo "  ok  $*"; }
+
+# The scripts beside this one; the release scripts' tests run it from a
+# throwaway repository.
+HERE="$(cd "$(dirname "$0")" && pwd)"
 
 [ -n "$TAG" ] || die "usage: $0 <tag>"
 
@@ -86,6 +97,64 @@ case "$TAG" in
     ok "$TAG is newer than $ROOT_LATEST"
     ;;
 
+  cmd/*/v*)
+    # A command, released in the second step (AGENTS.md, Releases): the
+    # root and its libraries were tagged at this version before, and are
+    # on the proxy; the command requires them there, with no replace,
+    # since go install refuses a module that has one.
+    DIR="${TAG%/v*}"                 # cmd/agenteval
+    VERSION="v${TAG##*/v}"
+    [ -f "$DIR/go.mod" ] || die "no module at $DIR (expected $DIR/go.mod)"
+    printf '%s\n' "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+      || die "$TAG is not a plain <dir>/vX.Y.Z version"
+    ! grep -qE '^[[:space:]]*replace([[:space:]]|\()' "$DIR/go.mod" \
+      || die "$DIR/go.mod holds a replace directive; go install $TAG would refuse it.
+            Drop it and tidy against the proxy first (make release-command)."
+    ok "$DIR holds no replace"
+    DIR_LATEST="$(matching "^$DIR/v" | sed "s|^$DIR/||" | newest)"
+    if [ -n "$DIR_LATEST" ]; then
+      [ "$(printf '%s\n%s\n' "$DIR_LATEST" "$VERSION" | newest)" = "$VERSION" ] \
+        || die "$VERSION does not sort above $DIR's current release $DIR_LATEST"
+    fi
+    ok "$VERSION is new for $DIR"
+    git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null \
+      || die "the root is not tagged $VERSION; make release tags it first"
+    git merge-base --is-ancestor "$VERSION" HEAD \
+      || die "root $VERSION is not an ancestor of this commit"
+    ok "root $VERSION was released before this commit"
+    # At an older root release the command would be tagged from today's
+    # tree against older libraries.
+    [ "$VERSION" = "$ROOT_LATEST" ] \
+      || die "$VERSION is not the latest root release, $ROOT_LATEST; a command is released at the latest"
+    ok "$VERSION is the latest root release"
+    "$HERE/versions.sh" check "$VERSION" "$DIR" \
+      || die "$DIR does not require its first-party modules at $VERSION"
+    ok "requires every first-party module at $VERSION"
+    # Every first-party module it requires, the root and each library
+    # (here harbor), must be on the proxy: go install resolves them
+    # there. Asked from outside any module: inside the root, the go
+    # command answers for the main module from the tree, not the proxy.
+    # And asked of the proxy alone, as go install asks: GOENV=off keeps a
+    # GOPRIVATE in the go env file from sending it to origin (an empty
+    # variable falls back to the file), and the default GOPROXY's
+    # ",direct" would do the same. A GOPROXY set by the caller, such as
+    # release-command's or its tests' file proxy, is kept.
+    MODULE="$(sed -n 's/^module[[:space:]]*//p' go.mod | head -1)"
+    q="$(mktemp -d)"
+    trap 'rm -rf "$q"' EXIT
+    for p in $(awk -v p="$MODULE" '
+        /^require[[:space:]]*\(/ { blk = 1; next }
+        blk && /^\)/             { blk = 0; next }
+        blk && ($1 == p || index($1, p "/") == 1) { print $1; next }
+        /^require[[:space:]]/ && ($2 == p || index($2, p "/") == 1) { print $2 }
+      ' "$DIR/go.mod" | sort -u); do
+      err="$(cd "$q" && GOENV=off GOPRIVATE= GONOPROXY= GOPROXY="${GOPROXY:-https://proxy.golang.org}" GOWORK=off GOFLAGS= go list -m -e -f '{{with .Error}}{{.Err}}{{end}}' "$p@$VERSION" 2>&1)"
+      [ -z "$err" ] || die "$p@$VERSION is not on the proxy yet: $err
+            Release the command once the root and its libraries are served."
+      ok "$p@$VERSION is on the proxy"
+    done
+    ;;
+
   */v*)
     DIR="${TAG%/v*}"                 # harbor
     VERSION="v${TAG##*/v}"           # v0.0.7
@@ -116,7 +185,7 @@ case "$TAG" in
     # version being tagged. A consumer who takes only this module gets
     # exactly those versions, so this is what makes the shared version
     # line mean something rather than being decoration.
-    scripts/versions.sh check "$VERSION" "$DIR" \
+    "$HERE/versions.sh" check "$VERSION" "$DIR" \
       || die "$DIR does not require its first-party siblings at $VERSION"
     ok "requires every first-party sibling at $VERSION"
 
@@ -161,7 +230,7 @@ case "$TAG" in
     MODULE="$(GOWORK=off go list -m)"
     if [ -z "$(GOWORK=off go list -m -e -f '{{with .Error}}{{.Err}}{{end}}' \
                  "$MODULE@$VERSION")" ]; then
-      scripts/check-extracted.sh "$DIR" \
+      "$HERE/check-extracted.sh" "$DIR" \
         || die "$DIR does not build against $MODULE@$VERSION as a consumer gets it"
     else
       echo "  --  $MODULE@$VERSION is not on the proxy yet, so $DIR cannot be"

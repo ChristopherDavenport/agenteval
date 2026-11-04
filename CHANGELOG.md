@@ -5,6 +5,35 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+### Changed
+
+- `go install github.com/ChristopherDavenport/agenteval/cmd/agenteval@vX.Y.Z`
+  works. `cmd/agenteval`'s go.mod carried the replaces that build it
+  against the tree, which `go install pkg@version` refuses, so no
+  released version of the command could be installed. A release is now
+  two steps: `make release` tags the root and `harbor` alone, and `make
+  release-command`, once the proxy serves them, tags
+  `cmd/agenteval/vX.Y.Z` from a commit whose go.mod holds no replace and
+  was tidied against the proxy, then points the tree at itself again.
+  The release guard refuses a command tag holding a replace or requiring
+  a module the proxy does not serve, and the release workflow runs `go
+  install` on each command tag.
+
+### Dependencies
+
+- agentsession v0.0.34 to v0.0.37, agenttool v0.0.28 to v0.0.29, and
+  agentturn and its `session` module v0.0.35 to v0.0.37, in the root
+  module, `harbor` and `cmd/agenteval`; openresponses stays at v0.0.18.
+  agentsession v0.0.37 is format 0.20, so the runner records
+  `agentsession/0.20`, appending an outcome raises a session it judges
+  to 0.20, and agentsession v0.0.36 and earlier refuse those files. The
+  fixtures under `testdata/sessions` are re-recorded in that format;
+  apart from their hashes, their random run and call IDs, the
+  encrypted content built from those IDs and a `latency_ms` the
+  recorder measured on one response each, they are unchanged.
+
 ## v0.0.12 - 2026-11-03
 
 ### Fixed

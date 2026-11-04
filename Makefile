@@ -2,13 +2,16 @@ GO ?= go
 STATICCHECK ?= $(GO) run honnef.co/go/tools/cmd/staticcheck@latest
 GOVULNCHECK ?= $(GO) run golang.org/x/vuln/cmd/govulncheck@latest
 # Nested modules that are tested alongside the library but keep their own
-# dependencies out of it.
-# harbor comes before cmd/agenteval, which requires it: a release
-# guards and tags them in this order.
-SUBMODULES = harbor cmd/agenteval
+# dependencies out of it. harbor is a library, released with the root.
+# cmd/agenteval is the command, which requires harbor and the root; it is
+# released in a second step (release-command), with its replaces
+# dropped, because go install refuses a module that holds any.
+LIBRARIES = harbor
+COMMANDS = cmd/agenteval
+SUBMODULES = $(LIBRARIES) $(COMMANDS)
 
 .PHONY: build deps replaces test vet fmt tidy tidy-check lint vuln check \
-	extracted release-guard release clean
+	extracted guard-test release-guard release release-command clean
 
 build:
 	$(GO) build ./...
@@ -69,7 +72,7 @@ vuln:
 	@for m in $(SUBMODULES); do (cd $$m && $(GOVULNCHECK) ./...) || exit 1; done
 
 # Everything CI runs, bar extracted below.
-check: fmt tidy-check vet deps replaces lint vuln test
+check: fmt tidy-check vet deps replaces lint vuln test guard-test
 
 # Builds, vets and tests each nested module the way a consumer gets it:
 # extracted to
@@ -91,8 +94,18 @@ check: fmt tidy-check vet deps replaces lint vuln test
 # release points every require at the version being released, and the
 # proxy cannot serve that until the tag is pushed. CI runs it on pull
 # requests and on main.
+#
+# A module is skipped while the tree has moved on from the release a
+# first-party require names (see check-extracted.sh): the command, which
+# requires the root and harbor, until make release publishes them at the
+# version it is then pointed at.
 extracted:
 	@scripts/check-extracted.sh $(SUBMODULES)
+
+# The release-command script's own tests, and the release guard's checks
+# of a command tag, against throwaway repositories and a file proxy.
+guard-test:
+	@scripts/release-command-test.sh
 
 # The module path of the root, which every first-party require and
 # replace is written against.
@@ -106,27 +119,32 @@ release-guard:
 	@test -n "$(TAG)" || { echo "usage: make release-guard TAG=<tag>"; exit 1; }
 	@scripts/release-guard.sh "$(TAG)"
 
-# Every tag a release writes: the root and one per nested module, all at
-# the same version, all from the one commit below.
-RELEASE_TAGS = $(VERSION) $(patsubst %,%/$(VERSION),$(SUBMODULES))
+# Every tag the first step of a release writes: the root and one per
+# library, all at the same version, all from the one commit below. The
+# command is released in a second step (release-command), once these are
+# on the proxy.
+RELEASE_TAGS = $(VERSION) $(patsubst %,%/$(VERSION),$(LIBRARIES))
 
 # Cut a release:
 #
 #   make release VERSION=v0.1.0
 #
-# Every module is released at one version, from one commit, and requires
-# its first-party siblings at exactly that version. So the first thing
-# this does is point every nested module at VERSION — a version that does
-# not exist yet. That resolves because each nested go.mod replaces its
-# first-party requirements with the tree (see replaces above); tidy,
-# build and test all see the code being tagged.
+# The root and every library are released at one version, from one
+# commit, and require their first-party siblings at exactly that version.
+# So the first thing this does is point every nested module, the command
+# among them, at VERSION — a version that does not exist yet. That
+# resolves because each nested go.mod replaces its first-party
+# requirements with the tree (see replaces above); tidy, build and test
+# all see the code being tagged. The command is not tagged here: its tag
+# must hold no replace, and it cannot drop them until the proxy serves
+# this version (release-command, below).
 #
 # --atomic lands every ref in one transaction, so no window exists in
 # which one tag is visible without the others, and none in which a
 # published go.mod names a version the proxy cannot serve.
 #
-# The root is guarded and tagged first, then each nested module, because
-# a nested module's guard proves the root tag of that version names this
+# The root is guarded and tagged first, then each library, because a
+# library's guard proves the root tag of that version names this
 # commit — which it cannot do before that tag exists. Every tag is local
 # until the push; if a guard refuses, undo with git reset --hard HEAD~1
 # and git tag -d the tags written.
@@ -161,11 +179,20 @@ release:
 	@notes="$$(scripts/release-notes.sh $(VERSION))" || exit 1; \
 	 git tag -a $(VERSION) -m "$$notes"
 	@set -e; notes="$$(scripts/release-notes.sh $(VERSION))"; \
-	for m in $(SUBMODULES); do \
+	for m in $(LIBRARIES); do \
 	  scripts/release-guard.sh "$$m/$(VERSION)"; \
 	  git tag -a $$m/$(VERSION) -m "$$notes"; \
 	done
 	git push origin --atomic HEAD $(RELEASE_TAGS)
+
+# The second step: once the proxy serves the root and the libraries at
+# VERSION, release the command with its replaces dropped and tidied
+# against the proxy, tagged cmd/agenteval/VERSION, then point it at the
+# tree again; scripts/release-command.sh says how.
+#   make release-command VERSION=v0.1.0
+release-command:
+	@test -n "$(VERSION)" || { echo "usage: make release-command VERSION=vX.Y.Z"; exit 1; }
+	@scripts/release-command.sh $(VERSION) $(COMMANDS)
 
 clean:
 	rm -rf .cache
