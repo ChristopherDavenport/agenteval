@@ -1,1 +1,4 @@
 .cache/
+# make build writes the command here: go build ./... on a single main
+# package writes its binary.
+/cmd/agenteval/agenteval
