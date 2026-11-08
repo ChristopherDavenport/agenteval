@@ -5,6 +5,17 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+### Fixed
+
+- `harbor`: a trial whose agent appended an `agenteval:snapshot` entry
+  after its run, as dax's `-p` does (dax#191), was scored at the
+  snapshot: the run's target was the last entry that is not an outcome.
+  It is now the last that is neither an outcome nor a snapshot, so the
+  scores target the run's end and `ResultAt` reads the snapshot as the
+  run's.
+
 ## v0.0.14 - 2026-11-08
 
 ### Added

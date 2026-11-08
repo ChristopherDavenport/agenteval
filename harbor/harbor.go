@@ -553,14 +553,22 @@ func topLevel(ctx context.Context, store agentsession.Store) (*agentsession.Sess
 }
 
 // runTarget is the run's last entry: the last on the path to the
-// session's leaf that is not an outcome, so a second import finds the
-// target the first wrote to.
+// session's leaf that is neither an outcome nor a snapshot
+// (agenteval.SnapshotNS), so a second import finds the target the first
+// wrote to, and a snapshot the agent appended after its run, as dax's
+// -p does, is the run's, not its target.
 func runTarget(s *agentsession.Session) string {
 	path := s.Path(s.Leaf())
 	for i := len(path) - 1; i >= 0; i-- {
-		if _, ok := path[i].(*agentsession.OutcomeEntry); !ok {
-			return path[i].Base().ID
+		switch e := path[i].(type) {
+		case *agentsession.OutcomeEntry:
+			continue
+		case *agentsession.CustomEntry:
+			if _, ok := agenteval.ReadSnapshot(e); ok {
+				continue
+			}
 		}
+		return path[i].Base().ID
 	}
 	return ""
 }
