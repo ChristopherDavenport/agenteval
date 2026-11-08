@@ -258,6 +258,9 @@ type Runner struct {
     Parallel int
     Header   func(Task) agentsession.Header          // optional: harness, cwd, a fixed ID, a base to fork
     Cost     func(model string, usage openresponses.Usage) (float64, bool) // optional: price.Hook
+    // Snapshot reads the workspace a run left, once per run, after it
+    // ends and before its judges (#73).
+    Snapshot func(context.Context, Task) (Snapshot, error)
 }
 
 type Result struct {
@@ -269,6 +272,7 @@ type Result struct {
     Resumes   int                // how many of them were resumes through Answer
     Usage     openresponses.Usage
     CostUSD   *float64           // when Cost is set and priced every call
+    Snapshot  *Snapshot          // the workspace the run left, when Runner.Snapshot is set
     Scores    []Score
     Ends      []*agentturn.RunEnd // in memory only
     Err       error
@@ -289,6 +293,30 @@ entry in the `agenteval:task` namespace carrying the suite name, its
 location, the task ID and the task's setup and metadata. The exporter
 lifts the `env` entry to the document's `extra.environment`, so a
 trajectory a judge reads names the suite version it came from.
+
+A run's session records what each tool call was sent, not what it did
+to the files: bash's command line, not the tree a `sed -i` left. Once
+the workspace is gone, as a container's is, a fixed or changed judge
+has nothing to judge the run again with (#73: 13 of 198 trials of a
+study were paid for and run again after a judge fix). `Snapshot` is
+the product's hook for it. The library does not decide how a workspace
+is read; the hook reads it through the workspace the run's tools used,
+for a git tree `git add -A -N . && git diff --binary <base>`, and
+returns the bytes and a free-form base. The runner calls it once per
+run, failed or not, after the run ends and before the judges, sets
+the bytes' SHA-256 digest, keeps the snapshot on the result and
+appends it to the session as an `agenteval:snapshot` custom entry
+naming the run's target, task and sample, as an outcome names them.
+The entry is appended after the judges' trajectory is read, so they
+read the run as they would without a hook. `ResultAt` reads it back and
+checks the digest; `NewSnapshot` writes it for a harness that runs the
+agent itself. A judge reads it with `SnapshotFrom(ctx)` and a group
+judge on `Member.Snapshot`. A hook's error is the snapshot's `Error`
+alone, recorded the same way, and so is a failure to append the entry
+("record: …"); neither reaches `Result.Err`, which says the run itself
+failed and which a harness reruns on, so the run is judged and counted
+as it would have been. The bytes are kept inline in the entry,
+in every session's media form.
 
 A task whose run failed, because the loop or `Answer` returned an
 error, is not judged: its result keeps the error and has no scores,

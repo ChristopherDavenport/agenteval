@@ -133,6 +133,30 @@ type Runner struct {
 	// price.Hook. When set, and every call of a run is priced, the
 	// result carries the run's cost.
 	Cost func(model string, usage openresponses.Usage) (float64, bool)
+	// Snapshot, when set, reads the workspace a task's run left, once
+	// per run, when the run has ended and before its judges, whether
+	// the run failed or not: a run's session records what its tool
+	// calls were sent, not what they did to the files, so once the
+	// workspace is gone a fixed or changed judge has nothing to judge
+	// again and a person nothing to read. The library does not decide
+	// how a workspace is read; the hook reads it through the workspace
+	// the run's tools used, which the product finds for the task as its
+	// judges do, the task's Meta["sample"] telling samples apart, and
+	// before Build's close releases it. The snapshot is kept on
+	// [Result.Snapshot] and in the session, as a [SnapshotNS] custom
+	// entry after the run's last entry, where [ResultAt] reads it back,
+	// and each judge reads it through [SnapshotFrom]. The hook's error,
+	// and a failure to append the entry, is kept as the snapshot's Error
+	// alone and never on Result.Err, which says the run itself failed:
+	// the run is judged, and counted, as it would have been. For a git working tree, run in the
+	// directory, container or remote workspace the run's tools used:
+	//
+	//	Snapshot: func(ctx context.Context, t agenteval.Task) (agenteval.Snapshot, error) {
+	//		ws := workspaces.For(t) // where Build put this run's tools
+	//		diff, err := ws.Output(ctx, `git add -A -N . && git diff --binary "$0"`, ws.Base)
+	//		return agenteval.Snapshot{Data: diff, Base: ws.Base}, err
+	//	}
+	Snapshot func(ctx context.Context, task Task) (Snapshot, error)
 }
 
 // Result is one task's run and its scores.
@@ -187,6 +211,10 @@ type Result struct {
 	// Subagents is the work the run's path delegated to subsessions,
 	// nil when it delegated none.
 	Subagents *Delegated `json:"subagents,omitempty"`
+	// Snapshot is the workspace the run left, as [Runner.Snapshot] read
+	// it, or why it could not be read; nil when the runner has no hook,
+	// or the session holds no snapshot of the run.
+	Snapshot *Snapshot `json:"snapshot,omitempty"`
 	// Scores are the judges' verdicts, in the runner's judge order. A
 	// judge that failed is missing here and named in Err; a task whose
 	// run failed has none, unless [Runner.JudgeFailedRuns].
@@ -481,17 +509,26 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task, sample in
 	if err := replayable(s, res.Target); err != nil {
 		res.Err = errors.Join(res.Err, fmt.Errorf("task %s: %w", task.ID, err))
 	}
-	if failed && !r.JudgeFailedRuns {
+	judge := !failed || r.JudgeFailedRuns
+	// The trajectory is read before the snapshot's entry is appended, so
+	// the judges read the run's leaf as they would without a hook.
+	var t export.Trajectory
+	var terr error
+	if judge {
+		t, terr = trajectoryAt(s, res.Target)
+	}
+	r.snapshot(ctx, s.ID(), task, sample, &res)
+	if !judge {
 		return res
 	}
-	t, err := trajectoryAt(s, res.Target)
-	if err != nil {
-		res.Err = errors.Join(res.Err, fmt.Errorf("task %s: %w", task.ID, err))
+	if terr != nil {
+		res.Err = errors.Join(res.Err, fmt.Errorf("task %s: %w", task.ID, terr))
 		return res
 	}
 	res.trajectory, res.judged = t, true
+	jctx := withSnapshot(ctx, res.Snapshot)
 	for _, j := range r.Judges {
-		score, err := j.Judge(ctx, t, task)
+		score, err := j.Judge(jctx, t, task)
 		if err != nil {
 			res.Err = errors.Join(res.Err, fmt.Errorf("agenteval: task %s: judge %s: %w", task.ID, j.Name(), err))
 			continue
@@ -508,6 +545,40 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task, sample in
 		}
 	}
 	return res
+}
+
+// snapshot reads the workspace the run left through Runner.Snapshot,
+// when it is set, keeps it on the result, and appends it to the run's
+// session after its last entry. The hook's error is the snapshot's
+// alone, recorded like a snapshot, so the session says the workspace
+// was looked at and could not be read; a failure to append the entry
+// is the snapshot's Error on the result. Neither is the run's error, so
+// neither reaches Result.Err.
+func (r *Runner) snapshot(ctx context.Context, sessionID string, task Task, sample int, res *Result) {
+	if r.Snapshot == nil {
+		return
+	}
+	snap, err := r.Snapshot(ctx, task)
+	if err != nil {
+		snap = Snapshot{Error: err.Error()}
+	}
+	snap = snap.sealed()
+	entry, err := newSnapshot(snap, res.Target, task.ID, sample)
+	if err == nil {
+		_, err = r.Store.Append(ctx, sessionID, entry)
+	}
+	if err != nil {
+		snap.Error = joinError(snap.Error, "record: "+err.Error())
+	}
+	res.Snapshot = &snap
+}
+
+// joinError adds msg to a snapshot's Error, on a line of its own.
+func joinError(have, msg string) string {
+	if have == "" {
+		return msg
+	}
+	return have + "\n" + msg
 }
 
 // recordScore appends a score to the session of the run it judges as an
@@ -800,7 +871,7 @@ func (r *Runner) judgeGroup(ctx context.Context, task Task, group []Result) {
 func (r *Runner) recordGroup(ctx context.Context, task Task, group []Result, judges []GroupJudge) {
 	members := make([]Member, len(group))
 	for k, res := range group {
-		members[k] = Member{Trajectory: res.trajectory, Scores: slices.Clone(res.Scores)}
+		members[k] = Member{Trajectory: res.trajectory, Scores: slices.Clone(res.Scores), Snapshot: res.Snapshot}
 	}
 	for _, j := range judges {
 		scores, err := j.JudgeGroup(ctx, members, task)
@@ -1097,6 +1168,9 @@ func (r *Runner) storedMember(ctx context.Context, s *agentsession.Session, task
 		return storedMember{}, false
 	}
 	m.trajectory, m.judged = t, true
+	// A snapshot that fails its digest reaches the member with its
+	// Error saying so, as it reaches ResultAt's result.
+	m.Snapshot = snapshotAt(s, m.Target, task.ID, sample, true)
 	cost := measure(ctx, r.Store, r.Cost, s, m.Target)
 	m.Usage, m.ModelCalls, m.CostUSD, m.Subagents = cost.usage, cost.calls, cost.cost, cost.delegated
 	return m, true

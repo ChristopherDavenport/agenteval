@@ -5,6 +5,37 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+### Added
+
+- `Runner.Snapshot` keeps the workspace a run left, so a run can be
+  judged again, or read by a person, once its workspace is gone. A
+  session records what each tool call was sent, not what it did to the
+  files, and replay serves recorded outputs, so neither rebuilds the
+  tree. The hook, `func(ctx, Task) (Snapshot, error)`, is called once
+  per run when the run has ended, failed or not, and before its judges.
+  The library does not read the workspace: the product's hook does,
+  through the workspace the run's tools used, such as `git add -A -N .
+  && git diff --binary <base>` for a git tree (`ExampleRunner_snapshot`).
+  The `Snapshot` holds the bytes, their SHA-256 digest, which the runner
+  sets, and a free-form `Base` the hook names. It is kept on
+  `Result.Snapshot` and in the run's session as an `agenteval:snapshot`
+  custom entry (`SnapshotNS`, `SnapshotRecord`) after the run's last
+  entry, naming the run by its target, task and sample as an outcome
+  does. A hook's error is kept as the snapshot's `Error` alone, in the
+  session too, and a failure to append the entry as `Error` "record:
+  …" on the result; neither reaches `Result.Err`, which says the run
+  itself failed, so the run is judged and counted as it would have
+  been. Without a hook nothing changes. (#73)
+- `ResultAt` reads the snapshot back, and reports one whose bytes do
+  not hash to its digest on the snapshot's `Error`, not on `Err`. `NewSnapshot` and `ReadSnapshot`
+  write and read the entry for a harness that runs the agent itself and
+  writes its scores with `NewOutcome`. (#73)
+- A judge reads the run's snapshot with `SnapshotFrom(ctx)`; the runner
+  calls each judge with a context carrying it. A group judge reads each
+  member's on `Member.Snapshot`, in a run and in `JudgeGroups`. (#73)
+
 ## v0.0.13 - 2026-11-04
 
 ### Changed
