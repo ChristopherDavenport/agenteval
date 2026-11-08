@@ -311,9 +311,11 @@ The entry is appended after the judges' trajectory is read, so they
 read the run as they would without a hook. `ResultAt` reads it back and
 checks the digest; `NewSnapshot` writes it for a harness that runs the
 agent itself. A judge reads it with `SnapshotFrom(ctx)` and a group
-judge on `Member.Snapshot`. A hook's error is the snapshot's `Error`,
-recorded the same way and joined onto `Result.Err`, and the run is
-judged as it would have been. The bytes are kept inline in the entry,
+judge on `Member.Snapshot`. A hook's error is the snapshot's `Error`
+alone, recorded the same way, and so is a failure to append the entry
+("record: …"); neither reaches `Result.Err`, which says the run itself
+failed and which a harness reruns on, so the run is judged and counted
+as it would have been. The bytes are kept inline in the entry,
 in every session's media form.
 
 A task whose run failed, because the loop or `Answer` returned an

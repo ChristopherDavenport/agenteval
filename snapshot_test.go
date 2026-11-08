@@ -137,8 +137,10 @@ func TestRunnerSnapshot(t *testing.T) {
 }
 
 // TestRunnerSnapshotError: a hook that cannot read the workspace is
-// recorded, on the result and in the session, and the run is judged as
-// it would have been.
+// recorded on the snapshot, on the result and in the session, and the
+// run is judged as it would have been. Result.Err stays nil: it says
+// the run failed, and a harness that reruns on it would pay for a run
+// that did not fail.
 func TestRunnerSnapshotError(t *testing.T) {
 	ctx := context.Background()
 	store := newStableStore()
@@ -156,8 +158,8 @@ func TestRunnerSnapshotError(t *testing.T) {
 		if res.Reason != agentturn.ReasonDone || len(res.Scores) != len(r.Judges) {
 			t.Errorf("%s: reason %s, %d scores; the run should be judged", res.Task.ID, res.Reason, len(res.Scores))
 		}
-		if res.Err == nil || !strings.Contains(res.Err.Error(), "snapshot: container gone") {
-			t.Errorf("%s: err %v", res.Task.ID, res.Err)
+		if res.Err != nil {
+			t.Errorf("%s: err %v; a snapshot's error is not the run's", res.Task.ID, res.Err)
 		}
 		if s := res.Snapshot; s == nil || s.Error != "container gone" || s.Data != nil || s.Base != "" || s.Digest != "" {
 			t.Errorf("%s: snapshot %+v", res.Task.ID, res.Snapshot)
@@ -172,6 +174,39 @@ func TestRunnerSnapshotError(t *testing.T) {
 	}
 	if got := log.events[0]; got != "judge greet: error container gone" {
 		t.Errorf("judge saw %q", got)
+	}
+}
+
+// refusingSnapshots is a store that cannot append a snapshot entry.
+type refusingSnapshots struct{ *stableStore }
+
+func (s refusingSnapshots) Append(ctx context.Context, id string, e agentsession.Entry) (string, error) {
+	if c, ok := e.(*agentsession.CustomEntry); ok && c.NS == agenteval.SnapshotNS {
+		return "", errors.New("disk full")
+	}
+	return s.stableStore.Append(ctx, id, e)
+}
+
+// TestRunnerSnapshotRecordError: a snapshot the store would not take is
+// kept on the result with its Error saying so, not on Result.Err.
+func TestRunnerSnapshotRecordError(t *testing.T) {
+	ctx := context.Background()
+	store := refusingSnapshots{newStableStore()}
+	r := basicRunner(store)
+	r.Snapshot = func(_ context.Context, task agenteval.Task) (agenteval.Snapshot, error) {
+		return diffOf(task), nil
+	}
+	report, err := r.Run(ctx, basicSuite(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, res := range report.Results {
+		if res.Err != nil || len(res.Scores) != len(r.Judges) {
+			t.Errorf("%s: err %v, %d scores", res.Task.ID, res.Err, len(res.Scores))
+		}
+		if s := res.Snapshot; s == nil || s.Error != "record: disk full" || string(s.Data) != string(diffOf(res.Task).Data) || s.Digest == "" {
+			t.Errorf("%s: snapshot %+v", res.Task.ID, s)
+		}
 	}
 }
 
@@ -333,7 +368,7 @@ func TestNewSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if read.Err == nil || !strings.Contains(read.Err.Error(), "not its digest") || read.Snapshot == nil || string(read.Snapshot.Data) != "other tree" {
+	if read.Err != nil || read.Snapshot == nil || !strings.HasPrefix(read.Snapshot.Error, "digest: ") || string(read.Snapshot.Data) != "other tree" {
 		t.Errorf("tampered: snapshot %+v err %v", read.Snapshot, read.Err)
 	}
 }

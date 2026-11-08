@@ -74,7 +74,8 @@ the library does not decide how. The result keeps the bytes, their
 digest and the base they apply to, the session keeps them in an
 `agenteval:snapshot` entry where `ResultAt` reads them back, and a
 judge reads them with `SnapshotFrom(ctx)`. A hook's error is recorded
-and the run is judged as it would have been.
+on the snapshot alone, not on `Result.Err`, and the run is judged as
+it would have been.
 
 ```go
 r.Snapshot = func(ctx context.Context, t agenteval.Task) (agenteval.Snapshot, error) {

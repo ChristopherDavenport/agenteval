@@ -23,11 +23,13 @@ versions may break the API.
   `Result.Snapshot` and in the run's session as an `agenteval:snapshot`
   custom entry (`SnapshotNS`, `SnapshotRecord`) after the run's last
   entry, naming the run by its target, task and sample as an outcome
-  does. A hook's error is kept as the snapshot's `Error`, in the
-  session too, and joined onto `Result.Err`; the run is judged as it
-  would have been. Without a hook nothing changes. (#73)
+  does. A hook's error is kept as the snapshot's `Error` alone, in the
+  session too, and a failure to append the entry as `Error` "record:
+  …" on the result; neither reaches `Result.Err`, which says the run
+  itself failed, so the run is judged and counted as it would have
+  been. Without a hook nothing changes. (#73)
 - `ResultAt` reads the snapshot back, and reports one whose bytes do
-  not hash to its digest on `Err`. `NewSnapshot` and `ReadSnapshot`
+  not hash to its digest on the snapshot's `Error`, not on `Err`. `NewSnapshot` and `ReadSnapshot`
   write and read the entry for a harness that runs the agent itself and
   writes its scores with `NewOutcome`. (#73)
 - A judge reads the run's snapshot with `SnapshotFrom(ctx)`; the runner

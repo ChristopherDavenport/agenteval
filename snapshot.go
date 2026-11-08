@@ -35,8 +35,14 @@ type Snapshot struct {
 	// [NewSnapshot] set it from Data, replacing one the hook returned,
 	// and [ResultAt] checks it.
 	Digest string `json:"digest,omitempty"`
-	// Error is why the workspace could not be read: the hook's error.
-	// Data, Base and Digest are then empty.
+	// Error is why the snapshot could not be taken or kept: the hook's
+	// error, with Data, Base and Digest then empty; "record: " and the
+	// store's error when the runner could not append the snapshot to the
+	// session, the snapshot kept on the result alone; or, from
+	// [ResultAt], "digest: " and why the recorded bytes do not hash to
+	// the recorded digest, the record kept as it was. It is never the
+	// run's error: a run whose workspace could not be read ran as it
+	// did, so Result.Err does not carry it.
 	Error string `json:"error,omitempty"`
 }
 
@@ -96,8 +102,8 @@ func ReadSnapshot(e *agentsession.CustomEntry) (SnapshotRecord, bool) {
 // snapshotAt returns the last snapshot the session holds of the run
 // whose last entry is target, for task and sample when matchTask is
 // set, or nil when it holds none. A snapshot whose bytes do not hash to
-// its digest is returned as recorded, with an error saying so.
-func snapshotAt(s *agentsession.Session, target, task string, sample int, matchTask bool) (*Snapshot, error) {
+// its digest is returned as recorded, its Error saying so.
+func snapshotAt(s *agentsession.Session, target, task string, sample int, matchTask bool) *Snapshot {
 	var found *Snapshot
 	for _, e := range s.Entries() {
 		c, ok := e.(*agentsession.CustomEntry)
@@ -111,12 +117,12 @@ func snapshotAt(s *agentsession.Session, target, task string, sample int, matchT
 		found = &rec.Snapshot
 	}
 	if found == nil || found.Error != "" {
-		return found, nil
+		return found
 	}
 	if got := agentsession.HashBytes(found.Data); got != found.Digest {
-		return found, fmt.Errorf("agenteval: snapshot of %s: data hashes to %s, not its digest %s", target, got, found.Digest)
+		found.Error = fmt.Sprintf("digest: data hashes to %s, not its digest %s", got, found.Digest)
 	}
-	return found, nil
+	return found
 }
 
 // snapshotKey is the context key a judge reads the run's snapshot by.

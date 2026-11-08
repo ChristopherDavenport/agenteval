@@ -145,9 +145,10 @@ type Runner struct {
 	// before Build's close releases it. The snapshot is kept on
 	// [Result.Snapshot] and in the session, as a [SnapshotNS] custom
 	// entry after the run's last entry, where [ResultAt] reads it back,
-	// and each judge reads it through [SnapshotFrom]. An error is kept
-	// as the snapshot's Error and joined onto Result.Err; the run is
-	// judged as it would have been. For a git working tree, run in the
+	// and each judge reads it through [SnapshotFrom]. The hook's error,
+	// and a failure to append the entry, is kept as the snapshot's Error
+	// alone and never on Result.Err, which says the run itself failed:
+	// the run is judged, and counted, as it would have been. For a git working tree, run in the
 	// directory, container or remote workspace the run's tools used:
 	//
 	//	Snapshot: func(ctx context.Context, t agenteval.Task) (agenteval.Snapshot, error) {
@@ -548,9 +549,11 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task, sample in
 
 // snapshot reads the workspace the run left through Runner.Snapshot,
 // when it is set, keeps it on the result, and appends it to the run's
-// session after its last entry. The hook's error is the snapshot's and
-// the result's, and is recorded like a snapshot, so the session says
-// the workspace was looked at and could not be read.
+// session after its last entry. The hook's error is the snapshot's
+// alone, recorded like a snapshot, so the session says the workspace
+// was looked at and could not be read; a failure to append the entry
+// is the snapshot's Error on the result. Neither is the run's error, so
+// neither reaches Result.Err.
 func (r *Runner) snapshot(ctx context.Context, sessionID string, task Task, sample int, res *Result) {
 	if r.Snapshot == nil {
 		return
@@ -558,17 +561,24 @@ func (r *Runner) snapshot(ctx context.Context, sessionID string, task Task, samp
 	snap, err := r.Snapshot(ctx, task)
 	if err != nil {
 		snap = Snapshot{Error: err.Error()}
-		res.Err = errors.Join(res.Err, fmt.Errorf("agenteval: task %s: snapshot: %w", task.ID, err))
 	}
 	snap = snap.sealed()
-	res.Snapshot = &snap
 	entry, err := newSnapshot(snap, res.Target, task.ID, sample)
 	if err == nil {
 		_, err = r.Store.Append(ctx, sessionID, entry)
 	}
 	if err != nil {
-		res.Err = errors.Join(res.Err, fmt.Errorf("agenteval: task %s: record snapshot: %w", task.ID, err))
+		snap.Error = joinError(snap.Error, "record: "+err.Error())
 	}
+	res.Snapshot = &snap
+}
+
+// joinError adds msg to a snapshot's Error, on a line of its own.
+func joinError(have, msg string) string {
+	if have == "" {
+		return msg
+	}
+	return have + "\n" + msg
 }
 
 // recordScore appends a score to the session of the run it judges as an
@@ -1158,11 +1168,9 @@ func (r *Runner) storedMember(ctx context.Context, s *agentsession.Session, task
 		return storedMember{}, false
 	}
 	m.trajectory, m.judged = t, true
-	// A snapshot that fails its digest is left off the member, which is
-	// judged without it rather than from bytes that are not the run's.
-	if snap, err := snapshotAt(s, m.Target, task.ID, sample, true); err == nil {
-		m.Snapshot = snap
-	}
+	// A snapshot that fails its digest reaches the member with its
+	// Error saying so, as it reaches ResultAt's result.
+	m.Snapshot = snapshotAt(s, m.Target, task.ID, sample, true)
 	cost := measure(ctx, r.Store, r.Cost, s, m.Target)
 	m.Usage, m.ModelCalls, m.CostUSD, m.Subagents = cost.usage, cost.calls, cost.cost, cost.delegated
 	return m, true
