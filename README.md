@@ -66,6 +66,24 @@ product. The suite's manifest, the hash of every file loaded, is
 recorded in each run's `env` entry, so a result names the suite
 version it came from.
 
+A session records what each tool call was sent, not what it did to
+the files, so once a run's workspace is gone a fixed judge has nothing
+to judge it again with. `Snapshot` reads the workspace when the run
+ends, before its judges, through whatever the product's tools used;
+the library does not decide how. The result keeps the bytes, their
+digest and the base they apply to, the session keeps them in an
+`agenteval:snapshot` entry where `ResultAt` reads them back, and a
+judge reads them with `SnapshotFrom(ctx)`. A hook's error is recorded
+and the run is judged as it would have been.
+
+```go
+r.Snapshot = func(ctx context.Context, t agenteval.Task) (agenteval.Snapshot, error) {
+	ws := workspaces.For(t) // where Build put this run's tools
+	diff, err := ws.Output(ctx, `git add -A -N . && git diff --binary "$0"`, ws.Base)
+	return agenteval.Snapshot{Data: diff, Base: ws.Base}, err
+}
+```
+
 ## Replay
 
 `replay.NewModel` serves a recorded session's model calls in path

@@ -71,11 +71,14 @@ type GroupJudge interface {
 	JudgeGroup(ctx context.Context, group []Member, task Task) ([]Score, error)
 }
 
-// Member is one sample of a group: its trajectory, and what the
-// runner's judges said of it.
+// Member is one sample of a group: its trajectory, what the runner's
+// judges said of it, and the workspace it left when [Runner.Snapshot]
+// read one, nil otherwise. The snapshot is the member's result's; a
+// group judge reads it and does not change it.
 type Member struct {
 	Trajectory export.Trajectory
 	Scores     []Score
+	Snapshot   *Snapshot
 }
 
 // GroupJudgeFunc adapts a function to GroupJudge.

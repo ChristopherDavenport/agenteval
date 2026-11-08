@@ -272,7 +272,9 @@ func WithCost(fn func(model string, usage openresponses.Usage) (float64, bool)) 
 // sample (RFC 0001, outcome), kind eval or a verifier's test, in the
 // order they were appended, less a harness's score for a run that
 // failed with no verdict ([OutcomeDetails].Error), which is on Err and
-// leaves the run unjudged; the
+// leaves the run unjudged; Snapshot the last [SnapshotNS] record of
+// the run at target for that task and sample, one whose data does not
+// hash to its digest kept as recorded with the mismatch on Err; the
 // reason the last run end on the path to target, Runs and Resumes the
 // runs there, and Usage, ModelCalls, CostUSD and Subagents are read as
 // the runner reads them, so a stored result and the one Run returned
@@ -334,6 +336,11 @@ func ResultAt(ctx context.Context, store agentsession.Store, sessionID, target s
 		res.Scores = append(res.Scores, score)
 	}
 	res.judged = len(res.Scores) > 0 || !errored && ended && res.Reason != agentturn.ReasonError
+	snap, err := snapshotAt(s, target, rec.Task, rec.Sample, hasRecord)
+	res.Snapshot = snap
+	if err != nil {
+		res.Err = errors.Join(res.Err, err)
+	}
 	m := measure(ctx, store, o.cost, s, target)
 	res.Usage, res.ModelCalls, res.CostUSD, res.Subagents = m.usage, m.calls, m.cost, m.delegated
 	return res, nil
