@@ -188,6 +188,54 @@ func TestImportJob(t *testing.T) {
 	}
 }
 
+// A trial whose agent appended a snapshot of the workspace after its
+// run (agenteval.NewSnapshot, as dax's -p does) is scored at the run's
+// last entry, not at the snapshot, and the snapshot is read back as
+// the run's (dax#191).
+func TestImportJobSkipsASnapshot(t *testing.T) {
+	ctx := context.Background()
+	store := agentsession.NewMemoryStore()
+	id, target := trialSession(t, store, "hello", "done")
+	e, err := agenteval.NewSnapshot(agenteval.Snapshot{Data: []byte("diff"), Base: "abc"}, target, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, id, e); err != nil {
+		t.Fatal(err)
+	}
+	trial := []byte(`{"task_name":"hello","verifier_result":{"rewards":{"reward":1}}}`)
+	job := fstest.MapFS{"hello__a1b2c3d/result.json": {Data: trial}}
+	open := func(string) (agentsession.Store, error) { return trialStore{MemoryStore: store, session: id}, nil }
+	report, err := harbor.ImportJob(ctx, job, open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Results) != 1 {
+		t.Fatalf("results = %+v", report.Results)
+	}
+	r := report.Results[0]
+	if r.Target != target {
+		t.Errorf("target = %s, want the run's end %s, not the snapshot after it", r.Target, target)
+	}
+	if r.Snapshot == nil || string(r.Snapshot.Data) != "diff" || r.Snapshot.Base != "abc" {
+		t.Errorf("snapshot = %+v, want the one the agent appended", r.Snapshot)
+	}
+	for _, o := range outcomes(t, store, id) {
+		if o.Target != target {
+			t.Errorf("outcome %+v, want it at %s", o, target)
+		}
+	}
+	// A second import finds the same target past the outcomes and the
+	// snapshot, and writes nothing.
+	before := entries(t, store)
+	if _, err := harbor.ImportJob(ctx, job, open); err != nil {
+		t.Fatal(err)
+	}
+	if after := entries(t, store); after != before {
+		t.Errorf("a second import appended %d entries", after-before)
+	}
+}
+
 // A job that ran a task more than once, Harbor's n_attempts, holds one
 // trial per attempt: each is a sample of the task, numbered from 1 in
 // trial order, so two imported jobs pair attempt with attempt rather
