@@ -33,10 +33,14 @@ type Snapshot struct {
 	// Size is the size in bytes of the workspace state the product
 	// read, set where it keeps less than it read: a change over the
 	// product's bound, kept with Error and no Data, says here how large
-	// it was. A report written [WithoutSnapshotData] sets it, where it
-	// is not set, to the number of bytes it left out. The library does
-	// not read it otherwise.
+	// it was. The library does not read it.
 	Size int64 `json:"size,omitempty"`
+	// Omitted is the number of bytes of Data a report written
+	// [WithoutSnapshotData] left out, which the session still holds and
+	// [ResultAt] reads back. It is set only in such a report, never in
+	// a session, so a reader tells bytes the report left out from bytes
+	// the product never kept, which Size and Error describe.
+	Omitted int64 `json:"omitted,omitempty"`
 	// Digest is the SHA-256 of Data in the session format's notation,
 	// "sha256:<hex>" (agentsession.HashBytes). The runner and
 	// [NewSnapshot] set it from Data, replacing one the hook returned,
@@ -62,6 +66,7 @@ func (s Snapshot) sealed() Snapshot {
 	if s.Error != "" {
 		return Snapshot{Base: s.Base, Size: s.Size, Error: s.Error}
 	}
+	s.Omitted = 0
 	s.Digest = agentsession.HashBytes(s.Data)
 	return s
 }

@@ -30,8 +30,10 @@ versions may break the API.
   `compare` takes it as `-ignore-header`. (#69)
 - `WithoutSnapshotData`, a `WriteOption` that `Report.WriteJSON` and
   `Comparison.WriteJSON` now take: each result's snapshot is written
-  without its bytes, keeping `Base`, `Digest` and `Error`, and `Size`
-  set to the bytes left out where the snapshot names none. The session
+  without its bytes, keeping `Base`, `Size`, `Digest` and `Error`,
+  and the new `Snapshot.Omitted` set to the bytes left out: a field of
+  its own, not `Size`, so a reader tells bytes the report left out,
+  which the session holds, from bytes the product never kept. The session
   still holds them and `ResultAt` reads them back; the results in
   memory are not changed. Storing the bytes as a sidecar blob, the
   other half of #75, waits on agentsession#294. (#75)

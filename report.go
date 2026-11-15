@@ -114,8 +114,8 @@ func writeOptionsOf(opts []WriteOption) writeOptions {
 }
 
 // WithoutSnapshotData writes each result's snapshot without its bytes:
-// Base, Digest and Error as they are, and Size the number of bytes left
-// out where the snapshot names no size of its own. A workspace's change
+// Base, Size, Digest and Error as they are, and Omitted the number of
+// bytes left out. A workspace's change
 // can be large, and the session already holds it, where [ResultAt]
 // reads it back and checks it against the digest. The results in
 // memory are not changed.
@@ -130,9 +130,7 @@ func (o writeOptions) written(res *Result) *Result {
 	}
 	out := *res
 	snap := *res.Snapshot
-	if snap.Size == 0 {
-		snap.Size = int64(len(snap.Data))
-	}
+	snap.Omitted = int64(len(snap.Data))
 	snap.Data = nil
 	out.Snapshot = &snap
 	return &out

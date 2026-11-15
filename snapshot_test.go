@@ -431,15 +431,28 @@ func TestSnapshotErrorKeepsBaseAndSize(t *testing.T) {
 
 // TestReportWithoutSnapshotData is #75's first half: a report written
 // WithoutSnapshotData leaves each snapshot's bytes out and keeps its
-// Base, Digest and Error, with Size saying how many bytes were left
-// out; the session still holds them, and ResultAt reads them back. The
-// report in memory is not changed, and a comparison written the same
-// way leaves its pairs' bytes out too.
+// Base, Digest, Error and the product's Size, with Omitted saying how
+// many bytes were left out, so a reader tells a report that left them
+// out from a product that kept less than it read; the session still
+// holds them, and ResultAt reads them back. The report in memory is
+// not changed, and a comparison written the same way leaves its pairs'
+// bytes out too.
 func TestReportWithoutSnapshotData(t *testing.T) {
 	ctx := context.Background()
 	store := newStableStore()
 	r := basicRunner(store)
-	r.Snapshot = func(_ context.Context, task agenteval.Task) (agenteval.Snapshot, error) { return diffOf(task), nil }
+	// The product names a size of its own for one task.
+	sizeOf := func(task agenteval.Task) int64 {
+		if task.ID == "plain" {
+			return 4096
+		}
+		return 0
+	}
+	r.Snapshot = func(_ context.Context, task agenteval.Task) (agenteval.Snapshot, error) {
+		snap := diffOf(task)
+		snap.Size = sizeOf(task)
+		return snap, nil
+	}
 	report, err := r.Run(ctx, basicSuite(t))
 	if err != nil {
 		t.Fatal(err)
@@ -458,10 +471,10 @@ func TestReportWithoutSnapshotData(t *testing.T) {
 	for i, res := range back.Results {
 		was := report.Results[i]
 		want := diffOf(was.Task)
-		if s := res.Snapshot; s == nil || s.Data != nil || s.Base != want.Base || s.Digest != was.Snapshot.Digest || s.Size != int64(len(want.Data)) {
+		if s := res.Snapshot; s == nil || s.Data != nil || s.Base != want.Base || s.Digest != was.Snapshot.Digest || s.Size != sizeOf(was.Task) || s.Omitted != int64(len(want.Data)) {
 			t.Errorf("%s: written snapshot %+v", was.Task.ID, s)
 		}
-		if string(was.Snapshot.Data) != string(want.Data) || was.Snapshot.Size != 0 {
+		if string(was.Snapshot.Data) != string(want.Data) || was.Snapshot.Size != sizeOf(was.Task) || was.Snapshot.Omitted != 0 {
 			t.Errorf("%s: the report in memory changed: %+v", was.Task.ID, was.Snapshot)
 		}
 		read, err := agenteval.ResultAt(ctx, store, res.SessionID, res.Target)
