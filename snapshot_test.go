@@ -372,3 +372,125 @@ func TestNewSnapshot(t *testing.T) {
 		t.Errorf("tampered: snapshot %+v err %v", read.Snapshot, read.Err)
 	}
 }
+
+// TestSnapshotErrorKeepsBaseAndSize is #79: a snapshot whose Error is
+// set, such as a change over the product's bound, keeps its Base and
+// Size, through the runner's hook and through NewSnapshot, and drops
+// only Data and Digest; read back it is no digest failure. A hook's
+// error alone is still the Error alone.
+func TestSnapshotErrorKeepsBaseAndSize(t *testing.T) {
+	ctx := context.Background()
+	tooLarge := agenteval.Snapshot{Data: []byte("partial"), Digest: "sha256:00", Base: "abc123", Size: 1 << 20, Error: "too large: over the bound"}
+	want := agenteval.Snapshot{Base: "abc123", Size: 1 << 20, Error: "too large: over the bound"}
+	same := func(s *agenteval.Snapshot) bool {
+		return s != nil && s.Data == nil && s.Digest == "" && s.Base == want.Base && s.Size == want.Size && s.Error == want.Error
+	}
+	store := newStableStore()
+	r := basicRunner(store)
+	r.Snapshot = func(context.Context, agenteval.Task) (agenteval.Snapshot, error) { return tooLarge, nil }
+	report, err := r.Run(ctx, basicSuite(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, res := range report.Results {
+		if !same(res.Snapshot) {
+			t.Errorf("%s: snapshot %+v, want %+v", res.Task.ID, res.Snapshot, want)
+		}
+		if recs := snapshotEntries(t, store, res.SessionID); len(recs) != 1 || !same(&recs[0].Snapshot) {
+			t.Errorf("%s: session holds %+v", res.Task.ID, recs)
+		}
+		read, err := agenteval.ResultAt(ctx, store, res.SessionID, res.Target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !same(read.Snapshot) || read.Err != nil {
+			t.Errorf("%s: read back snapshot %+v err %v", res.Task.ID, read.Snapshot, read.Err)
+		}
+	}
+
+	e, err := agenteval.NewSnapshot(tooLarge, "sha256:target", "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec, ok := agenteval.ReadSnapshot(e); !ok || !same(&rec.Snapshot) {
+		t.Errorf("NewSnapshot kept %s", e.Data)
+	}
+
+	r = basicRunner(newStableStore())
+	r.Snapshot = func(context.Context, agenteval.Task) (agenteval.Snapshot, error) {
+		return agenteval.Snapshot{}, errors.New("container gone")
+	}
+	report, err = r.Run(ctx, basicSuite(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := report.Results[0].Snapshot; s == nil || s.Error != "container gone" || s.Data != nil || s.Base != "" || s.Size != 0 || s.Digest != "" {
+		t.Errorf("hook error alone kept %+v", s)
+	}
+}
+
+// TestReportWithoutSnapshotData is #75's first half: a report written
+// WithoutSnapshotData leaves each snapshot's bytes out and keeps its
+// Base, Digest, Error and the product's Size, with Omitted saying how
+// many bytes were left out, so a reader tells a report that left them
+// out from a product that kept less than it read; the session still
+// holds them, and ResultAt reads them back. The report in memory is
+// not changed, and a comparison written the same way leaves its pairs'
+// bytes out too.
+func TestReportWithoutSnapshotData(t *testing.T) {
+	ctx := context.Background()
+	store := newStableStore()
+	r := basicRunner(store)
+	// The product names a size of its own for one task.
+	sizeOf := func(task agenteval.Task) int64 {
+		if task.ID == "plain" {
+			return 4096
+		}
+		return 0
+	}
+	r.Snapshot = func(_ context.Context, task agenteval.Task) (agenteval.Snapshot, error) {
+		snap := diffOf(task)
+		snap.Size = sizeOf(task)
+		return snap, nil
+	}
+	report, err := r.Run(ctx, basicSuite(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	if err := report.WriteJSON(&b, agenteval.WithoutSnapshotData()); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(b.String(), `"data"`) {
+		t.Errorf("report carries the bytes:\n%s", b.String())
+	}
+	back, err := agenteval.ReadReport(strings.NewReader(b.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, res := range back.Results {
+		was := report.Results[i]
+		want := diffOf(was.Task)
+		if s := res.Snapshot; s == nil || s.Data != nil || s.Base != want.Base || s.Digest != was.Snapshot.Digest || s.Size != sizeOf(was.Task) || s.Omitted != int64(len(want.Data)) {
+			t.Errorf("%s: written snapshot %+v", was.Task.ID, s)
+		}
+		if string(was.Snapshot.Data) != string(want.Data) || was.Snapshot.Size != sizeOf(was.Task) || was.Snapshot.Omitted != 0 {
+			t.Errorf("%s: the report in memory changed: %+v", was.Task.ID, was.Snapshot)
+		}
+		read, err := agenteval.ResultAt(ctx, store, res.SessionID, res.Target)
+		if err != nil || read.Snapshot == nil || string(read.Snapshot.Data) != string(want.Data) || read.Snapshot.Error != "" {
+			t.Errorf("%s: read back %+v err %v", was.Task.ID, read.Snapshot, err)
+		}
+	}
+	c, err := agenteval.CompareReports(ctx, report, report, agenteval.OneStore(store), agenteval.OneStore(store))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Reset()
+	if err := c.WriteJSON(&b, agenteval.WithoutSnapshotData()); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(b.String(), `"data"`) || !strings.Contains(b.String(), `"digest"`) {
+		t.Errorf("comparison:\n%s", b.String())
+	}
+}

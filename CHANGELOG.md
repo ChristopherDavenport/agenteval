@@ -5,6 +5,107 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+### Added
+
+- `Result.Cause`, what stopped the run when `Reason` is `stopped`: a
+  content filter's refusal, an answer cut at the output limit, a guard,
+  the turn limit, the stop hook or a terminating tool. The runner sets
+  it from the run's end, and `ResultAt` and `JudgeGroups` read it back.
+- `Snapshot.Size`, the size in bytes of the workspace state the product
+  read, for a snapshot that keeps less than it read. (#79)
+- `ConfigDiff.Header` and `ConfigDiff.HeaderChanged`: a comparison
+  compares the harness settings a session records beside its config
+  entries, as agentsession RFC 0001 (Header, v0.0.39) asks of a reader
+  comparing configurations. A header member named `<slug>.<name>`,
+  such as dax's `dax.context`, is compared by name as a JSON value,
+  with nil for a side that lacks it, and a change to one during the run,
+  a `custom` entry whose `ns` is the slug and whose data holds the new
+  value under the member's name, is compared as the values each side's
+  path set, in order. Two runs that differ only in a compaction budget
+  no longer compare as one configuration. `IgnoreHeader`, a
+  `ReadOption` that `Compare` now also takes, leaves out members that
+  are a run's identity, such as `dax.workspace`; the command's
+  `compare` takes it as `-ignore-header`. (#69)
+- `WithoutSnapshotData`, a `WriteOption` that `Report.WriteJSON` and
+  `Comparison.WriteJSON` now take: each result's snapshot is written
+  without its bytes, keeping `Base`, `Size`, `Digest` and `Error`,
+  and the new `Snapshot.Omitted` set to the bytes left out: a field of
+  its own, not `Size`, so a reader tells bytes the report left out,
+  which the session holds, from bytes the product never kept. The session
+  still holds them and `ResultAt` reads them back; the results in
+  memory are not changed. Storing the bytes as a sidecar blob, the
+  other half of #75, waits on agentsession#294. (#75)
+
+### Changed
+
+- Breaking: `Report.WriteJSON` and `Comparison.WriteJSON` take
+  `...WriteOption`, and `Compare` takes `...ReadOption`. A call
+  compiles as before; an interface declaring `WriteJSON(io.Writer)
+  error`, or a function value of the old type, no longer matches.
+  (#75, #69)
+- A comparison of sessions that write header members in the
+  `<slug>.<name>` form now reports them, dax's included (#69). dax
+  v0.0.36 writes its run identity and placement in that form too, not
+  only its settings: `dax.workspace`, `dax.executor`, `dax.box`,
+  `dax.servers_workspace`, `dax.servers_workspaces` and `dax.origin`,
+  which differ from run to run whatever the configuration, so two dax
+  runs that differ only in the model no longer compare as uniform.
+  Until dax renames them, a caller comparing dax runs passes
+  `-ignore-header
+  dax.workspace,dax.executor,dax.box,dax.servers_workspace,dax.servers_workspaces,dax.origin`
+  (or `IgnoreHeader` with the same names). `dax.context` and
+  `dax.profile`, a bare run's left-out context, shape the requests and
+  stay compared; `dax.context` also records where its budget and window
+  came from, so the same budget set by a flag and by the config file
+  reads as a difference.
+- A snapshot whose `Error` is set keeps its `Base` and `Size`, on the
+  result, in the session and read back by `ResultAt`; only `Data` and
+  `Digest` are dropped, where the error alone was kept. A product that
+  records a change over its bound, as dax does, keeps what it applies
+  to and how large it was. A hook's returned error is still the
+  snapshot's `Error` alone, and the digest check still skips a
+  snapshot with an error. (#79)
+
+### Fixed
+
+- `ResultAt` and `JudgeGroups` read a run's end back as the loop ended
+  it. agentturn's recorder writes a stop as `stopped`, `done` or
+  `aborted` with the cause as its ref, and a host's abort as
+  `interrupted`, so a stored result read a guard's stop, and from
+  agentturn v0.0.40 a content filter's or the output limit's, as
+  `aborted` where the run it was read from said `stopped`, and an
+  abort as `interrupted`, which is no reason of the loop's.
+- `judge.Rubric` gives no verdict, `ErrNoVerdict` naming the cause,
+  when the provider's content filter refused the judge's response or
+  its output limit cut it, even where the text parses as a verdict,
+  and when the stop hook or the turn limit stopped the run after such
+  a response (`RunEnd.Incomplete` set).
+
+- `make guard-test` runs its go calls with `GOTOOLCHAIN=local`. Each
+  case has a module cache of its own and a file proxy, so a
+  `GOTOOLCHAIN` naming a release other than the go on `PATH` failed
+  every case that runs go, fetching the toolchain from that proxy. A
+  failed case now prints the output of the script it ran under its
+  `FAIL` line.
+
+### Dependencies
+
+- agentsession v0.0.37 to v0.0.39, agenttool v0.0.29 to v0.0.30,
+  agentturn and its `session` module v0.0.37 to v0.0.40, and
+  openresponses v0.0.18 to v0.0.20, in the root module, `harbor` and
+  `cmd/agenteval`. agentsession v0.0.38 is format 0.21, so the runner
+  records `agentsession/0.21`, appending an outcome raises a session it
+  judges to 0.21, and agentsession v0.0.37 and earlier refuse those
+  files. The fixtures under `testdata/sessions` are re-recorded in that
+  format; apart from their hashes and their random run and call IDs,
+  they are unchanged. agentturn v0.0.40 ends a run the provider's
+  content filter refused, or whose answer its output limit cut,
+  `stopped` with `StopContentFilter` or `StopMaxOutputTokens`, and
+  records it `aborted` with the cause as ref; the two fixes above
+  carry that through.
+
 ## v0.0.15 - 2026-11-08
 
 ### Fixed

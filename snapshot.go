@@ -30,13 +30,28 @@ type Snapshot struct {
 	// image digest, a task's starting tree. The library does not read
 	// it.
 	Base string `json:"base,omitempty"`
+	// Size is the size in bytes of the workspace state the product
+	// read, set where it keeps less than it read: a change over the
+	// product's bound, kept with Error and no Data, says here how large
+	// it was. The library does not read it.
+	Size int64 `json:"size,omitempty"`
+	// Omitted is the number of bytes of Data a report written
+	// [WithoutSnapshotData] left out. Where the snapshot was appended to
+	// the session, the session holds them and [ResultAt] reads them
+	// back; where the append failed, nothing holds them. It is set only
+	// in such a report, never in a session, so a reader tells bytes the
+	// report left out from bytes the product never kept, which Size and
+	// Error describe.
+	Omitted int64 `json:"omitted,omitempty"`
 	// Digest is the SHA-256 of Data in the session format's notation,
 	// "sha256:<hex>" (agentsession.HashBytes). The runner and
 	// [NewSnapshot] set it from Data, replacing one the hook returned,
 	// and [ResultAt] checks it.
 	Digest string `json:"digest,omitempty"`
-	// Error is why the snapshot could not be taken or kept: the hook's
-	// error, with Data, Base and Digest then empty; "record: " and the
+	// Error is why the snapshot could not be taken or kept: one the
+	// product set, such as a change over its bound, kept with Base and
+	// Size and with Data and Digest empty; the hook's error, with the
+	// rest then empty; "record: " and the
 	// store's error when the runner could not append the snapshot to the
 	// session, the snapshot kept on the result alone; or, from
 	// [ResultAt], "digest: " and why the recorded bytes do not hash to
@@ -47,11 +62,13 @@ type Snapshot struct {
 }
 
 // sealed returns the snapshot as it is kept: its digest set from Data,
-// or, for one whose Error is set, the error alone.
+// or, for one whose Error is set, the error with its Base and Size,
+// Data and Digest dropped.
 func (s Snapshot) sealed() Snapshot {
 	if s.Error != "" {
-		return Snapshot{Error: s.Error}
+		return Snapshot{Base: s.Base, Size: s.Size, Error: s.Error}
 	}
+	s.Omitted = 0
 	s.Digest = agentsession.HashBytes(s.Data)
 	return s
 }

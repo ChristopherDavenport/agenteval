@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -25,7 +26,9 @@ func record(t *testing.T, dir, task string, value float64) (string, string) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	s, err := store.Create(ctx, agentsession.Header{})
+	// Run identity in a harness setting's form, as dax's
+	// dax.workspace, which differs from store to store.
+	s, err := store.Create(ctx, agentsession.Header{Extra: map[string]json.RawMessage{"dax.workspace": json.RawMessage(strconv.Quote(dir))}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,8 +109,15 @@ func TestCommands(t *testing.T) {
 	if err := json.Unmarshal(cli(t, "compare", "-a-store", storeA, "-b-store", storeB, fileA, fileB), &c); err != nil {
 		t.Fatal(err)
 	}
-	if len(c.Pairs) != 1 || c.ByJudge["judge"] != -1 {
+	if len(c.Pairs) != 1 || c.ByJudge["judge"] != -1 || c.Config.Header["dax.workspace"].B != storeB {
 		t.Errorf("comparison = %+v", c)
+	}
+	c = agenteval.Comparison{}
+	if err := json.Unmarshal(cli(t, "compare", "-a-store", storeA, "-b-store", storeB, "-ignore-header", "dax.box, dax.workspace ,", fileA, fileB), &c); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Pairs) != 1 || !c.Config.Empty() {
+		t.Errorf("comparison ignoring dax.workspace = %+v", c)
 	}
 
 	var doc map[string]any

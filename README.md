@@ -170,7 +170,14 @@ describes; when those are the same and the two first requests are not,
 it says so with `beyond_settings`, because a transform, a hook and an
 injected item are not settings. A context strategy that folds only
 later in the run shows as `folded`, whether each side's path held a
-compaction entry, when one did and the other did not.
+compaction entry, when one did and the other did not. A harness setting
+that shapes the requests without being a request setting, such as a
+compaction budget, is a header member named `<slug>.<name>`, like
+`dax.context`, and a change to it during the run a `custom` entry whose
+`ns` is the slug (agentsession RFC 0001, Header): these show as
+`header` and `header_changed`. `IgnoreHeader` (`-ignore-header` on the
+command) leaves out members that are a run's identity, such as
+`dax.workspace`.
 
 `CompareReports` compares two sets of stored results without running
 anything: a candidate against a baseline a ref pins under

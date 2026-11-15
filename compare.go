@@ -6,8 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"reflect"
+	"slices"
 	"sort"
+	"strings"
 
 	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agentturn"
@@ -128,12 +131,30 @@ type ConfigDiff struct {
 	// entry, and without this would compare as one that never tried to
 	// compact, though each failed fold paid for its summary calls.
 	FoldFailed *Change `json:"fold_failed,omitempty"`
+	// Header holds the harness settings that differ as the two sessions
+	// were created, by member name, each value as JSON; a side that
+	// lacks the member has nil. A harness records a setting that shapes
+	// the requests it builds and is not a request setting, a compaction
+	// budget, a context window, a cap on tool output, as a header member
+	// named <slug>.<name>, such as dax.context (agentsession RFC 0001,
+	// Header). Every member of that form is compared, less those
+	// [IgnoreHeader] names: a harness may record its run's identity the
+	// same way, such as dax.workspace, which differs from run to run.
+	Header map[string]Change `json:"header,omitempty"`
+	// HeaderChanged holds the harness settings changed during the run
+	// differently on the two sides, by member name: each side's values
+	// in the order the path to its target set them, nil for a side that
+	// changed none. Such a change is a custom entry whose ns is the
+	// member's slug and whose data holds the new value under the
+	// member's name (RFC 0001, Header).
+	HeaderChanged map[string]Change `json:"header_changed,omitempty"`
 }
 
 // Empty reports whether nothing differed.
 func (d ConfigDiff) Empty() bool {
 	return !d.BeyondSettings && d.Folded == nil && d.FoldFailed == nil && d.Model == nil && d.Instructions == nil && d.Reasoning == nil && d.Text == nil &&
-		len(d.ToolsAdded) == 0 && len(d.ToolsRemoved) == 0 && len(d.ToolsChanged) == 0 && len(d.Extra) == 0
+		len(d.ToolsAdded) == 0 && len(d.ToolsRemoved) == 0 && len(d.ToolsChanged) == 0 && len(d.Extra) == 0 &&
+		len(d.Header) == 0 && len(d.HeaderChanged) == 0
 }
 
 // Compare runs the suite under a and b and pairs the results by task.
@@ -152,7 +173,10 @@ func (d ConfigDiff) Empty() bool {
 // that answers all of them. For an evaluation where a crash counts as
 // a failure, Harbor's included, which counts a trial with no reward as
 // 0, set [Runner.JudgeFailedRuns] on both runners.
-func Compare(ctx context.Context, suite *Suite, a, b *Runner) (*Comparison, error) {
+//
+// Of the read options only [IgnoreHeader] applies: each runner prices
+// its own runs.
+func Compare(ctx context.Context, suite *Suite, a, b *Runner, opts ...ReadOption) (*Comparison, error) {
 	if a == nil || b == nil {
 		return nil, errors.New("agenteval: compare needs two runners")
 	}
@@ -164,13 +188,13 @@ func Compare(ctx context.Context, suite *Suite, a, b *Runner) (*Comparison, erro
 	if err != nil {
 		return nil, fmt.Errorf("agenteval: compare: b: %w", err)
 	}
-	return compareResults(ctx, ra, rb, func(*Result) agentsession.Store { return a.Store }, func(*Result) agentsession.Store { return b.Store }), nil
+	return compareResults(ctx, ra, rb, func(*Result) agentsession.Store { return a.Store }, func(*Result) agentsession.Store { return b.Store }, readOptionsOf(opts)), nil
 }
 
 // compareResults pairs two reports' results by task and sample, the
 // settings each run started under read from its session in the store
 // storeA or storeB gives for it.
-func compareResults(ctx context.Context, ra, rb *Report, storeA, storeB func(*Result) agentsession.Store) *Comparison {
+func compareResults(ctx context.Context, ra, rb *Report, storeA, storeB func(*Result) agentsession.Store, o readOptions) *Comparison {
 	c := &Comparison{Suite: ra.Suite, Manifest: ra.Manifest, A: ra, B: rb, Uniform: true, ByJudge: map[string]float64{}}
 	counts := map[string]int{}
 	var foldedA, foldedB, failedA, failedB bool
@@ -204,10 +228,12 @@ func compareResults(ctx context.Context, ra, rb *Report, storeA, storeB func(*Re
 				counts[s.Judge]++
 			}
 		}
-		sa, ha, fa, errA := initialCall(ctx, storeA(pa), pa)
-		sb, hb, fb, errB := initialCall(ctx, storeB(pb), pb)
+		sa, ha, fa, xa, errA := initialCall(ctx, storeA(pa), pa, o.ignoreHeader)
+		sb, hb, fb, xb, errB := initialCall(ctx, storeB(pb), pb, o.ignoreHeader)
 		if errA == nil && errB == nil {
 			pair.Config = DiffSettings(sa, sb)
+			pair.Config.Header = diffMembers(xa.header, xb.header)
+			pair.Config.HeaderChanged = diffChanges(xa.changed, xb.changed)
 			// The same settings and a different request is something
 			// the settings cannot describe: a transform, a hook or an
 			// injected item.
@@ -252,13 +278,74 @@ func compareResults(ctx context.Context, ra, rb *Report, storeA, storeB func(*Re
 type ReadOption func(*readOptions)
 
 type readOptions struct {
-	cost func(string, openresponses.Usage) (float64, bool)
+	cost         func(string, openresponses.Usage) (float64, bool)
+	ignoreHeader map[string]bool
+}
+
+func readOptionsOf(opts []ReadOption) readOptions {
+	var o readOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return o
+}
+
+// IgnoreHeader leaves the named header members, and their changes
+// during a run, out of a comparison's [ConfigDiff.Header] and
+// [ConfigDiff.HeaderChanged]: members a harness writes in the form of
+// a setting that are its run's identity, such as dax.workspace, and
+// differ from run to run whatever the configuration.
+func IgnoreHeader(members ...string) ReadOption {
+	return func(o *readOptions) {
+		if o.ignoreHeader == nil {
+			o.ignoreHeader = map[string]bool{}
+		}
+		for _, m := range members {
+			o.ignoreHeader[m] = true
+		}
+	}
 }
 
 // WithCost prices each model call of a stored run, as [Runner.Cost]
 // prices a run, so the result carries its cost.
 func WithCost(fn func(model string, usage openresponses.Usage) (float64, bool)) ReadOption {
 	return func(o *readOptions) { o.cost = fn }
+}
+
+// endOf reads a recorded run end back as the loop's reason and stop
+// cause, as the run ended live. agentturn's recorder maps the loop's
+// reason onto the format's cascade and keeps the loop's own as the ref
+// where the two differ: a stop is written stopped, done or aborted
+// with its cause as the ref, aborted where the last response ended
+// incomplete (a content filter's refusal, an answer cut at the output
+// limit) or a guard withheld it, and the host's abort is written
+// interrupted. A ref naming no stop cause leaves done and aborted as
+// written; ref "incomplete", which the recorder writes for a last
+// response incomplete naming no reason, reads as the output limit's
+// stop, as agentturn reads it, though a live run whose details carried
+// no reason may have ended done.
+func endOf(end *agentsession.RunEntry) (agentturn.Reason, agentturn.StopCause) {
+	cause, _, _ := strings.Cut(end.Ref, ":")
+	stop := agentturn.StopCause(cause)
+	switch stop {
+	case agentturn.StopMaxTurns, agentturn.StopHook, agentturn.StopGuard, agentturn.StopTerminate,
+		agentturn.StopPartialTerminate, agentturn.StopRefused, agentturn.StopContentFilter, agentturn.StopMaxOutputTokens:
+	case "incomplete":
+		stop = agentturn.StopMaxOutputTokens
+	default:
+		stop = ""
+	}
+	switch end.Reason {
+	case agentsession.ReasonStopped:
+		return agentturn.ReasonStopped, agentturn.StopCause(cause)
+	case agentsession.ReasonDone, agentsession.ReasonAborted:
+		if stop != "" {
+			return agentturn.ReasonStopped, stop
+		}
+	case agentsession.ReasonInterrupted:
+		return agentturn.ReasonAborted, ""
+	}
+	return agentturn.Reason(end.Reason), ""
 }
 
 // ResultAt reads a run back from its session in store as a result,
@@ -276,8 +363,9 @@ func WithCost(fn func(model string, usage openresponses.Usage) (float64, bool)) 
 // the run at target for that task and sample, one whose data does not
 // hash to its digest kept as recorded with the mismatch on its Error,
 // not on Err; the
-// reason the last run end on the path to target, Runs and Resumes the
-// runs there, and Usage, ModelCalls, CostUSD and Subagents are read as
+// reason and cause the last run end on the path to target, read as the
+// loop ended the run whichever way the recorder wrote it, Runs and
+// Resumes the runs there, and Usage, ModelCalls, CostUSD and Subagents are read as
 // the runner reads them, so a stored result and the one Run returned
 // agree. The result counts as judged when it holds a score, or when
 // its run ended other than in error, as the runner judges it under the
@@ -315,7 +403,8 @@ func ResultAt(ctx context.Context, store agentsession.Store, sessionID, target s
 			res.Resumes++
 		}
 		if run.End != nil {
-			res.Reason, ended = agentturn.Reason(run.End.Reason), true
+			res.Reason, res.Cause = endOf(run.End)
+			ended = true
 		}
 	}
 	for _, e := range s.Entries() {
@@ -403,7 +492,7 @@ func CompareReports(ctx context.Context, a, b *Report, resolveA, resolveB func(R
 	if err != nil {
 		return nil, fmt.Errorf("agenteval: compare: b: %w", err)
 	}
-	return compareResults(ctx, ra, rb, storesA.of, storesB.of), nil
+	return compareResults(ctx, ra, rb, storesA.of, storesB.of, readOptionsOf(opts)), nil
 }
 
 // OneStore is the resolver of a report whose every session is in
@@ -458,22 +547,24 @@ func storedReport(ctx context.Context, r *Report, resolve func(Result) (agentses
 
 // initialCall replays the settings the result's first model call was
 // made under, the config entries on the path to the first response
-// entry, and returns the hash that response recorded for its request
-// and whether the path to the result's target holds a compaction
-// entry and a failed fold. A session with no response yields the
-// settings at its leaf and no hash.
-func initialCall(ctx context.Context, store agentsession.Store, res *Result) (agentsession.Settings, string, folds, error) {
+// entry, and returns the hash that response recorded for its request,
+// whether the path to the result's target holds a compaction entry
+// and a failed fold, and the harness settings the session's header
+// and that path record, less the members ignore names. A session with
+// no response yields the settings at its leaf and no hash.
+func initialCall(ctx context.Context, store agentsession.Store, res *Result, ignore map[string]bool) (agentsession.Settings, string, folds, harness, error) {
 	if res.SessionID == "" {
-		return agentsession.Settings{}, "", folds{}, errors.New("agenteval: no session")
+		return agentsession.Settings{}, "", folds{}, harness{}, errors.New("agenteval: no session")
 	}
 	s, err := readSession(ctx, store, res.SessionID)
 	if err != nil {
-		return agentsession.Settings{}, "", folds{}, err
+		return agentsession.Settings{}, "", folds{}, harness{}, err
 	}
 	leaf := res.Target
 	if leaf == "" {
 		leaf = s.Leaf()
 	}
+	h := harnessOf(s, leaf, ignore)
 	var folded folds
 	for _, e := range s.Path(leaf) {
 		switch v := e.(type) {
@@ -488,11 +579,131 @@ func initialCall(ctx context.Context, store agentsession.Store, res *Result) (ag
 	for _, e := range s.Path(leaf) {
 		if resp, ok := e.(*agentsession.ResponseEntry); ok {
 			cx, err := s.RequestContext(resp.ID)
-			return cx.Settings, resp.RequestHash, folded, err
+			return cx.Settings, resp.RequestHash, folded, h, err
 		}
 	}
 	cx, err := s.Context()
-	return cx.Settings, "", folded, err
+	return cx.Settings, "", folded, h, err
+}
+
+// harness is the settings a harness recorded beside the config
+// entries (agentsession RFC 0001, Header): the slug-prefixed header
+// members as the session was created, and each one's changes along a
+// path, in order.
+type harness struct {
+	header  map[string]json.RawMessage
+	changed map[string][]json.RawMessage
+}
+
+// harnessOf reads the harness settings of the session at leaf: each
+// header member named <slug>.<name>, and each custom entry on the path
+// whose ns is a slug and whose data is an object, a member of it named
+// <ns>.<name> being a change to that setting. Members ignore names are
+// left out.
+func harnessOf(s *agentsession.Session, leaf string, ignore map[string]bool) harness {
+	var h harness
+	for k, v := range s.Header().Extra {
+		if _, ok := slugOf(k); ok && !ignore[k] {
+			if h.header == nil {
+				h.header = map[string]json.RawMessage{}
+			}
+			h.header[k] = v
+		}
+	}
+	for _, e := range s.Path(leaf) {
+		c, ok := e.(*agentsession.CustomEntry)
+		if !ok || c.NS == "" || strings.ContainsAny(c.NS, ".:") {
+			continue
+		}
+		var data map[string]json.RawMessage
+		if json.Unmarshal(c.Data, &data) != nil {
+			continue
+		}
+		// In name order, so the changes one entry makes are read the
+		// same way each time.
+		for _, k := range slices.Sorted(maps.Keys(data)) {
+			if slug, ok := slugOf(k); !ok || slug != c.NS || ignore[k] {
+				continue
+			}
+			if h.changed == nil {
+				h.changed = map[string][]json.RawMessage{}
+			}
+			h.changed[k] = append(h.changed[k], data[k])
+		}
+	}
+	return h
+}
+
+// slugOf returns the slug of a header extension member's name,
+// <slug>.<name>, and whether name has that form: a slug and a name,
+// neither empty, joined by the first dot, and no colon, which a
+// namespaced entry type or member takes.
+func slugOf(name string) (string, bool) {
+	slug, rest, ok := strings.Cut(name, ".")
+	if !ok || slug == "" || rest == "" || strings.Contains(name, ":") {
+		return "", false
+	}
+	return slug, true
+}
+
+// diffMembers compares two sets of header members by name as JSON
+// values; a side that lacks one has nil.
+func diffMembers(a, b map[string]json.RawMessage) map[string]Change {
+	var d map[string]Change
+	add := func(k string, c Change) {
+		if d == nil {
+			d = map[string]Change{}
+		}
+		d[k] = c
+	}
+	for k, va := range a {
+		vb, ok := b[k]
+		if !ok {
+			add(k, Change{A: rawValue(va)})
+		} else if !sameJSON(rawValue(va), rawValue(vb)) {
+			add(k, Change{A: rawValue(va), B: rawValue(vb)})
+		}
+	}
+	for k, vb := range b {
+		if _, ok := a[k]; !ok {
+			add(k, Change{B: rawValue(vb)})
+		}
+	}
+	return d
+}
+
+// diffChanges compares two runs' changes to their harness settings,
+// by member name, each side's values in order; a side that made none
+// has nil.
+func diffChanges(a, b map[string][]json.RawMessage) map[string]Change {
+	values := func(vs []json.RawMessage) any {
+		if len(vs) == 0 {
+			return nil
+		}
+		out := make([]any, len(vs))
+		for i, v := range vs {
+			out[i] = rawValue(v)
+		}
+		return out
+	}
+	names := map[string]bool{}
+	for k := range a {
+		names[k] = true
+	}
+	for k := range b {
+		names[k] = true
+	}
+	var d map[string]Change
+	for k := range names {
+		va, vb := values(a[k]), values(b[k])
+		if !sameJSON(va, vb) {
+			if d == nil {
+				d = map[string]Change{}
+			}
+			d[k] = Change{A: va, B: vb}
+		}
+	}
+	return d
 }
 
 // folds is what a run's path holds of compaction: a fold applied, and
@@ -603,11 +814,19 @@ func sameJSON(a, b any) bool {
 
 // WriteJSON writes the comparison as indented JSON with a trailing
 // newline. The two reports are not included; write them separately.
-func (c *Comparison) WriteJSON(w io.Writer) error {
-	data, err := json.MarshalIndent(c, "", "  ")
-	if err != nil {
-		return err
+// The options are a report's: [WithoutSnapshotData] leaves the pairs'
+// snapshot bytes out.
+func (c *Comparison) WriteJSON(w io.Writer, opts ...WriteOption) error {
+	o := writeOptionsOf(opts)
+	out := c
+	if o.noSnapshotData {
+		cp := *c
+		cp.Pairs = make([]Pair, len(c.Pairs))
+		for i, p := range c.Pairs {
+			p.A, p.B = o.written(p.A), o.written(p.B)
+			cp.Pairs[i] = p
+		}
+		out = &cp
 	}
-	_, err = w.Write(append(data, '\n'))
-	return err
+	return writeIndented(w, out)
 }

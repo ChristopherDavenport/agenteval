@@ -97,9 +97,63 @@ func (r *Report) Sample(task string, sample int) (*Result, bool) {
 	return nil, false
 }
 
+// WriteOption configures how [Report.WriteJSON] and
+// [Comparison.WriteJSON] write.
+type WriteOption func(*writeOptions)
+
+type writeOptions struct {
+	noSnapshotData bool
+}
+
+func writeOptionsOf(opts []WriteOption) writeOptions {
+	var o writeOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return o
+}
+
+// WithoutSnapshotData writes each result's snapshot without its bytes:
+// Base, Size, Digest and Error as they are, and Omitted the number of
+// bytes left out. A workspace's change
+// can be large, and the session already holds it, where [ResultAt]
+// reads it back and checks it against the digest. The results in
+// memory are not changed.
+func WithoutSnapshotData() WriteOption {
+	return func(o *writeOptions) { o.noSnapshotData = true }
+}
+
+// written is res as a report with options o writes it.
+func (o writeOptions) written(res *Result) *Result {
+	if !o.noSnapshotData || res == nil || res.Snapshot == nil || res.Snapshot.Data == nil {
+		return res
+	}
+	out := *res
+	snap := *res.Snapshot
+	snap.Omitted = int64(len(snap.Data))
+	snap.Data = nil
+	out.Snapshot = &snap
+	return &out
+}
+
 // WriteJSON writes the report as indented JSON with a trailing newline.
-func (r *Report) WriteJSON(w io.Writer) error {
-	data, err := json.MarshalIndent(r, "", "  ")
+func (r *Report) WriteJSON(w io.Writer, opts ...WriteOption) error {
+	o := writeOptionsOf(opts)
+	out := r
+	if o.noSnapshotData {
+		cp := *r
+		cp.Results = make([]Result, len(r.Results))
+		for i := range r.Results {
+			cp.Results[i] = *o.written(&r.Results[i])
+		}
+		out = &cp
+	}
+	return writeIndented(w, out)
+}
+
+// writeIndented writes v as indented JSON with a trailing newline.
+func writeIndented(w io.Writer, v any) error {
+	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}

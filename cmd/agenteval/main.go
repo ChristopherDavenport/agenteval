@@ -12,7 +12,7 @@
 //
 //	agenteval import [-sessions agent/sessions] [-out FILE] JOB
 //	agenteval report -store DIR [-suite NAME] [-price FILE] [-out FILE] [REF|SESSION[@ENTRY]]...
-//	agenteval compare (-a-store DIR | -a-job DIR) (-b-store DIR | -b-job DIR) [-sessions agent/sessions] [-price FILE] [-out FILE] REPORT_A REPORT_B
+//	agenteval compare (-a-store DIR | -a-job DIR) (-b-store DIR | -b-job DIR) [-sessions agent/sessions] [-price FILE] [-ignore-header MEMBER,...] [-out FILE] REPORT_A REPORT_B
 //	agenteval export -store DIR [-price FILE] [-out FILE] REF|SESSION[@ENTRY]
 //
 // A store is a jsonl session store directory. A job is a Harbor job
@@ -48,7 +48,7 @@ func main() {
 const usage = `usage:
   agenteval import [-sessions agent/sessions] [-out FILE] JOB
   agenteval report -store DIR [-suite NAME] [-price FILE] [-out FILE] [REF|SESSION[@ENTRY]]...
-  agenteval compare (-a-store DIR | -a-job DIR) (-b-store DIR | -b-job DIR) [-sessions agent/sessions] [-price FILE] [-out FILE] REPORT_A REPORT_B
+  agenteval compare (-a-store DIR | -a-job DIR) (-b-store DIR | -b-job DIR) [-sessions agent/sessions] [-price FILE] [-ignore-header MEMBER,...] [-out FILE] REPORT_A REPORT_B
   agenteval export -store DIR [-price FILE] [-out FILE] REF|SESSION[@ENTRY]
 `
 
@@ -323,6 +323,7 @@ func compare(ctx context.Context, args []string, stdout, stderr io.Writer) (err 
 	bJob := fs.String("b-job", "", "the Harbor job `directory` report B was imported from")
 	sessions := fs.String("sessions", "agent/sessions", "the jsonl store `path` under each trial directory of a job")
 	pricePath := fs.String("price", "", "price the runs with the price table in `file`")
+	ignore := fs.String("ignore-header", "", "leave the header `members`, comma-separated (spaces around a comma ignored), out of the settings compared: a harness's run identity, such as dax.workspace")
 	out := fs.String("out", "", "write the comparison to `file` rather than stdout")
 	if err := parse(fs, args); err != nil {
 		return err
@@ -356,7 +357,17 @@ func compare(ctx context.Context, args []string, stdout, stderr io.Writer) (err 
 	if err != nil {
 		return err
 	}
-	c, err := agenteval.CompareReports(ctx, a, b, resolveA, resolveB, agenteval.WithCost(cost))
+	opts := []agenteval.ReadOption{agenteval.WithCost(cost)}
+	var members []string
+	for _, m := range strings.Split(*ignore, ",") {
+		if m = strings.TrimSpace(m); m != "" {
+			members = append(members, m)
+		}
+	}
+	if len(members) > 0 {
+		opts = append(opts, agenteval.IgnoreHeader(members...))
+	}
+	c, err := agenteval.CompareReports(ctx, a, b, resolveA, resolveB, opts...)
 	if err != nil {
 		return err
 	}
