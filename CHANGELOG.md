@@ -38,6 +38,21 @@ versions may break the API.
 
 ### Changed
 
+- A comparison of sessions that write header members in the
+  `<slug>.<name>` form now reports them, dax's included (#69). dax
+  v0.0.36 writes its run identity and placement in that form too, not
+  only its settings: `dax.workspace`, `dax.executor`, `dax.box`,
+  `dax.servers_workspace`, `dax.servers_workspaces` and `dax.origin`,
+  which differ from run to run whatever the configuration, so two dax
+  runs that differ only in the model no longer compare as uniform.
+  Until dax renames them, a caller comparing dax runs passes
+  `-ignore-header
+  dax.workspace,dax.executor,dax.box,dax.servers_workspace,dax.servers_workspaces,dax.origin`
+  (or `IgnoreHeader` with the same names). `dax.context` and
+  `dax.profile`, a bare run's left-out context, shape the requests and
+  stay compared; `dax.context` also records where its budget and window
+  came from, so the same budget set by a flag and by the config file
+  reads as a difference.
 - A snapshot whose `Error` is set keeps its `Base` and `Size`, on the
   result, in the session and read back by `ResultAt`; only `Data` and
   `Digest` are dropped, where the error alone was kept. A product that
