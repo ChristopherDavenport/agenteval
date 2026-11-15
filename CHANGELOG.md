@@ -38,6 +38,11 @@ versions may break the API.
 
 ### Changed
 
+- Breaking: `Report.WriteJSON` and `Comparison.WriteJSON` take
+  `...WriteOption`, and `Compare` takes `...ReadOption`. A call
+  compiles as before; an interface declaring `WriteJSON(io.Writer)
+  error`, or a function value of the old type, no longer matches.
+  (#75, #69)
 - A comparison of sessions that write header members in the
   `<slug>.<name>` form now reports them, dax's included (#69). dax
   v0.0.36 writes its run identity and placement in that form too, not
