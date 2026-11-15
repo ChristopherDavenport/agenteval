@@ -323,7 +323,7 @@ func compare(ctx context.Context, args []string, stdout, stderr io.Writer) (err 
 	bJob := fs.String("b-job", "", "the Harbor job `directory` report B was imported from")
 	sessions := fs.String("sessions", "agent/sessions", "the jsonl store `path` under each trial directory of a job")
 	pricePath := fs.String("price", "", "price the runs with the price table in `file`")
-	ignore := fs.String("ignore-header", "", "leave the header `members`, comma-separated, out of the settings compared: a harness's run identity, such as dax.workspace")
+	ignore := fs.String("ignore-header", "", "leave the header `members`, comma-separated (spaces around a comma ignored), out of the settings compared: a harness's run identity, such as dax.workspace")
 	out := fs.String("out", "", "write the comparison to `file` rather than stdout")
 	if err := parse(fs, args); err != nil {
 		return err
@@ -358,8 +358,14 @@ func compare(ctx context.Context, args []string, stdout, stderr io.Writer) (err 
 		return err
 	}
 	opts := []agenteval.ReadOption{agenteval.WithCost(cost)}
-	if *ignore != "" {
-		opts = append(opts, agenteval.IgnoreHeader(strings.Split(*ignore, ",")...))
+	var members []string
+	for _, m := range strings.Split(*ignore, ",") {
+		if m = strings.TrimSpace(m); m != "" {
+			members = append(members, m)
+		}
+	}
+	if len(members) > 0 {
+		opts = append(opts, agenteval.IgnoreHeader(members...))
 	}
 	c, err := agenteval.CompareReports(ctx, a, b, resolveA, resolveB, opts...)
 	if err != nil {

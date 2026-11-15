@@ -113,7 +113,7 @@ func TestCommands(t *testing.T) {
 		t.Errorf("comparison = %+v", c)
 	}
 	c = agenteval.Comparison{}
-	if err := json.Unmarshal(cli(t, "compare", "-a-store", storeA, "-b-store", storeB, "-ignore-header", "dax.workspace,dax.box", fileA, fileB), &c); err != nil {
+	if err := json.Unmarshal(cli(t, "compare", "-a-store", storeA, "-b-store", storeB, "-ignore-header", "dax.box, dax.workspace ,", fileA, fileB), &c); err != nil {
 		t.Fatal(err)
 	}
 	if len(c.Pairs) != 1 || !c.Config.Empty() {
