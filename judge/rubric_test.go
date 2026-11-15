@@ -162,6 +162,20 @@ func TestRubricCutIsNoVerdict(t *testing.T) {
 	}
 }
 
+// TestRubricCutUnderAnotherStopIsNoVerdict: a judge's run that the
+// stop hook ended after a response the output limit cut stops with the
+// hook's cause, and the cut response's details on RunEnd.Incomplete;
+// its text is no verdict either.
+func TestRubricCutUnderAnotherStopIsNoVerdict(t *testing.T) {
+	tr := mainTrajectory(t, loadFixture(t, "basic"))
+	cfg := agentturn.Config{Model: cut{openresponses.IncompleteReasonMaxOutputTokens}}
+	cfg.ShouldStopAfterTurn = func(context.Context, agentturn.TurnInfo) (bool, error) { return true, nil }
+	score, err := judge.Rubric(cfg, "rubric").Judge(context.Background(), tr, judgeTask("t"))
+	if !errors.Is(err, judge.ErrNoVerdict) || !strings.Contains(err.Error(), "max_output_tokens") {
+		t.Errorf("score %+v, err = %v; want ErrNoVerdict naming max_output_tokens", score, err)
+	}
+}
+
 // TestRenderStripsPassthrough is one of issue 4's frictions: Render
 // strips the raw item passthrough through export.NoPassthrough, which
 // keeps the root's payload profile name, so a judged document still

@@ -77,7 +77,9 @@ versions may break the API.
   abort as `interrupted`, which is no reason of the loop's.
 - `judge.Rubric` gives no verdict, `ErrNoVerdict` naming the cause,
   when the provider's content filter refused the judge's response or
-  its output limit cut it, even where the text parses as a verdict.
+  its output limit cut it, even where the text parses as a verdict,
+  and when the stop hook or the turn limit stopped the run after such
+  a response (`RunEnd.Incomplete` set).
 
 - `make guard-test` runs its go calls with `GOTOOLCHAIN=local`. Each
   case has a module cache of its own and a file proxy, so a
