@@ -13,6 +13,18 @@ versions may break the API.
   content filter's refusal, an answer cut at the output limit, a guard,
   the turn limit, the stop hook or a terminating tool. The runner sets
   it from the run's end, and `ResultAt` and `JudgeGroups` read it back.
+- `Snapshot.Size`, the size in bytes of the workspace state the product
+  read, for a snapshot that keeps less than it read. (#79)
+
+### Changed
+
+- A snapshot whose `Error` is set keeps its `Base` and `Size`, on the
+  result, in the session and read back by `ResultAt`; only `Data` and
+  `Digest` are dropped, where the error alone was kept. A product that
+  records a change over its bound, as dax does, keeps what it applies
+  to and how large it was. A hook's returned error is still the
+  snapshot's `Error` alone, and the digest check still skips a
+  snapshot with an error. (#79)
 
 ### Fixed
 

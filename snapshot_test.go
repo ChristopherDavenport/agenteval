@@ -372,3 +372,59 @@ func TestNewSnapshot(t *testing.T) {
 		t.Errorf("tampered: snapshot %+v err %v", read.Snapshot, read.Err)
 	}
 }
+
+// TestSnapshotErrorKeepsBaseAndSize is #79: a snapshot whose Error is
+// set, such as a change over the product's bound, keeps its Base and
+// Size, through the runner's hook and through NewSnapshot, and drops
+// only Data and Digest; read back it is no digest failure. A hook's
+// error alone is still the Error alone.
+func TestSnapshotErrorKeepsBaseAndSize(t *testing.T) {
+	ctx := context.Background()
+	tooLarge := agenteval.Snapshot{Data: []byte("partial"), Digest: "sha256:00", Base: "abc123", Size: 1 << 20, Error: "too large: over the bound"}
+	want := agenteval.Snapshot{Base: "abc123", Size: 1 << 20, Error: "too large: over the bound"}
+	same := func(s *agenteval.Snapshot) bool {
+		return s != nil && s.Data == nil && s.Digest == "" && s.Base == want.Base && s.Size == want.Size && s.Error == want.Error
+	}
+	store := newStableStore()
+	r := basicRunner(store)
+	r.Snapshot = func(context.Context, agenteval.Task) (agenteval.Snapshot, error) { return tooLarge, nil }
+	report, err := r.Run(ctx, basicSuite(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, res := range report.Results {
+		if !same(res.Snapshot) {
+			t.Errorf("%s: snapshot %+v, want %+v", res.Task.ID, res.Snapshot, want)
+		}
+		if recs := snapshotEntries(t, store, res.SessionID); len(recs) != 1 || !same(&recs[0].Snapshot) {
+			t.Errorf("%s: session holds %+v", res.Task.ID, recs)
+		}
+		read, err := agenteval.ResultAt(ctx, store, res.SessionID, res.Target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !same(read.Snapshot) || read.Err != nil {
+			t.Errorf("%s: read back snapshot %+v err %v", res.Task.ID, read.Snapshot, read.Err)
+		}
+	}
+
+	e, err := agenteval.NewSnapshot(tooLarge, "sha256:target", "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec, ok := agenteval.ReadSnapshot(e); !ok || !same(&rec.Snapshot) {
+		t.Errorf("NewSnapshot kept %s", e.Data)
+	}
+
+	r = basicRunner(newStableStore())
+	r.Snapshot = func(context.Context, agenteval.Task) (agenteval.Snapshot, error) {
+		return agenteval.Snapshot{}, errors.New("container gone")
+	}
+	report, err = r.Run(ctx, basicSuite(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := report.Results[0].Snapshot; s == nil || s.Error != "container gone" || s.Data != nil || s.Base != "" || s.Size != 0 || s.Digest != "" {
+		t.Errorf("hook error alone kept %+v", s)
+	}
+}
