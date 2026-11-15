@@ -13,6 +13,19 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 M=example.com/m
 fails=0
+# Every go call here runs with a module cache of its own and a file
+# proxy, neither of which holds a Go toolchain, so a GOTOOLCHAIN the
+# caller set to a release other than the go on PATH would have the go
+# command fetch it from that proxy and fail every case that runs go,
+# for a reason no case is about. The go on PATH runs them.
+export GOTOOLCHAIN=local
+
+# show <file>: a failed case's output, indented under its FAIL line, so
+# the log says why.
+show() {
+  [ -s "$1" ] && sed 's/^/    /' "$1"
+  return 0
+}
 
 # refuse <name> <setup: tagged|unserved-lib|behind-origin|no-test-flag|path-origin|branch|older> <what it says>
 refuse() {
@@ -63,11 +76,12 @@ refuse() {
     exit 0
   )
   rc=$?
-  chmod -R u+w "$d" 2>/dev/null; rm -rf "$d"
   if [ "$rc" != 0 ]; then
     echo "FAIL: release-command $name: rc $rc (10 ran through, 11 committed, 12 left the tree dirty, 13 refused for another reason)"
+    show "$d/err"
     fails=$((fails + 1))
   fi
+  chmod -R u+w "$d" 2>/dev/null; rm -rf "$d"
 }
 
 refuse "a command tag that exists" tagged "cmd/x/v0.0.2 is tagged already"
@@ -135,13 +149,13 @@ with zipfile.ZipFile(out, "w") as z:
       [ "$(git rev-parse HEAD)" = "$start" ] || exit 21
       ! git rev-parse -q --verify refs/tags/cmd/x/v0.0.2 >/dev/null || exit 21
       [ "$(git ls-remote origin refs/heads/main | cut -f1)" = "$start" ] || exit 21
-      grep -qF "cmd/x/stray.txt" "$d/out" || { cat "$d/out"; exit 22; }
-      grep -qF "remove the files listed" "$d/out" || { cat "$d/out"; exit 22; }
-      grep -qF "undo with: git reset --hard $start" "$d/out" || { cat "$d/out"; exit 22; }
+      grep -qF "cmd/x/stray.txt" "$d/out" || exit 22
+      grep -qF "remove the files listed" "$d/out" || exit 22
+      grep -qF "undo with: git reset --hard $start" "$d/out" || exit 22
       exit 0
     fi
     GOMODCACHE="$d/modcache" GOFLAGS=-modcacherw RELEASE_COMMAND_TEST=1 RELEASE_PROXY="file://$d/proxy" GONOSUMDB="$M" GOSUMDB=off GOWORK=off \
-      bash scripts/release-command.sh v0.0.2 cmd/x >"$d/out" 2>&1 || { cat "$d/out"; exit 10; }
+      bash scripts/release-command.sh v0.0.2 cmd/x >"$d/out" 2>&1 || exit 10
     tagged="$(git rev-parse cmd/x/v0.0.2^{commit})" || exit 11
     [ "$tagged" = "$(git rev-parse HEAD~1)" ] || exit 11
     ! git show "$tagged:cmd/x/go.mod" | grep -q replace || exit 12
@@ -154,11 +168,12 @@ with zipfile.ZipFile(out, "w") as z:
     exit 0
   )
   rc=$?
-  chmod -R u+w "$d" 2>/dev/null; rm -rf "$d"
   if [ "$rc" != 0 ]; then
     echo "FAIL: release-command on a published release ($mode): rc $rc (10 refused, 11 tag not on the release commit, 12 tagged go.mod has a replace or was not tidied against the proxy, 13 the tree's command differs from before, 14 not pushed, 15 tree dirty; stray: 20 ran through, 21 committed, tagged or pushed, 22 refused for another reason, without naming the file and saying to remove it, or printed no undo)"
+    show "$d/out"
     fails=$((fails + 1))
   fi
+  chmod -R u+w "$d" 2>/dev/null; rm -rf "$d"
 }
 
 release_run ok
@@ -207,15 +222,16 @@ command() {
     # A module cache of its own: one the case shared would serve the
     # version to the cases after it.
     GOMODCACHE="$d/modcache" GOPROXY="file://$d/proxy" GONOSUMDB="$M" GOFLAGS="-mod=mod -modcacherw" GOWORK=off \
-      bash "$HERE/release-guard.sh" "$tag" >/dev/null 2>&1
+      bash "$HERE/release-guard.sh" "$tag" >"$d/out" 2>&1
   )
   rc=$?
-  chmod -R u+w "$d" 2>/dev/null; rm -rf "$d"
   got=refuse; [ "$rc" = 0 ] && got=accept
   if [ "$got" != "$want" ]; then
     echo "FAIL: command guard $tag (requires $req, replace $repl, served $served) with [$*]: want $want, got $got"
+    show "$d/out"
     fails=$((fails + 1))
   fi
+  chmod -R u+w "$d" 2>/dev/null; rm -rf "$d"
 }
 
 command accept cmd/x/v0.0.2 v0.0.2 no all v0.0.1

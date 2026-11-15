@@ -74,6 +74,13 @@ versions may break the API.
   when the provider's content filter refused the judge's response or
   its output limit cut it, even where the text parses as a verdict.
 
+- `make guard-test` runs its go calls with `GOTOOLCHAIN=local`. Each
+  case has a module cache of its own and a file proxy, so a
+  `GOTOOLCHAIN` naming a release other than the go on `PATH` failed
+  every case that runs go, fetching the toolchain from that proxy. A
+  failed case now prints the output of the script it ran under its
+  `FAIL` line.
+
 ### Dependencies
 
 - agentsession v0.0.37 to v0.0.39, agenttool v0.0.29 to v0.0.30,
