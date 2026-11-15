@@ -36,10 +36,12 @@ type Snapshot struct {
 	// it was. The library does not read it.
 	Size int64 `json:"size,omitempty"`
 	// Omitted is the number of bytes of Data a report written
-	// [WithoutSnapshotData] left out, which the session still holds and
-	// [ResultAt] reads back. It is set only in such a report, never in
-	// a session, so a reader tells bytes the report left out from bytes
-	// the product never kept, which Size and Error describe.
+	// [WithoutSnapshotData] left out. Where the snapshot was appended to
+	// the session, the session holds them and [ResultAt] reads them
+	// back; where the append failed, nothing holds them. It is set only
+	// in such a report, never in a session, so a reader tells bytes the
+	// report left out from bytes the product never kept, which Size and
+	// Error describe.
 	Omitted int64 `json:"omitted,omitempty"`
 	// Digest is the SHA-256 of Data in the session format's notation,
 	// "sha256:<hex>" (agentsession.HashBytes). The runner and
