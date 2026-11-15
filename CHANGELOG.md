@@ -16,6 +16,20 @@ versions may break the API.
 - `Snapshot.Size`, the size in bytes of the workspace state the product
   read, for a snapshot that keeps less than it read. (#79)
 
+- `ConfigDiff.Header` and `ConfigDiff.HeaderChanged`: a comparison
+  compares the harness settings a session records beside its config
+  entries, as agentsession RFC 0001 (Header, v0.0.39) asks of a reader
+  comparing configurations. A header member named `<slug>.<name>`,
+  such as dax's `dax.context`, is compared by name as a JSON value,
+  with nil for a side that lacks it, and a change to one during the run,
+  a `custom` entry whose `ns` is the slug and whose data holds the new
+  value under the member's name, is compared as the values each side's
+  path set, in order. Two runs that differ only in a compaction budget
+  no longer compare as one configuration. `IgnoreHeader`, a
+  `ReadOption` that `Compare` now also takes, leaves out members that
+  are a run's identity, such as `dax.workspace`; the command's
+  `compare` takes it as `-ignore-header`. (#69)
+
 ### Changed
 
 - A snapshot whose `Error` is set keeps its `Base` and `Size`, on the
