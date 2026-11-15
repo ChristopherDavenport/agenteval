@@ -172,6 +172,11 @@ type Result struct {
 	Target string `json:"target,omitempty"`
 	// Reason is how the last run of the task ended.
 	Reason agentturn.Reason `json:"reason,omitempty"`
+	// Cause is what stopped that run when Reason is stopped, and empty
+	// otherwise: a content filter's refusal, an answer cut at the
+	// output limit, a guard, the turn limit, the stop hook or a
+	// terminating tool.
+	Cause agentturn.StopCause `json:"cause,omitempty"`
 	// Runs is how many runs of the loop the task took: one per prompt
 	// sent and one per resume.
 	Runs int `json:"runs"`
@@ -477,7 +482,7 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task, sample in
 		if end != nil {
 			res.Ends = append(res.Ends, end)
 			res.Runs++
-			res.Reason = end.Reason
+			res.Reason, res.Cause = end.Reason, end.Cause
 		}
 		if err == nil {
 			end, err = r.answer(ctx, a, end, &res)
@@ -653,7 +658,7 @@ func (r *Runner) answer(ctx context.Context, a *agentturn.Agent, end *agentturn.
 			res.Ends = append(res.Ends, next)
 			res.Runs++
 			res.Resumes++
-			res.Reason = next.Reason
+			res.Reason, res.Cause = next.Reason, next.Cause
 			end = next
 		}
 		if err != nil {
@@ -1157,7 +1162,7 @@ func (r *Runner) storedMember(ctx context.Context, s *agentsession.Session, task
 	if !ok || !run.IsEnd() {
 		return storedMember{}, false
 	}
-	m.Reason = agentturn.Reason(run.Reason)
+	m.Reason, m.Cause = endOf(run)
 	if m.Reason == agentturn.ReasonError && !r.JudgeFailedRuns {
 		return storedMember{}, false
 	}

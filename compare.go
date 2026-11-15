@@ -8,6 +8,7 @@ import (
 	"io"
 	"reflect"
 	"sort"
+	"strings"
 
 	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agentturn"
@@ -261,6 +262,41 @@ func WithCost(fn func(model string, usage openresponses.Usage) (float64, bool)) 
 	return func(o *readOptions) { o.cost = fn }
 }
 
+// endOf reads a recorded run end back as the loop's reason and stop
+// cause, as the run ended live. agentturn's recorder maps the loop's
+// reason onto the format's cascade and keeps the loop's own as the ref
+// where the two differ: a stop is written stopped, done or aborted
+// with its cause as the ref, aborted where the last response ended
+// incomplete (a content filter's refusal, an answer cut at the output
+// limit) or a guard withheld it, and the host's abort is written
+// interrupted. A ref naming no stop cause leaves done and aborted as
+// written; ref "incomplete", an end an earlier recorder wrote for a
+// response cut naming no reason, reads as the output limit's stop, as
+// agentturn reads it.
+func endOf(end *agentsession.RunEntry) (agentturn.Reason, agentturn.StopCause) {
+	cause, _, _ := strings.Cut(end.Ref, ":")
+	stop := agentturn.StopCause(cause)
+	switch stop {
+	case agentturn.StopMaxTurns, agentturn.StopHook, agentturn.StopGuard, agentturn.StopTerminate,
+		agentturn.StopPartialTerminate, agentturn.StopRefused, agentturn.StopContentFilter, agentturn.StopMaxOutputTokens:
+	case "incomplete":
+		stop = agentturn.StopMaxOutputTokens
+	default:
+		stop = ""
+	}
+	switch end.Reason {
+	case agentsession.ReasonStopped:
+		return agentturn.ReasonStopped, agentturn.StopCause(cause)
+	case agentsession.ReasonDone, agentsession.ReasonAborted:
+		if stop != "" {
+			return agentturn.ReasonStopped, stop
+		}
+	case agentsession.ReasonInterrupted:
+		return agentturn.ReasonAborted, ""
+	}
+	return agentturn.Reason(end.Reason), ""
+}
+
 // ResultAt reads a run back from its session in store as a result,
 // with no model and no judge called: an evaluation baseline a ref pins
 // (RFC 0002, Refs), a run another process made, the results a report
@@ -276,8 +312,9 @@ func WithCost(fn func(model string, usage openresponses.Usage) (float64, bool)) 
 // the run at target for that task and sample, one whose data does not
 // hash to its digest kept as recorded with the mismatch on its Error,
 // not on Err; the
-// reason the last run end on the path to target, Runs and Resumes the
-// runs there, and Usage, ModelCalls, CostUSD and Subagents are read as
+// reason and cause the last run end on the path to target, read as the
+// loop ended the run whichever way the recorder wrote it, Runs and
+// Resumes the runs there, and Usage, ModelCalls, CostUSD and Subagents are read as
 // the runner reads them, so a stored result and the one Run returned
 // agree. The result counts as judged when it holds a score, or when
 // its run ended other than in error, as the runner judges it under the
@@ -315,7 +352,8 @@ func ResultAt(ctx context.Context, store agentsession.Store, sessionID, target s
 			res.Resumes++
 		}
 		if run.End != nil {
-			res.Reason, ended = agentturn.Reason(run.End.Reason), true
+			res.Reason, res.Cause = endOf(run.End)
+			ended = true
 		}
 	}
 	for _, e := range s.Entries() {

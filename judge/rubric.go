@@ -27,7 +27,8 @@ type Verdict struct {
 const VerdictSchema = `{"type":"object","properties":{"score":{"type":"number","description":"The score under the rubric."},"pass":{"type":"boolean","description":"Whether the run passes under the rubric."},"reason":{"type":"string","description":"One paragraph saying why."}},"required":["score","pass","reason"],"additionalProperties":false}`
 
 // ErrNoVerdict is returned when the judge's run ended without a final
-// message in the verdict schema.
+// message in the verdict schema, or with one the provider's content
+// filter refused or its output limit cut.
 var ErrNoVerdict = errors.New("judge: the rubric judge gave no verdict")
 
 // Option configures [Rubric].
@@ -98,6 +99,11 @@ func (r *rubric) Judge(ctx context.Context, t export.Trajectory, task agenteval.
 	end, err := a.Prompt(ctx, openresponses.UserText(input))
 	if err != nil {
 		return agenteval.Score{}, fmt.Errorf("judge: %w", err)
+	}
+	if end.Cause == agentturn.StopContentFilter || end.Cause == agentturn.StopMaxOutputTokens {
+		// The provider refused the response or cut it at the output
+		// limit: its text is no verdict, even where it parses as one.
+		return agenteval.Score{}, fmt.Errorf("%w: run ended %s (%s)", ErrNoVerdict, end.Reason, end.Cause)
 	}
 	text := ""
 	for i := len(end.Items) - 1; i >= 0; i-- {

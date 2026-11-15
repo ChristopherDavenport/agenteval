@@ -5,6 +5,44 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+### Added
+
+- `Result.Cause`, what stopped the run when `Reason` is `stopped`: a
+  content filter's refusal, an answer cut at the output limit, a guard,
+  the turn limit, the stop hook or a terminating tool. The runner sets
+  it from the run's end, and `ResultAt` and `JudgeGroups` read it back.
+
+### Fixed
+
+- `ResultAt` and `JudgeGroups` read a run's end back as the loop ended
+  it. agentturn's recorder writes a stop as `stopped`, `done` or
+  `aborted` with the cause as its ref, and a host's abort as
+  `interrupted`, so a stored result read a guard's stop, and from
+  agentturn v0.0.40 a content filter's or the output limit's, as
+  `aborted` where the run it was read from said `stopped`, and an
+  abort as `interrupted`, which is no reason of the loop's.
+- `judge.Rubric` gives no verdict, `ErrNoVerdict` naming the cause,
+  when the provider's content filter refused the judge's response or
+  its output limit cut it, even where the text parses as a verdict.
+
+### Dependencies
+
+- agentsession v0.0.37 to v0.0.39, agenttool v0.0.29 to v0.0.30,
+  agentturn and its `session` module v0.0.37 to v0.0.40, and
+  openresponses v0.0.18 to v0.0.20, in the root module, `harbor` and
+  `cmd/agenteval`. agentsession v0.0.38 is format 0.21, so the runner
+  records `agentsession/0.21`, appending an outcome raises a session it
+  judges to 0.21, and agentsession v0.0.37 and earlier refuse those
+  files. The fixtures under `testdata/sessions` are re-recorded in that
+  format; apart from their hashes and their random run and call IDs,
+  they are unchanged. agentturn v0.0.40 ends a run the provider's
+  content filter refused, or whose answer its output limit cut,
+  `stopped` with `StopContentFilter` or `StopMaxOutputTokens`, and
+  records it `aborted` with the cause as ref; the two fixes above
+  carry that through.
+
 ## v0.0.15 - 2026-11-08
 
 ### Fixed

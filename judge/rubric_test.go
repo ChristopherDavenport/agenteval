@@ -122,6 +122,46 @@ func TestRubricNoVerdict(t *testing.T) {
 	}
 }
 
+// cut is a judge model whose response holds a well-formed verdict and
+// that the provider still ends incomplete with reason.
+type cut struct {
+	reason openresponses.IncompleteReason
+}
+
+func (c cut) CreateStream(_ context.Context, req openresponses.Request, sink openresponses.EventSink) error {
+	em := openresponses.NewEmitter(sink, openresponses.NewResponse(req))
+	w, err := em.Message("")
+	if err != nil {
+		return err
+	}
+	if err := w.Text(`{"score":1,"pass":true,"reason":"fine"}`); err != nil {
+		return err
+	}
+	if c.reason == openresponses.IncompleteReasonContentFilter {
+		if err := w.Refusal("I can't judge that."); err != nil {
+			return err
+		}
+	}
+	return em.Incomplete(c.reason)
+}
+
+// TestRubricCutIsNoVerdict: a judge's response the provider ended
+// incomplete, by its content filter or at the output limit, is no
+// verdict, whatever its text parses as; the error names the cause
+// (agentturn v0.0.40's StopContentFilter and StopMaxOutputTokens).
+func TestRubricCutIsNoVerdict(t *testing.T) {
+	tr := mainTrajectory(t, loadFixture(t, "basic"))
+	for _, reason := range []openresponses.IncompleteReason{openresponses.IncompleteReasonContentFilter, openresponses.IncompleteReasonMaxOutputTokens} {
+		t.Run(string(reason), func(t *testing.T) {
+			j := judge.Rubric(agentturn.Config{Model: cut{reason}}, "rubric")
+			score, err := j.Judge(context.Background(), tr, judgeTask("t"))
+			if !errors.Is(err, judge.ErrNoVerdict) || !strings.Contains(err.Error(), string(reason)) {
+				t.Errorf("score %+v, err = %v; want ErrNoVerdict naming %s", score, err, reason)
+			}
+		})
+	}
+}
+
 // TestRenderStripsPassthrough is one of issue 4's frictions: Render
 // strips the raw item passthrough through export.NoPassthrough, which
 // keeps the root's payload profile name, so a judged document still
