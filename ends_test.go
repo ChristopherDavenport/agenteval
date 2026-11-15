@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/ChristopherDavenport/agenteval"
+	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/openresponses"
 )
@@ -56,6 +57,14 @@ func TestStoredEndReadsAsTheLoopEnded(t *testing.T) {
 			cfg.Model = cut{reason: openresponses.IncompleteReasonMaxOutputTokens}
 			return cfg
 		}},
+		// The hook stops a run whose last response requested nothing:
+		// the recorder writes it done, with the cause as its ref.
+		{name: "hook after an answer", cause: agentturn.StopHook, cfg: func() agentturn.Config {
+			cfg := echoConfig()
+			cfg.Tools = nil
+			cfg.ShouldStopAfterTurn = func(context.Context, agentturn.TurnInfo) (bool, error) { return true, nil }
+			return cfg
+		}},
 		{name: "guard", cause: agentturn.StopGuard, cfg: func() agentturn.Config {
 			cfg := echoConfig()
 			cfg.Tools = nil
@@ -85,5 +94,32 @@ func TestStoredEndReadsAsTheLoopEnded(t *testing.T) {
 				t.Errorf("stored reason = %s (%s), live %s (%s)", stored.Reason, stored.Cause, live.Reason, live.Cause)
 			}
 		})
+	}
+}
+
+// TestStoredAbortReadsAsAborted: agentturn's recorder writes the
+// host's abort, the loop's aborted, as interrupted, a reason the loop
+// does not have (session.Recorder's endReason); read back it is
+// aborted. The runner cannot abort a run without failing the batch, so
+// the end is written as the recorder writes it.
+func TestStoredAbortReadsAsAborted(t *testing.T) {
+	ctx := context.Background()
+	store := newStableStore()
+	s, err := store.Create(ctx, agentsession.Header{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, s.ID(), agentsession.NewRunStart("run_1", agentsession.SourceInput, "")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, s.ID(), agentsession.NewRunEnd("run_1", agentsession.ReasonInterrupted, "context canceled", nil)); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := agenteval.ResultAt(ctx, store, s.ID(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Reason != agentturn.ReasonAborted || stored.Cause != "" {
+		t.Errorf("stored reason = %s (%s), want aborted", stored.Reason, stored.Cause)
 	}
 }
