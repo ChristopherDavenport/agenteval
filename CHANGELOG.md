@@ -15,7 +15,6 @@ versions may break the API.
   it from the run's end, and `ResultAt` and `JudgeGroups` read it back.
 - `Snapshot.Size`, the size in bytes of the workspace state the product
   read, for a snapshot that keeps less than it read. (#79)
-
 - `ConfigDiff.Header` and `ConfigDiff.HeaderChanged`: a comparison
   compares the harness settings a session records beside its config
   entries, as agentsession RFC 0001 (Header, v0.0.39) asks of a reader
@@ -29,6 +28,13 @@ versions may break the API.
   `ReadOption` that `Compare` now also takes, leaves out members that
   are a run's identity, such as `dax.workspace`; the command's
   `compare` takes it as `-ignore-header`. (#69)
+- `WithoutSnapshotData`, a `WriteOption` that `Report.WriteJSON` and
+  `Comparison.WriteJSON` now take: each result's snapshot is written
+  without its bytes, keeping `Base`, `Digest` and `Error`, and `Size`
+  set to the bytes left out where the snapshot names none. The session
+  still holds them and `ResultAt` reads them back; the results in
+  memory are not changed. Storing the bytes as a sidecar blob, the
+  other half of #75, waits on agentsession#294. (#75)
 
 ### Changed
 

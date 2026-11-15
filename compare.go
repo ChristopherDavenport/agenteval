@@ -813,11 +813,19 @@ func sameJSON(a, b any) bool {
 
 // WriteJSON writes the comparison as indented JSON with a trailing
 // newline. The two reports are not included; write them separately.
-func (c *Comparison) WriteJSON(w io.Writer) error {
-	data, err := json.MarshalIndent(c, "", "  ")
-	if err != nil {
-		return err
+// The options are a report's: [WithoutSnapshotData] leaves the pairs'
+// snapshot bytes out.
+func (c *Comparison) WriteJSON(w io.Writer, opts ...WriteOption) error {
+	o := writeOptionsOf(opts)
+	out := c
+	if o.noSnapshotData {
+		cp := *c
+		cp.Pairs = make([]Pair, len(c.Pairs))
+		for i, p := range c.Pairs {
+			p.A, p.B = o.written(p.A), o.written(p.B)
+			cp.Pairs[i] = p
+		}
+		out = &cp
 	}
-	_, err = w.Write(append(data, '\n'))
-	return err
+	return writeIndented(w, out)
 }

@@ -428,3 +428,56 @@ func TestSnapshotErrorKeepsBaseAndSize(t *testing.T) {
 		t.Errorf("hook error alone kept %+v", s)
 	}
 }
+
+// TestReportWithoutSnapshotData is #75's first half: a report written
+// WithoutSnapshotData leaves each snapshot's bytes out and keeps its
+// Base, Digest and Error, with Size saying how many bytes were left
+// out; the session still holds them, and ResultAt reads them back. The
+// report in memory is not changed, and a comparison written the same
+// way leaves its pairs' bytes out too.
+func TestReportWithoutSnapshotData(t *testing.T) {
+	ctx := context.Background()
+	store := newStableStore()
+	r := basicRunner(store)
+	r.Snapshot = func(_ context.Context, task agenteval.Task) (agenteval.Snapshot, error) { return diffOf(task), nil }
+	report, err := r.Run(ctx, basicSuite(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	if err := report.WriteJSON(&b, agenteval.WithoutSnapshotData()); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(b.String(), `"data"`) {
+		t.Errorf("report carries the bytes:\n%s", b.String())
+	}
+	back, err := agenteval.ReadReport(strings.NewReader(b.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, res := range back.Results {
+		was := report.Results[i]
+		want := diffOf(was.Task)
+		if s := res.Snapshot; s == nil || s.Data != nil || s.Base != want.Base || s.Digest != was.Snapshot.Digest || s.Size != int64(len(want.Data)) {
+			t.Errorf("%s: written snapshot %+v", was.Task.ID, s)
+		}
+		if string(was.Snapshot.Data) != string(want.Data) || was.Snapshot.Size != 0 {
+			t.Errorf("%s: the report in memory changed: %+v", was.Task.ID, was.Snapshot)
+		}
+		read, err := agenteval.ResultAt(ctx, store, res.SessionID, res.Target)
+		if err != nil || read.Snapshot == nil || string(read.Snapshot.Data) != string(want.Data) || read.Snapshot.Error != "" {
+			t.Errorf("%s: read back %+v err %v", was.Task.ID, read.Snapshot, err)
+		}
+	}
+	c, err := agenteval.CompareReports(ctx, report, report, agenteval.OneStore(store), agenteval.OneStore(store))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Reset()
+	if err := c.WriteJSON(&b, agenteval.WithoutSnapshotData()); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(b.String(), `"data"`) || !strings.Contains(b.String(), `"digest"`) {
+		t.Errorf("comparison:\n%s", b.String())
+	}
+}

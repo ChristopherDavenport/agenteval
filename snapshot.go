@@ -33,7 +33,9 @@ type Snapshot struct {
 	// Size is the size in bytes of the workspace state the product
 	// read, set where it keeps less than it read: a change over the
 	// product's bound, kept with Error and no Data, says here how large
-	// it was. The library does not read it.
+	// it was. A report written [WithoutSnapshotData] sets it, where it
+	// is not set, to the number of bytes it left out. The library does
+	// not read it otherwise.
 	Size int64 `json:"size,omitempty"`
 	// Digest is the SHA-256 of Data in the session format's notation,
 	// "sha256:<hex>" (agentsession.HashBytes). The runner and
