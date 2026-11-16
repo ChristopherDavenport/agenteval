@@ -323,10 +323,13 @@ func WithCost(fn func(model string, usage openresponses.Usage) (float64, bool)) 
 // incomplete (a content filter's refusal, an answer cut at the output
 // limit) or a guard withheld it, and the host's abort is written
 // interrupted. A ref naming no stop cause leaves done and aborted as
-// written; ref "incomplete", which the recorder writes for a last
+// written; ref "incomplete", which the recorder has written for a last
 // response incomplete naming no reason, reads as the output limit's
-// stop, as agentturn reads it, though a live run whose details carried
-// no reason may have ended done.
+// stop, as agentturn reads it. A live run whose final answer's details
+// named an empty reason ended done under agentturn v0.0.40 and
+// earlier, so for such a run the result Run returned and the one read
+// back differ; agentturn after v0.0.40 ends it stopped with the output
+// limit's cause live too (agentturn#317), and the two agree.
 func endOf(end *agentsession.RunEntry) (agentturn.Reason, agentturn.StopCause) {
 	cause, _, _ := strings.Cut(end.Ref, ":")
 	stop := agentturn.StopCause(cause)
