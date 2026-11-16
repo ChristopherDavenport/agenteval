@@ -20,6 +20,18 @@ versions may break the API.
   `WriteJSON`, flag or not, in the same indented form with a trailing
   newline; `export` is unchanged. Only `cmd/agenteval` changes. (#81)
 
+### Changed
+
+- Documentation: dax v0.0.37 and later name the header members that
+  identify a run `dax:<name>` (`dax:workspace`, `dax:executor`,
+  `dax:box`, `dax:servers_workspace`, `dax:servers_workspaces`,
+  `dax:origin`), a form a comparison does not read, so comparing their
+  runs needs no ignore list; the `-ignore-header` list v0.0.16's notes
+  give is for runs dax v0.0.36 recorded. `ConfigDiff.Header`,
+  `IgnoreHeader`, the flag's help and the README say that a member of
+  the `<slug>:<name>` form is not compared: the form agentsession#299
+  gives such members in RFC 0001's Header. No code changes.
+
 ### Dependencies
 
 - openresponses v0.0.20 to v0.0.21, in the root module and

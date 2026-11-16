@@ -175,9 +175,11 @@ that shapes the requests without being a request setting, such as a
 compaction budget, is a header member named `<slug>.<name>`, like
 `dax.context`, and a change to it during the run a `custom` entry whose
 `ns` is the slug (agentsession RFC 0001, Header): these show as
-`header` and `header_changed`. `IgnoreHeader` (`-ignore-header` on the
-command) leaves out members that are a run's identity, such as
-`dax.workspace`.
+`header` and `header_changed`. A member that is not such a setting,
+such as a run's identity, is named `<slug>:<name>`, like
+`dax:workspace`, and is not compared. `IgnoreHeader` (`-ignore-header`
+on the command) leaves out dotted members that are a run's identity
+all the same, such as `dax.workspace` from dax v0.0.36 and earlier.
 
 `CompareReports` compares two sets of stored results without running
 anything: a candidate against a baseline a ref pins under

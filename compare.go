@@ -138,8 +138,9 @@ type ConfigDiff struct {
 	// budget, a context window, a cap on tool output, as a header member
 	// named <slug>.<name>, such as dax.context (agentsession RFC 0001,
 	// Header). Every member of that form is compared, less those
-	// [IgnoreHeader] names: a harness may record its run's identity the
-	// same way, such as dax.workspace, which differs from run to run.
+	// [IgnoreHeader] names. A member that is not such a setting, such as
+	// a run's identity or placement, is named <slug>:<name>, as dax
+	// v0.0.37 and later name dax:workspace, and is not compared.
 	Header map[string]Change `json:"header,omitempty"`
 	// HeaderChanged holds the harness settings changed during the run
 	// differently on the two sides, by member name: each side's values
@@ -293,8 +294,10 @@ func readOptionsOf(opts []ReadOption) readOptions {
 // IgnoreHeader leaves the named header members, and their changes
 // during a run, out of a comparison's [ConfigDiff.Header] and
 // [ConfigDiff.HeaderChanged]: members a harness writes in the form of
-// a setting that are its run's identity, such as dax.workspace, and
-// differ from run to run whatever the configuration.
+// a setting that are its run's identity, and differ from run to run
+// whatever the configuration, such as dax.workspace, which dax v0.0.36
+// and earlier wrote where later versions write dax:workspace, a
+// member of the <slug>:<name> form no comparison reads.
 func IgnoreHeader(members ...string) ReadOption {
 	return func(o *readOptions) {
 		if o.ignoreHeader == nil {

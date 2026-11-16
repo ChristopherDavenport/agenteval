@@ -361,7 +361,7 @@ func compare(ctx context.Context, args []string, stdout, stderr io.Writer) (err 
 	bJob := fs.String("b-job", "", "the Harbor job `directory` report B was imported from")
 	sessions := fs.String("sessions", "agent/sessions", "the jsonl store `path` under each trial directory of a job")
 	pricePath := fs.String("price", "", "price the runs with the price table in `file`")
-	ignore := fs.String("ignore-header", "", "leave the header `members`, comma-separated (spaces around a comma ignored), out of the settings compared: a harness's run identity, such as dax.workspace")
+	ignore := fs.String("ignore-header", "", "leave the header `members`, comma-separated (spaces around a comma ignored), out of the settings compared: a harness's run identity in the dotted form, such as dax.workspace from dax v0.0.36 and earlier")
 	noData := noSnapshotData(fs)
 	out := fs.String("out", "", "write the comparison to `file` rather than stdout")
 	if err := parse(fs, args); err != nil {
