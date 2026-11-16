@@ -7,6 +7,19 @@ versions may break the API.
 
 ## Unreleased
 
+### Added
+
+- The command's `import`, `report` and `compare` take
+  `-no-snapshot-data`, which writes each run's workspace snapshot
+  without its bytes, through `Report.WriteJSON` and
+  `Comparison.WriteJSON` with `WithoutSnapshotData()`: `Base`, `Size`,
+  `Digest` and `Error` stay and `Omitted` counts the bytes left out,
+  which the session still holds. `compare` reads its runs from the
+  stores, so two reports written with the flag compare as two full ones
+  do. The three commands now write every report and comparison through
+  `WriteJSON`, flag or not, in the same indented form with a trailing
+  newline; `export` is unchanged. Only `cmd/agenteval` changes. (#81)
+
 ### Dependencies
 
 - openresponses v0.0.20 to v0.0.21, in the root module and

@@ -306,7 +306,11 @@ agenteval export -store runs -price prices.json SESSION@ENTRY
 
 A run is named by a ref the store holds or by `SESSION[@ENTRY]`. A
 job's trials keep their sessions in the store `-sessions` names under
-each trial directory, `agent/sessions` by default. Running a task,
+each trial directory, `agent/sessions` by default. `import`, `report`
+and `compare` write through the library's `WriteJSON`, and take
+`-no-snapshot-data` to write each run's snapshot without its bytes, as
+`WithoutSnapshotData` does: its size and digest stay, the session keeps
+the bytes, and `compare` reads them from there. Running a task,
 building its environment and running its verifier, stays with Harbor
 or with the product: a suite needs a Go configuration no generic
 binary has, and Harbor already runs tasks.
