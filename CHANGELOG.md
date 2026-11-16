@@ -5,6 +5,14 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+### Dependencies
+
+- openresponses v0.0.20 to v0.0.21, in the root module and
+  `cmd/agenteval`, and in `harbor`, which builds against the root's
+  tree. No API of this module changes with it.
+
 ## v0.0.16 - 2026-11-15
 
 ### Added
