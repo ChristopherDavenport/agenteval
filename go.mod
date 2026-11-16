@@ -7,5 +7,5 @@ require (
 	github.com/ChristopherDavenport/agenttool v0.0.30
 	github.com/ChristopherDavenport/agentturn v0.0.40
 	github.com/ChristopherDavenport/agentturn/session v0.0.40
-	github.com/ChristopherDavenport/openresponses v0.0.20
+	github.com/ChristopherDavenport/openresponses v0.0.21
 )

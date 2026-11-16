@@ -10,18 +10,22 @@
 // suite needs a Go configuration no generic binary has, and Harbor
 // already runs tasks.
 //
-//	agenteval import [-sessions agent/sessions] [-out FILE] JOB
-//	agenteval report -store DIR [-suite NAME] [-price FILE] [-out FILE] [REF|SESSION[@ENTRY]]...
-//	agenteval compare (-a-store DIR | -a-job DIR) (-b-store DIR | -b-job DIR) [-sessions agent/sessions] [-price FILE] [-ignore-header MEMBER,...] [-out FILE] REPORT_A REPORT_B
+//	agenteval import [-sessions agent/sessions] [-no-snapshot-data] [-out FILE] JOB
+//	agenteval report -store DIR [-suite NAME] [-price FILE] [-no-snapshot-data] [-out FILE] [REF|SESSION[@ENTRY]]...
+//	agenteval compare (-a-store DIR | -a-job DIR) (-b-store DIR | -b-job DIR) [-sessions agent/sessions] [-price FILE] [-ignore-header MEMBER,...] [-no-snapshot-data] [-out FILE] REPORT_A REPORT_B
 //	agenteval export -store DIR [-price FILE] [-out FILE] REF|SESSION[@ENTRY]
 //
 // A store is a jsonl session store directory. A job is a Harbor job
 // directory, each trial's sessions in the store under its directory
 // that -sessions names. A price file is a price table (see the price
-// package).
+// package). -no-snapshot-data writes each run's workspace snapshot
+// without its bytes, keeping its size and digest and counting the bytes
+// left out; the session still holds them, and compare reads them from
+// there, so a report written with it compares as a full one does.
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -46,9 +50,9 @@ func main() {
 }
 
 const usage = `usage:
-  agenteval import [-sessions agent/sessions] [-out FILE] JOB
-  agenteval report -store DIR [-suite NAME] [-price FILE] [-out FILE] [REF|SESSION[@ENTRY]]...
-  agenteval compare (-a-store DIR | -a-job DIR) (-b-store DIR | -b-job DIR) [-sessions agent/sessions] [-price FILE] [-ignore-header MEMBER,...] [-out FILE] REPORT_A REPORT_B
+  agenteval import [-sessions agent/sessions] [-no-snapshot-data] [-out FILE] JOB
+  agenteval report -store DIR [-suite NAME] [-price FILE] [-no-snapshot-data] [-out FILE] [REF|SESSION[@ENTRY]]...
+  agenteval compare (-a-store DIR | -a-job DIR) (-b-store DIR | -b-job DIR) [-sessions agent/sessions] [-price FILE] [-ignore-header MEMBER,...] [-no-snapshot-data] [-out FILE] REPORT_A REPORT_B
   agenteval export -store DIR [-price FILE] [-out FILE] REF|SESSION[@ENTRY]
 `
 
@@ -110,18 +114,50 @@ func parse(fs *flag.FlagSet, args []string) error {
 	return nil
 }
 
-// output writes v as indented JSON to the file named, or stdout.
+// output writes v as indented JSON to the file named, or stdout. A
+// report or a comparison goes through writeReport instead.
 func output(path string, stdout io.Writer, v any) error {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	data = append(data, '\n')
+	return emit(path, stdout, append(data, '\n'))
+}
+
+// emit writes data to the file named, or stdout.
+func emit(path string, stdout io.Writer, data []byte) error {
 	if path == "" {
-		_, err = stdout.Write(data)
+		_, err := stdout.Write(data)
 		return err
 	}
 	return os.WriteFile(path, data, 0o644)
+}
+
+// reportWriter is a value the library writes as a report file: a
+// [agenteval.Report] or a [agenteval.Comparison].
+type reportWriter interface {
+	WriteJSON(io.Writer, ...agenteval.WriteOption) error
+}
+
+// writeReport writes v through the library's WriteJSON, indented with a
+// trailing newline as output writes, to the file named, or stdout, with
+// each snapshot's bytes left out under noData.
+func writeReport(path string, stdout io.Writer, v reportWriter, noData bool) error {
+	var opts []agenteval.WriteOption
+	if noData {
+		opts = append(opts, agenteval.WithoutSnapshotData())
+	}
+	var b bytes.Buffer
+	if err := v.WriteJSON(&b, opts...); err != nil {
+		return err
+	}
+	return emit(path, stdout, b.Bytes())
+}
+
+// noSnapshotData adds -no-snapshot-data to a command that writes a
+// report.
+func noSnapshotData(fs *flag.FlagSet) *bool {
+	return fs.Bool("no-snapshot-data", false, "write each run's workspace snapshot without its bytes, keeping its size and digest; the session still holds them")
 }
 
 // prices loads the price table a -price flag names, nil for none.
@@ -193,6 +229,7 @@ func (t *trialStores) close() error {
 func importJob(ctx context.Context, args []string, stdout, stderr io.Writer) (err error) {
 	fs := flags("import", stderr)
 	sessions := fs.String("sessions", "agent/sessions", "the jsonl store `path` under each trial directory")
+	noData := noSnapshotData(fs)
 	out := fs.String("out", "", "write the report to `file` rather than stdout")
 	if err := parse(fs, args); err != nil {
 		return err
@@ -207,7 +244,7 @@ func importJob(ctx context.Context, args []string, stdout, stderr io.Writer) (er
 	if err != nil {
 		return err
 	}
-	return output(*out, stdout, r)
+	return writeReport(*out, stdout, r, *noData)
 }
 
 // target resolves a command-line run: a ref the store holds, or a
@@ -235,6 +272,7 @@ func report(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 	dir := fs.String("store", "", "the jsonl session store `directory`")
 	suite := fs.String("suite", "", "the report's suite `name`")
 	pricePath := fs.String("price", "", "price the runs with the price table in `file`")
+	noData := noSnapshotData(fs)
 	out := fs.String("out", "", "write the report to `file` rather than stdout")
 	if err := parse(fs, args); err != nil {
 		return err
@@ -275,7 +313,7 @@ func report(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 		r.Results = append(r.Results, *res)
 	}
 	r.ByJudge = agenteval.Summarize(r.Results)
-	return output(*out, stdout, r)
+	return writeReport(*out, stdout, r, *noData)
 }
 
 // readReport reads a report file.
@@ -323,7 +361,8 @@ func compare(ctx context.Context, args []string, stdout, stderr io.Writer) (err 
 	bJob := fs.String("b-job", "", "the Harbor job `directory` report B was imported from")
 	sessions := fs.String("sessions", "agent/sessions", "the jsonl store `path` under each trial directory of a job")
 	pricePath := fs.String("price", "", "price the runs with the price table in `file`")
-	ignore := fs.String("ignore-header", "", "leave the header `members`, comma-separated (spaces around a comma ignored), out of the settings compared: a harness's run identity, such as dax.workspace")
+	ignore := fs.String("ignore-header", "", "leave the header `members`, comma-separated (spaces around a comma ignored), out of the settings compared: a harness's run identity in the dotted form, such as dax.workspace from dax v0.0.36 and earlier")
+	noData := noSnapshotData(fs)
 	out := fs.String("out", "", "write the comparison to `file` rather than stdout")
 	if err := parse(fs, args); err != nil {
 		return err
@@ -371,7 +410,7 @@ func compare(ctx context.Context, args []string, stdout, stderr io.Writer) (err 
 	if err != nil {
 		return err
 	}
-	return output(*out, stdout, c)
+	return writeReport(*out, stdout, c, *noData)
 }
 
 // exportRun prints a stored run as an ATIF document, its subagents'

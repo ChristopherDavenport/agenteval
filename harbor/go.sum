@@ -8,5 +8,5 @@ github.com/ChristopherDavenport/agentturn v0.0.40 h1:aBs5U6kezW06zMlY/1OuBgUaxd3
 github.com/ChristopherDavenport/agentturn v0.0.40/go.mod h1:EPVD8D1AEwJpmlKD+Az2m34YpNdStj8XaOswGr9/OIg=
 github.com/ChristopherDavenport/agentturn/session v0.0.40 h1:GjsGMZe77sbrAkPSC10vnUZ6YrlSZE45+0tOKl34rgQ=
 github.com/ChristopherDavenport/agentturn/session v0.0.40/go.mod h1:n4zVPUuLnbdrxfuyR52w9Yi9kZVPezRL68Q4uaMl5BE=
-github.com/ChristopherDavenport/openresponses v0.0.20 h1:YQdzzI+q4UDYR5EFUeypd2lIOPDKKSYQ6ZGoQw7gCN4=
-github.com/ChristopherDavenport/openresponses v0.0.20/go.mod h1:oZT6GCySXw3+vL5LzrJrRI5qagBumqvwDZdp6Kr++a8=
+github.com/ChristopherDavenport/openresponses v0.0.21 h1:raa+uJchDM2lhjEy6GxG9UK400m1w7FzwCtb3udio7Y=
+github.com/ChristopherDavenport/openresponses v0.0.21/go.mod h1:oZT6GCySXw3+vL5LzrJrRI5qagBumqvwDZdp6Kr++a8=

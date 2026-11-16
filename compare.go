@@ -138,8 +138,9 @@ type ConfigDiff struct {
 	// budget, a context window, a cap on tool output, as a header member
 	// named <slug>.<name>, such as dax.context (agentsession RFC 0001,
 	// Header). Every member of that form is compared, less those
-	// [IgnoreHeader] names: a harness may record its run's identity the
-	// same way, such as dax.workspace, which differs from run to run.
+	// [IgnoreHeader] names. A member that is not such a setting, such as
+	// a run's identity or placement, is named <slug>:<name>, as dax
+	// v0.0.37 and later name dax:workspace, and is not compared.
 	Header map[string]Change `json:"header,omitempty"`
 	// HeaderChanged holds the harness settings changed during the run
 	// differently on the two sides, by member name: each side's values
@@ -293,8 +294,10 @@ func readOptionsOf(opts []ReadOption) readOptions {
 // IgnoreHeader leaves the named header members, and their changes
 // during a run, out of a comparison's [ConfigDiff.Header] and
 // [ConfigDiff.HeaderChanged]: members a harness writes in the form of
-// a setting that are its run's identity, such as dax.workspace, and
-// differ from run to run whatever the configuration.
+// a setting that are its run's identity, and differ from run to run
+// whatever the configuration, such as dax.workspace, which dax v0.0.36
+// and earlier wrote where later versions write dax:workspace, a
+// member of the <slug>:<name> form no comparison reads.
 func IgnoreHeader(members ...string) ReadOption {
 	return func(o *readOptions) {
 		if o.ignoreHeader == nil {
@@ -320,10 +323,13 @@ func WithCost(fn func(model string, usage openresponses.Usage) (float64, bool)) 
 // incomplete (a content filter's refusal, an answer cut at the output
 // limit) or a guard withheld it, and the host's abort is written
 // interrupted. A ref naming no stop cause leaves done and aborted as
-// written; ref "incomplete", which the recorder writes for a last
+// written; ref "incomplete", which the recorder has written for a last
 // response incomplete naming no reason, reads as the output limit's
-// stop, as agentturn reads it, though a live run whose details carried
-// no reason may have ended done.
+// stop, as agentturn reads it. A live run whose final answer's details
+// named an empty reason ended done under agentturn v0.0.40 and
+// earlier, so for such a run the result Run returned and the one read
+// back differ; agentturn after v0.0.40 ends it stopped with the output
+// limit's cause live too (agentturn#317), and the two agree.
 func endOf(end *agentsession.RunEntry) (agentturn.Reason, agentturn.StopCause) {
 	cause, _, _ := strings.Cut(end.Ref, ":")
 	stop := agentturn.StopCause(cause)

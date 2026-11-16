@@ -165,3 +165,133 @@ func TestCommands(t *testing.T) {
 		t.Errorf("run: exit %d", code)
 	}
 }
+
+// snapshot appends a snapshot of the run whose last entry is target,
+// for task, to the session id in the jsonl store at dir, as a harness
+// that runs the agent itself keeps one.
+func snapshot(t *testing.T, dir, id, target, task string, data []byte) {
+	t.Helper()
+	store, err := jsonl.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	e, err := agenteval.NewSnapshot(agenteval.Snapshot{Data: data, Base: "HEAD", Size: int64(len(data))}, target, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(context.Background(), id, e); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// checkLeftOut fails unless every result's snapshot in the report r
+// kept its size and digest and left its bytes out, counted in Omitted.
+func checkLeftOut(t *testing.T, what string, data []byte, n int, results ...*agenteval.Result) {
+	t.Helper()
+	if bytes.Contains(data, []byte(`"data"`)) {
+		t.Errorf("%s holds snapshot bytes:\n%s", what, data)
+	}
+	if len(results) != n {
+		t.Fatalf("%s has %d results with a snapshot, want %d", what, len(results), n)
+	}
+	for _, res := range results {
+		s := res.Snapshot
+		if s == nil || s.Data != nil || s.Size == 0 || s.Digest == "" || s.Omitted != s.Size || s.Base != "HEAD" {
+			t.Errorf("%s: snapshot = %+v, want Size, Digest and Omitted and no Data", what, s)
+		}
+	}
+}
+
+// TestNoSnapshotData is #81: import, report and compare take
+// -no-snapshot-data and write through the library's WriteJSON with
+// WithoutSnapshotData, so a report keeps each snapshot's size and digest
+// and leaves its bytes out, which the session still holds; compare reads
+// the stores again, so two such reports compare as two full ones do.
+func TestNoSnapshotData(t *testing.T) {
+	tmp := t.TempDir()
+	storeA, storeB := filepath.Join(tmp, "a"), filepath.Join(tmp, "b")
+	idA, targetA := record(t, storeA, "one", 1)
+	idB, targetB := record(t, storeB, "one", 0)
+	snapshot(t, storeA, idA, targetA, "one", []byte("diff --git a/x b/x\n+a\n"))
+	snapshot(t, storeB, idB, targetB, "one", []byte("diff --git a/x b/x\n+b\n"))
+	// Each run named by one ref, which a report takes for the task, so
+	// the two reports pair.
+	for dir, ref := range map[string]agentsession.RefTarget{storeA: {Session: idA, Entry: targetA}, storeB: {Session: idB, Entry: targetB}} {
+		store, err := jsonl.Open(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.UpdateRef(context.Background(), "eval/s/one", agentsession.RefTarget{}, ref, "run"); err != nil {
+			t.Fatal(err)
+		}
+		store.Close()
+	}
+
+	reports := map[string]string{}
+	for _, side := range []struct{ name, store, id string }{{"a", storeA, "eval/s/one"}, {"b", storeB, "eval/s/one"}} {
+		full := filepath.Join(tmp, side.name+"-full.json")
+		slim := filepath.Join(tmp, side.name+"-slim.json")
+		cli(t, "report", "-store", side.store, "-suite", "s", "-out", full, side.id)
+		cli(t, "report", "-store", side.store, "-suite", "s", "-no-snapshot-data", "-out", slim, side.id)
+		reports[side.name+"-full"], reports[side.name+"-slim"] = full, slim
+
+		data, err := os.ReadFile(full)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var r agenteval.Report
+		if err := json.Unmarshal(data, &r); err != nil {
+			t.Fatal(err)
+		}
+		if len(r.Results) != 1 || r.Results[0].Snapshot == nil || r.Results[0].Snapshot.Data == nil {
+			t.Fatalf("the full report %s has no snapshot bytes: %s", side.name, data)
+		}
+		if data, err = os.ReadFile(slim); err != nil {
+			t.Fatal(err)
+		}
+		r = agenteval.Report{}
+		if err := json.Unmarshal(data, &r); err != nil {
+			t.Fatal(err)
+		}
+		checkLeftOut(t, "report "+side.name, data, 1, &r.Results[0])
+	}
+
+	// The two pairs of reports compare alike: compare reads the stores.
+	full := cli(t, "compare", "-a-store", storeA, "-b-store", storeB, reports["a-full"], reports["b-full"])
+	slim := cli(t, "compare", "-a-store", storeA, "-b-store", storeB, reports["a-slim"], reports["b-slim"])
+	if !bytes.Contains(full, []byte(`"pairs": [
+    {`)) {
+		t.Fatalf("the reports do not pair:\n%s", full)
+	}
+	if !bytes.Equal(full, slim) {
+		t.Errorf("compare over reports without snapshot bytes =\n%s\nwant as over full ones:\n%s", slim, full)
+	}
+	out := cli(t, "compare", "-a-store", storeA, "-b-store", storeB, "-no-snapshot-data", reports["a-slim"], reports["b-slim"])
+	var c agenteval.Comparison
+	if err := json.Unmarshal(out, &c); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Pairs) != 1 {
+		t.Fatalf("comparison = %s", out)
+	}
+	checkLeftOut(t, "comparison", out, 2, c.Pairs[0].A, c.Pairs[0].B)
+
+	// An imported Harbor job, one trial with a snapshot of its run.
+	job := filepath.Join(tmp, "job")
+	trial := filepath.Join(job, "one__aaa", "agent", "sessions")
+	id, target := record(t, trial, "", -1)
+	snapshot(t, trial, id, target, "", []byte("diff --git a/y b/y\n+c\n"))
+	if err := os.WriteFile(filepath.Join(job, "one__aaa", "result.json"), []byte(`{"task_name":"one","verifier_result":{"rewards":{"reward":1}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out = cli(t, "import", "-no-snapshot-data", job)
+	var imported agenteval.Report
+	if err := json.Unmarshal(out, &imported); err != nil {
+		t.Fatal(err)
+	}
+	if len(imported.Results) != 1 {
+		t.Fatalf("imported = %s", out)
+	}
+	checkLeftOut(t, "import", out, 1, &imported.Results[0])
+}

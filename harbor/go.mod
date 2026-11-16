@@ -12,7 +12,7 @@ require (
 	github.com/ChristopherDavenport/agenttool v0.0.30 // indirect
 	github.com/ChristopherDavenport/agentturn v0.0.40 // indirect
 	github.com/ChristopherDavenport/agentturn/session v0.0.40 // indirect
-	github.com/ChristopherDavenport/openresponses v0.0.20 // indirect
+	github.com/ChristopherDavenport/openresponses v0.0.21 // indirect
 )
 
 // The require names the released root a consumer fetches; the replace

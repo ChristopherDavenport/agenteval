@@ -6,7 +6,7 @@ require (
 	github.com/ChristopherDavenport/agenteval v0.0.16
 	github.com/ChristopherDavenport/agenteval/harbor v0.0.16
 	github.com/ChristopherDavenport/agentsession v0.0.39
-	github.com/ChristopherDavenport/openresponses v0.0.20
+	github.com/ChristopherDavenport/openresponses v0.0.21
 )
 
 require (

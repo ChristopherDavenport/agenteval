@@ -5,6 +5,39 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+### Added
+
+- The command's `import`, `report` and `compare` take
+  `-no-snapshot-data`, which writes each run's workspace snapshot
+  without its bytes, through `Report.WriteJSON` and
+  `Comparison.WriteJSON` with `WithoutSnapshotData()`: `Base`, `Size`,
+  `Digest` and `Error` stay and `Omitted` counts the bytes left out,
+  which the session still holds. `compare` reads its runs from the
+  stores, so two reports written with the flag compare as two full ones
+  do. The three commands now write every report and comparison through
+  `WriteJSON`, flag or not, in the same indented form with a trailing
+  newline; `export` is unchanged. Only `cmd/agenteval` changes. (#81)
+
+### Changed
+
+- Documentation: dax v0.0.37 and later name the header members that
+  identify a run `dax:<name>` (`dax:workspace`, `dax:executor`,
+  `dax:box`, `dax:servers_workspace`, `dax:servers_workspaces`,
+  `dax:origin`), a form a comparison does not read, so comparing their
+  runs needs no ignore list; the `-ignore-header` list v0.0.16's notes
+  give is for runs dax v0.0.36 recorded. `ConfigDiff.Header`,
+  `IgnoreHeader`, the flag's help and the README say that a member of
+  the `<slug>:<name>` form is not compared: the form agentsession#299
+  gives such members in RFC 0001's Header. No code changes.
+
+### Dependencies
+
+- openresponses v0.0.20 to v0.0.21, in the root module and
+  `cmd/agenteval`, and in `harbor`, which builds against the root's
+  tree. No API of this module changes with it.
+
 ## v0.0.16 - 2026-11-15
 
 ### Added

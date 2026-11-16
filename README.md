@@ -175,9 +175,11 @@ that shapes the requests without being a request setting, such as a
 compaction budget, is a header member named `<slug>.<name>`, like
 `dax.context`, and a change to it during the run a `custom` entry whose
 `ns` is the slug (agentsession RFC 0001, Header): these show as
-`header` and `header_changed`. `IgnoreHeader` (`-ignore-header` on the
-command) leaves out members that are a run's identity, such as
-`dax.workspace`.
+`header` and `header_changed`. A member that is not such a setting,
+such as a run's identity, is named `<slug>:<name>`, like
+`dax:workspace`, and is not compared. `IgnoreHeader` (`-ignore-header`
+on the command) leaves out dotted members that are a run's identity
+all the same, such as `dax.workspace` from dax v0.0.36 and earlier.
 
 `CompareReports` compares two sets of stored results without running
 anything: a candidate against a baseline a ref pins under
@@ -306,7 +308,11 @@ agenteval export -store runs -price prices.json SESSION@ENTRY
 
 A run is named by a ref the store holds or by `SESSION[@ENTRY]`. A
 job's trials keep their sessions in the store `-sessions` names under
-each trial directory, `agent/sessions` by default. Running a task,
+each trial directory, `agent/sessions` by default. `import`, `report`
+and `compare` write through the library's `WriteJSON`, and take
+`-no-snapshot-data` to write each run's snapshot without its bytes, as
+`WithoutSnapshotData` does: its size and digest stay, the session keeps
+the bytes, and `compare` reads them from there. Running a task,
 building its environment and running its verifier, stays with Harbor
 or with the product: a suite needs a Go configuration no generic
 binary has, and Harbor already runs tasks.
