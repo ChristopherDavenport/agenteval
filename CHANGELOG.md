@@ -5,6 +5,17 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+### Dependencies
+
+- agentsession v0.0.39 to v0.0.42, in the root module, `harbor` and
+  `cmd/agenteval`. agentsession v0.0.42 is format 0.22, so the runner
+  records `agentsession/0.22`, appending an outcome raises a session it
+  judges to 0.22, and agentsession v0.0.41 and earlier refuse those
+  files. The fixtures under `testdata/sessions` are re-recorded at
+  0.22; apart from hashes and random IDs they are unchanged.
+
 ## v0.0.17 - 2026-11-15
 
 ### Added
