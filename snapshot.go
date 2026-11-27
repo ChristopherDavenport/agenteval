@@ -139,30 +139,13 @@ func ReadSnapshot(e *agentsession.CustomEntry) (SnapshotRecord, bool) {
 	return rec, true
 }
 
-// snapshotAt returns the last snapshot of the tree at cwd the session
-// holds of the run whose last entry is target, for task and sample when
-// matchTask is set, or nil when it holds none: one with no Path, or
-// "." , as every snapshot written before Path existed is. A snapshot
-// whose bytes do not hash to its digest is returned as recorded, its
-// Error saying so.
-func snapshotAt(s *agentsession.Session, target, task string, sample int, matchTask bool) *Snapshot {
-	cwd, _ := snapshotsAt(s, target, task, sample, matchTask)
-	return cwd
-}
-
-// checkoutSnapshotsAt returns the snapshots of the run's other
-// checkouts, as snapshotAt reads the cwd one: the last the session
-// holds for each Path, in the order each Path was first written, nil
-// when it holds none.
-func checkoutSnapshotsAt(s *agentsession.Session, target, task string, sample int, matchTask bool) []Snapshot {
-	_, others := snapshotsAt(s, target, task, sample, matchTask)
-	return others
-}
-
-// snapshotsAt reads every snapshot of the run whose last entry is
-// target: the last of the tree at cwd, and the last of each other
-// checkout by Path, in the order each Path was first written. Each is
-// checked against its digest.
+// snapshotsAt reads every snapshot the session holds of the run whose
+// last entry is target, for task and sample when matchTask is set: the
+// last of the tree at cwd, one with no Path or ".", as every snapshot
+// written before Path existed is, nil when it holds none; and the last
+// of each other checkout by Path, in the order each Path was first
+// written, nil when it holds none. A snapshot whose bytes do not hash
+// to its digest is returned as recorded, its Error saying so.
 func snapshotsAt(s *agentsession.Session, target, task string, sample int, matchTask bool) (*Snapshot, []Snapshot) {
 	var cwd *Snapshot
 	var others []Snapshot
