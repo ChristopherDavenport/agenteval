@@ -432,7 +432,7 @@ func ResultAt(ctx context.Context, store agentsession.Store, sessionID, target s
 		res.Scores = append(res.Scores, score)
 	}
 	res.judged = len(res.Scores) > 0 || !errored && ended && res.Reason != agentturn.ReasonError
-	res.Snapshot = snapshotAt(s, target, rec.Task, rec.Sample, hasRecord)
+	res.Snapshot, res.CheckoutSnapshots = snapshotsAt(s, target, rec.Task, rec.Sample, hasRecord)
 	m := measure(ctx, store, o.cost, s, target)
 	res.Usage, res.ModelCalls, res.CostUSD, res.Subagents = m.usage, m.calls, m.cost, m.delegated
 	return res, nil

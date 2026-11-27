@@ -157,6 +157,36 @@ type Runner struct {
 	//		return agenteval.Snapshot{Data: diff, Base: ws.Base}, err
 	//	}
 	Snapshot func(ctx context.Context, task Task) (Snapshot, error)
+	// CheckoutSnapshot, when set, reads each checkout the run worked in
+	// other than the tree at cwd, as Snapshot reads that tree, at the
+	// same point and under the same rules. The checkouts are the run's
+	// own record: those the last env entry on the run's path that
+	// carries a checkouts member lists (RFC 0001, env, checkouts), the
+	// one at "." left to Snapshot. It is called once per checkout, in
+	// the entry's order, with the checkout as recorded, so the product
+	// finds it in the run's workspace by its Path and knows the
+	// revision and branch the run left it on. The runner sets each
+	// snapshot's Path from the checkout, replacing one the hook
+	// returned, keeps them on [Result.CheckoutSnapshots], appends each
+	// to the session as a [SnapshotNS] entry after the cwd snapshot,
+	// and each judge reads them through [CheckoutSnapshotsFrom]. A
+	// run whose env entries list no checkouts, as one recorded before
+	// format 0.22 or by a harness that does not list them, calls it
+	// never. For a git checkout, its uncommitted change against the
+	// revision the run left it on, which together rebuild the tree
+	// wherever that revision can be fetched (a product that knows the
+	// revision a checkout started from diffs against that instead, and
+	// keeps the run's commits in Data):
+	//
+	//	CheckoutSnapshot: func(ctx context.Context, t agenteval.Task, c agentsession.Checkout) (agenteval.Snapshot, error) {
+	//		if c.VCS == nil {
+	//			return agenteval.Snapshot{}, errors.New("the run could not read this checkout")
+	//		}
+	//		ws := workspaces.For(t)
+	//		diff, err := ws.Output(ctx, `cd "$0" && git add -A -N . && git diff --binary "$1"`, c.Path, c.VCS.Revision)
+	//		return agenteval.Snapshot{Data: diff, Base: c.VCS.Revision}, err
+	//	}
+	CheckoutSnapshot func(ctx context.Context, task Task, checkout agentsession.Checkout) (Snapshot, error)
 }
 
 // Result is one task's run and its scores.
@@ -220,6 +250,12 @@ type Result struct {
 	// it, or why it could not be read; nil when the runner has no hook,
 	// or the session holds no snapshot of the run.
 	Snapshot *Snapshot `json:"snapshot,omitempty"`
+	// CheckoutSnapshots are the snapshots of the checkouts the run
+	// worked in other than the tree at cwd, one per checkout by Path,
+	// as [Runner.CheckoutSnapshot] read them or a harness wrote them
+	// with [NewSnapshot]; nil when there are none. Snapshot stays the
+	// tree at cwd's, so a reader that knows one tree reads as before.
+	CheckoutSnapshots []Snapshot `json:"checkout_snapshots,omitempty"`
 	// Scores are the judges' verdicts, in the runner's judge order. A
 	// judge that failed is missing here and named in Err; a task whose
 	// run failed has none, unless [Runner.JudgeFailedRuns].
@@ -523,6 +559,7 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task, sample in
 		t, terr = trajectoryAt(s, res.Target)
 	}
 	r.snapshot(ctx, s.ID(), task, sample, &res)
+	r.checkoutSnapshots(ctx, s, task, sample, &res)
 	if !judge {
 		return res
 	}
@@ -531,7 +568,7 @@ func (r *Runner) runTask(ctx context.Context, suite *Suite, task Task, sample in
 		return res
 	}
 	res.trajectory, res.judged = t, true
-	jctx := withSnapshot(ctx, res.Snapshot)
+	jctx := withCheckoutSnapshots(withSnapshot(ctx, res.Snapshot), res.CheckoutSnapshots)
 	for _, j := range r.Judges {
 		score, err := j.Judge(jctx, t, task)
 		if err != nil {
@@ -576,6 +613,54 @@ func (r *Runner) snapshot(ctx context.Context, sessionID string, task Task, samp
 		snap.Error = joinError(snap.Error, "record: "+err.Error())
 	}
 	res.Snapshot = &snap
+}
+
+// checkoutSnapshots reads each checkout the run worked in other than
+// the tree at cwd through Runner.CheckoutSnapshot, when it is set, as
+// snapshot reads that tree: the checkouts are those the last env entry
+// on the run's path that carries a checkouts member lists, "." left
+// out, and each snapshot takes its checkout's Path and is appended
+// after the run's last entry.
+func (r *Runner) checkoutSnapshots(ctx context.Context, s *agentsession.Session, task Task, sample int, res *Result) {
+	if r.CheckoutSnapshot == nil {
+		return
+	}
+	env := checkoutsInForce(s.Path(res.Target))
+	if env == nil {
+		return
+	}
+	for _, c := range env.Checkouts {
+		if c.Path == "." {
+			continue
+		}
+		snap, err := r.CheckoutSnapshot(ctx, task, c)
+		if err != nil {
+			snap = Snapshot{Error: err.Error()}
+		}
+		snap.Path = c.Path
+		snap = snap.sealed()
+		entry, err := newSnapshot(snap, res.Target, task.ID, sample)
+		if err == nil {
+			_, err = r.Store.Append(ctx, s.ID(), entry)
+		}
+		if err != nil {
+			snap.Error = joinError(snap.Error, "record: "+err.Error())
+		}
+		res.CheckoutSnapshots = append(res.CheckoutSnapshots, snap)
+	}
+}
+
+// checkoutsInForce returns the last env entry on path that carries a
+// checkouts member, nil when none does: an env entry without the member
+// says nothing of checkouts (RFC 0001, env), so the list in force is the
+// last one written.
+func checkoutsInForce(path []agentsession.Entry) *agentsession.EnvEntry {
+	for i := len(path) - 1; i >= 0; i-- {
+		if e, ok := path[i].(*agentsession.EnvEntry); ok && e.Checkouts != nil {
+			return e
+		}
+	}
+	return nil
 }
 
 // joinError adds msg to a snapshot's Error, on a line of its own.
@@ -770,8 +855,8 @@ func unboundFoldShape(u session.Unhashed) bool {
 // a custom entry carrying the suite, the task and its setup.
 //
 // The env entry restates the environment in force at the session's
-// leaf, its workspace, directory, VCS state and tools, with the
-// manifest as its files. A fork's leaf is its base's, and after the
+// leaf, its workspace, directory, VCS state, tools and checkouts, with
+// the manifest as its files. A fork's leaf is its base's, and after the
 // base's responses an env entry that named no workspace where the base
 // ran in one would read as a substitution, which a strict replay
 // refuses.
@@ -784,6 +869,12 @@ func (r *Runner) describe(ctx context.Context, s *agentsession.Session, suite *S
 		env := &agentsession.EnvEntry{Files: &agentsession.FileHashes{Read: make(map[string]string, len(suite.Manifest.Files))}}
 		if prev := lastEnv(s); prev != nil {
 			env.CWD, env.VCS, env.Tools, env.Workspace = prev.CWD, prev.VCS, prev.Tools, prev.Workspace
+			// A list in form is repeated, as an env entry is a whole
+			// snapshot; one the decoder kept as written, which a 0.22
+			// writer may not append, is left out and says nothing.
+			if prev.Checkouts != nil {
+				env.Checkouts = slices.Clone(prev.Checkouts)
+			}
 		}
 		for p, h := range suite.Manifest.Files {
 			env.Files.Read[p] = h
@@ -876,7 +967,7 @@ func (r *Runner) judgeGroup(ctx context.Context, task Task, group []Result) {
 func (r *Runner) recordGroup(ctx context.Context, task Task, group []Result, judges []GroupJudge) {
 	members := make([]Member, len(group))
 	for k, res := range group {
-		members[k] = Member{Trajectory: res.trajectory, Scores: slices.Clone(res.Scores), Snapshot: res.Snapshot}
+		members[k] = Member{Trajectory: res.trajectory, Scores: slices.Clone(res.Scores), Snapshot: res.Snapshot, CheckoutSnapshots: res.CheckoutSnapshots}
 	}
 	for _, j := range judges {
 		scores, err := j.JudgeGroup(ctx, members, task)
@@ -1175,7 +1266,7 @@ func (r *Runner) storedMember(ctx context.Context, s *agentsession.Session, task
 	m.trajectory, m.judged = t, true
 	// A snapshot that fails its digest reaches the member with its
 	// Error saying so, as it reaches ResultAt's result.
-	m.Snapshot = snapshotAt(s, m.Target, task.ID, sample, true)
+	m.Snapshot, m.CheckoutSnapshots = snapshotsAt(s, m.Target, task.ID, sample, true)
 	cost := measure(ctx, r.Store, r.Cost, s, m.Target)
 	m.Usage, m.ModelCalls, m.CostUSD, m.Subagents = cost.usage, cost.calls, cost.cost, cost.delegated
 	return m, true

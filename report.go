@@ -113,7 +113,8 @@ func writeOptionsOf(opts []WriteOption) writeOptions {
 	return o
 }
 
-// WithoutSnapshotData writes each result's snapshot without its bytes:
+// WithoutSnapshotData writes each result's snapshots, the cwd one and
+// those of its other checkouts, without their bytes:
 // Base, Size, Digest and Error as they are, and Omitted the number of
 // bytes left out. A workspace's change
 // can be large, and the session already holds it, where [ResultAt]
@@ -125,15 +126,46 @@ func WithoutSnapshotData() WriteOption {
 
 // written is res as a report with options o writes it.
 func (o writeOptions) written(res *Result) *Result {
-	if !o.noSnapshotData || res == nil || res.Snapshot == nil || res.Snapshot.Data == nil {
+	if !o.noSnapshotData || res == nil || !holdsSnapshotData(res) {
 		return res
 	}
 	out := *res
-	snap := *res.Snapshot
+	if res.Snapshot != nil && res.Snapshot.Data != nil {
+		snap := withoutData(*res.Snapshot)
+		out.Snapshot = &snap
+	}
+	if res.CheckoutSnapshots != nil {
+		out.CheckoutSnapshots = make([]Snapshot, len(res.CheckoutSnapshots))
+		for i, s := range res.CheckoutSnapshots {
+			out.CheckoutSnapshots[i] = withoutData(s)
+		}
+	}
+	return &out
+}
+
+// holdsSnapshotData reports whether any of res's snapshots carries
+// bytes.
+func holdsSnapshotData(res *Result) bool {
+	if res.Snapshot != nil && res.Snapshot.Data != nil {
+		return true
+	}
+	for _, s := range res.CheckoutSnapshots {
+		if s.Data != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// withoutData is snap with its bytes left out and Omitted counting
+// them; one with no bytes is returned as it is.
+func withoutData(snap Snapshot) Snapshot {
+	if snap.Data == nil {
+		return snap
+	}
 	snap.Omitted = int64(len(snap.Data))
 	snap.Data = nil
-	out.Snapshot = &snap
-	return &out
+	return snap
 }
 
 // WriteJSON writes the report as indented JSON with a trailing newline.
