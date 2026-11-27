@@ -21,7 +21,22 @@ const SnapshotNS = "agenteval:snapshot"
 // often the change against the commit the task started from, as `git
 // add -A -N . && git diff --binary <base>` prints it, which a judge
 // applies to Base in a fresh workspace.
+//
+// A run whose tools worked in more than the tree at its env entry's
+// cwd, as one that made a git worktree does, records the checkouts it
+// worked in on its env entries (RFC 0001, env, checkouts, since 0.22),
+// and a product keeps one snapshot per checkout, each naming its
+// checkout by Path. A snapshot with no Path is of the tree at cwd, as
+// every snapshot written before Path existed is read.
 type Snapshot struct {
+	// Path is the checkout the snapshot is of, as the run's env entry
+	// names it in checkouts: relative to cwd, or absolute. Empty is the
+	// tree at cwd, which "." also names; a snapshot is kept with "."
+	// written as empty, so the two read as one. The library does not
+	// read the checkout; a product rebuilding a run's workspace applies
+	// each snapshot to the checkout its Path names, at the revision the
+	// run's env entry records for it.
+	Path string `json:"path,omitempty"`
 	// Data is the workspace's state in the product's own form. Empty is
 	// a snapshot of a workspace the run left as it found it, when the
 	// product's form says so, as an empty diff does.
@@ -62,11 +77,15 @@ type Snapshot struct {
 }
 
 // sealed returns the snapshot as it is kept: its digest set from Data,
-// or, for one whose Error is set, the error with its Base and Size,
-// Data and Digest dropped.
+// or, for one whose Error is set, the error with its Path, Base and
+// Size, Data and Digest dropped. A Path of "." is kept as empty, since
+// both name the tree at cwd.
 func (s Snapshot) sealed() Snapshot {
+	if s.Path == "." {
+		s.Path = ""
+	}
 	if s.Error != "" {
-		return Snapshot{Base: s.Base, Size: s.Size, Error: s.Error}
+		return Snapshot{Path: s.Path, Base: s.Base, Size: s.Size, Error: s.Error}
 	}
 	s.Omitted = 0
 	s.Digest = agentsession.HashBytes(s.Data)
@@ -88,7 +107,11 @@ type SnapshotRecord struct {
 // whose last entry is target, for task, in [SnapshotNS] with its digest
 // set from Data. The entry is not appended. A harness that runs the
 // agent itself, and writes its scores with [NewOutcome], appends it to
-// the run's session after target, where [ResultAt] reads it back.
+// the run's session after target, where [ResultAt] reads it back. A
+// run that worked in several checkouts gets one entry per checkout,
+// each snapshot's Path naming its checkout as the run's env entry
+// does; [ResultAt] reads the one with no Path into [Result.Snapshot]
+// and the rest into [Result.CheckoutSnapshots].
 func NewSnapshot(snap Snapshot, target, task string) (*agentsession.CustomEntry, error) {
 	return newSnapshot(snap, target, task, 0)
 }
@@ -116,12 +139,17 @@ func ReadSnapshot(e *agentsession.CustomEntry) (SnapshotRecord, bool) {
 	return rec, true
 }
 
-// snapshotAt returns the last snapshot the session holds of the run
-// whose last entry is target, for task and sample when matchTask is
-// set, or nil when it holds none. A snapshot whose bytes do not hash to
-// its digest is returned as recorded, its Error saying so.
-func snapshotAt(s *agentsession.Session, target, task string, sample int, matchTask bool) *Snapshot {
-	var found *Snapshot
+// snapshotsAt reads every snapshot the session holds of the run whose
+// last entry is target, for task and sample when matchTask is set: the
+// last of the tree at cwd, one with no Path or ".", as every snapshot
+// written before Path existed is, nil when it holds none; and the last
+// of each other checkout by Path, in the order each Path was first
+// written, nil when it holds none. A snapshot whose bytes do not hash
+// to its digest is returned as recorded, its Error saying so.
+func snapshotsAt(s *agentsession.Session, target, task string, sample int, matchTask bool) (*Snapshot, []Snapshot) {
+	var cwd *Snapshot
+	var others []Snapshot
+	at := map[string]int{}
 	for _, e := range s.Entries() {
 		c, ok := e.(*agentsession.CustomEntry)
 		if !ok {
@@ -131,19 +159,66 @@ func snapshotAt(s *agentsession.Session, target, task string, sample int, matchT
 		if !ok || rec.Target != target || matchTask && (rec.Task != task || rec.Sample != sample) {
 			continue
 		}
-		found = &rec.Snapshot
+		snap := rec.Snapshot
+		if snap.Path == "" || snap.Path == "." {
+			snap.Path = ""
+			cwd = &snap
+			continue
+		}
+		if i, seen := at[snap.Path]; seen {
+			others[i] = snap
+			continue
+		}
+		at[snap.Path] = len(others)
+		others = append(others, snap)
 	}
-	if found == nil || found.Error != "" {
-		return found
+	if cwd != nil {
+		checkDigest(cwd)
 	}
-	if got := agentsession.HashBytes(found.Data); got != found.Digest {
-		found.Error = fmt.Sprintf("digest: data hashes to %s, not its digest %s", got, found.Digest)
+	for i := range others {
+		checkDigest(&others[i])
 	}
-	return found
+	return cwd, others
+}
+
+// checkDigest sets the Error of a snapshot whose bytes do not hash to
+// its recorded digest, leaving the record as it was.
+func checkDigest(snap *Snapshot) {
+	if snap.Error != "" {
+		return
+	}
+	if got := agentsession.HashBytes(snap.Data); got != snap.Digest {
+		snap.Error = fmt.Sprintf("digest: data hashes to %s, not its digest %s", got, snap.Digest)
+	}
 }
 
 // snapshotKey is the context key a judge reads the run's snapshot by.
 type snapshotKey struct{}
+
+// checkoutSnapshotsKey is the context key a judge reads the snapshots
+// of the run's other checkouts by.
+type checkoutSnapshotsKey struct{}
+
+// CheckoutSnapshotsFrom returns the snapshots of the checkouts the run
+// worked in other than the tree at cwd, as [Runner.CheckoutSnapshot]
+// took them, one per checkout by Path: the runner calls each judge with
+// a context carrying them. It reports false when there are none. A
+// group judge reads each run's on [Member.CheckoutSnapshots]. The
+// snapshots are the result's; a judge reads them and does not change
+// them.
+func CheckoutSnapshotsFrom(ctx context.Context) ([]Snapshot, bool) {
+	s, ok := ctx.Value(checkoutSnapshotsKey{}).([]Snapshot)
+	return s, ok && len(s) > 0
+}
+
+// withCheckoutSnapshots returns ctx carrying snaps for the judges, or
+// ctx itself when there are none.
+func withCheckoutSnapshots(ctx context.Context, snaps []Snapshot) context.Context {
+	if len(snaps) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, checkoutSnapshotsKey{}, snaps)
+}
 
 // SnapshotFrom returns the snapshot of the run a judge is judging, as
 // [Runner.Snapshot] took it, when the runner took one: the runner

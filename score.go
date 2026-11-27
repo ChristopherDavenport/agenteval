@@ -72,13 +72,16 @@ type GroupJudge interface {
 }
 
 // Member is one sample of a group: its trajectory, what the runner's
-// judges said of it, and the workspace it left when [Runner.Snapshot]
-// read one, nil otherwise. The snapshot is the member's result's; a
-// group judge reads it and does not change it.
+// judges said of it, the workspace it left when [Runner.Snapshot]
+// read one, nil otherwise, and the snapshots of the other checkouts it
+// worked in ([Result.CheckoutSnapshots]). The snapshots are the
+// member's result's; a group judge reads them and does not change
+// them.
 type Member struct {
-	Trajectory export.Trajectory
-	Scores     []Score
-	Snapshot   *Snapshot
+	Trajectory        export.Trajectory
+	Scores            []Score
+	Snapshot          *Snapshot
+	CheckoutSnapshots []Snapshot
 }
 
 // GroupJudgeFunc adapts a function to GroupJudge.

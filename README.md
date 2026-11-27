@@ -85,6 +85,22 @@ r.Snapshot = func(ctx context.Context, t agenteval.Task) (agenteval.Snapshot, er
 }
 ```
 
+A run whose tools worked in more than the tree at its working directory,
+as one that made a git worktree does, lists the checkouts it worked in
+on its `env` entries (agentsession format 0.22, `checkouts`).
+`CheckoutSnapshot` is called once for each of them but `.`, which
+`Snapshot` takes, with the checkout as the run recorded it, so the
+product reads it by its path and knows the revision the run left it on.
+Each snapshot is named by its `Path`, kept on
+`Result.CheckoutSnapshots` beside the cwd one on `Result.Snapshot`,
+appended as its own `agenteval:snapshot` entry and read back by
+`ResultAt`; a judge reads them with `CheckoutSnapshotsFrom(ctx)`. A
+harness that runs the agent itself writes one `NewSnapshot` per
+checkout with `Path` set. A snapshot with no `Path` is the tree at the
+working directory, as every snapshot written before is read. Rebuilding
+a run's workspace is the product's: apply each snapshot to the checkout
+its `Path` names, at the revision the run's `env` entry records for it.
+
 ## Replay
 
 `replay.NewModel` serves a recorded session's model calls in path

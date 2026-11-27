@@ -261,6 +261,9 @@ type Runner struct {
     // Snapshot reads the workspace a run left, once per run, after it
     // ends and before its judges (#73).
     Snapshot func(context.Context, Task) (Snapshot, error)
+    // CheckoutSnapshot reads each other checkout the run's env entries
+    // list (agentsession format 0.22), as Snapshot reads the tree at cwd.
+    CheckoutSnapshot func(context.Context, Task, agentsession.Checkout) (Snapshot, error)
 }
 
 type Result struct {
@@ -273,6 +276,7 @@ type Result struct {
     Usage     openresponses.Usage
     CostUSD   *float64           // when Cost is set and priced every call
     Snapshot  *Snapshot          // the workspace the run left, when Runner.Snapshot is set
+    CheckoutSnapshots []Snapshot // its other checkouts, one per Path, when Runner.CheckoutSnapshot is set
     Scores    []Score
     Ends      []*agentturn.RunEnd // in memory only
     Err       error
@@ -317,6 +321,22 @@ alone, recorded the same way, and so is a failure to append the entry
 failed and which a harness reruns on, so the run is judged and counted
 as it would have been. The bytes are kept inline in the entry,
 in every session's media form.
+
+A run whose tools worked in several checkouts, a worktree it made or a
+repository below its working directory, records them in its `env`
+entries' `checkouts` (agentsession format 0.22). A snapshot names the
+checkout it is of by `Path`, as the env entry names it; no `Path`, or
+`.`, is the tree at cwd, which every snapshot written before reads as.
+`CheckoutSnapshot` is called once per checkout the last env entry on
+the run's path that carries the member lists, `.` left to `Snapshot`,
+and each snapshot is kept on `Result.CheckoutSnapshots` and appended
+as its own entry; `ResultAt` reads the last of each `Path` back, and
+judges read them with `CheckoutSnapshotsFrom` and
+`Member.CheckoutSnapshots`. The library still does not rebuild a
+workspace: a product replaying a run applies each snapshot to the
+checkout its `Path` names, at the revision the env entry records. The
+runner's manifest `env` entry repeats the checkouts in force, as it
+repeats the workspace, since an `env` entry is a whole snapshot.
 
 A task whose run failed, because the loop or `Answer` returned an
 error, is not judged: its result keeps the error and has no scores,

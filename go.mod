@@ -3,7 +3,7 @@ module github.com/ChristopherDavenport/agenteval
 go 1.25.0
 
 require (
-	github.com/ChristopherDavenport/agentsession v0.0.39
+	github.com/ChristopherDavenport/agentsession v0.0.42
 	github.com/ChristopherDavenport/agenttool v0.0.30
 	github.com/ChristopherDavenport/agentturn v0.0.40
 	github.com/ChristopherDavenport/agentturn/session v0.0.40

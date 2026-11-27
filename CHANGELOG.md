@@ -5,6 +5,52 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+### Added
+
+- `Snapshot.Path`, the checkout a snapshot is of, as a run's `env`
+  entry names it in `checkouts` (agentsession format 0.22): relative to
+  the working directory, or absolute. No `Path`, or `.`, is the tree at
+  the working directory, which every snapshot written before reads as;
+  `.` is kept as empty.
+- `Runner.CheckoutSnapshot`, an optional hook called once for each
+  checkout the last `env` entry on the run's path that carries
+  `checkouts` lists, `.` left to `Snapshot`, with the checkout as
+  recorded: its path, repository, revision, branch and upstream. The
+  runner sets each snapshot's `Path` from the checkout, keeps it on the
+  new `Result.CheckoutSnapshots` and appends it to the session as its
+  own `agenteval:snapshot` entry, after the cwd one. A hook's error is
+  that snapshot's `Error`, never `Result.Err`. A run whose `env`
+  entries list no checkouts calls it never.
+- `Result.CheckoutSnapshots` and `Member.CheckoutSnapshots`, one
+  snapshot per checkout by `Path`, beside `Snapshot`, which stays the
+  tree at the working directory. `ResultAt` and the stored members a
+  group judge reads take the last snapshot of each `Path` back, in the
+  order each was first written, each checked against its digest.
+- `CheckoutSnapshotsFrom(ctx)`, the checkout snapshots of the run a
+  judge is judging.
+- A harness that runs the agent itself writes one `NewSnapshot` per
+  checkout with `Path` set.
+
+### Changed
+
+- `WithoutSnapshotData` leaves the bytes of the checkout snapshots out
+  too, with `Omitted` counting them.
+- The manifest `env` entry the runner writes before a run repeats the
+  checkouts in force at the session's leaf, as it repeats the
+  workspace, the directory, the VCS state and the tools, since an `env`
+  entry is a whole snapshot.
+
+### Dependencies
+
+- agentsession v0.0.39 to v0.0.42, in the root module, `harbor` and
+  `cmd/agenteval`. agentsession v0.0.42 is format 0.22, so the runner
+  records `agentsession/0.22`, appending an outcome raises a session it
+  judges to 0.22, and agentsession v0.0.41 and earlier refuse those
+  files. The fixtures under `testdata/sessions` are re-recorded at
+  0.22; apart from hashes and random IDs they are unchanged.
+
 ## v0.0.17 - 2026-11-15
 
 ### Added
